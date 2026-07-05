@@ -543,6 +543,7 @@
         <div><label for="loginPassword">密码</label><input id="loginPassword" type="password" required placeholder="请输入密码" /></div>
         <label class="remember-row"><input id="rememberLogin" type="checkbox" />记住用户名、账号和密码（仅此设备）</label>
         <button class="btn" type="submit">登录</button>
+        <button class="btn secondary" id="offlineLoginBtn" type="button">离线进入</button>
       </div>
     </form>
   </div>
@@ -968,6 +969,14 @@
           alert(error.message || "登录失败");
           console.error(error);
         }
+      });
+      document.getElementById("offlineLoginBtn").addEventListener("click", () => {
+        const name = document.getElementById("loginName").value.trim() || "用户";
+        state.user = { name, account: "离线模式", offline: true };
+        saveState();
+        renderUser();
+        loginScreen.classList.remove("active");
+        setSyncLoading(false, "当前为离线模式，数据仅保存在这台设备上");
       });
       document.getElementById("logoutBtn").addEventListener("click", () => {
         state.user = null;
