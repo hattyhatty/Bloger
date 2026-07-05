@@ -1,0 +1,1273 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>用户的工作台</title>
+  <style>
+    :root {
+      --bg: #fff7fa;
+      --panel: #ffffff;
+      --ink: #34242b;
+      --muted: #8d6f7b;
+      --line: #f2d9e3;
+      --brand: #e875a2;
+      --brand-strong: #cf4f87;
+      --soft: #fff0f6;
+      --soft-2: #fff8fb;
+      --gold: #b98131;
+      --shadow: 0 18px 48px rgba(214, 101, 145, .15);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, #ffe1ee 0, transparent 30%),
+        linear-gradient(180deg, #fffafc 0%, var(--bg) 100%);
+    }
+
+    button, input, textarea, select { font: inherit; }
+    button { border: 0; cursor: pointer; }
+
+    .login-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: none;
+      place-items: center;
+      padding: 20px;
+      background: linear-gradient(135deg, #fff7fa, #ffe8f1);
+    }
+
+    .login-screen.active { display: grid; }
+
+    .login-card {
+      width: min(420px, 100%);
+      padding: 28px;
+      border: 1px solid rgba(232, 117, 162, .22);
+      border-radius: 28px;
+      background: rgba(255,255,255,.86);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .login-card h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: 0;
+    }
+
+    .login-card p {
+      margin: 8px 0 22px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .login-form {
+      display: grid;
+      gap: 14px;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 20px 16px;
+      background: rgba(255, 255, 255, .86);
+      border-right: 1px solid var(--line);
+      box-shadow: 12px 0 36px rgba(232, 117, 162, .08);
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      backdrop-filter: blur(18px);
+      z-index: 10;
+    }
+
+    .brand {
+      padding: 8px 8px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .brand p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .mobile-top {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.88);
+      position: sticky;
+      top: 0;
+      z-index: 9;
+      backdrop-filter: blur(16px);
+    }
+
+    .menu-btn {
+      width: 42px;
+      height: 42px;
+      border-radius: 14px;
+      background: var(--soft);
+      color: var(--brand-strong);
+      border: 1px solid var(--line);
+      font-size: 20px;
+    }
+
+    .nav {
+      display: grid;
+      gap: 7px;
+    }
+
+    .nav button {
+      width: 100%;
+      min-height: 46px;
+      display: grid;
+      grid-template-columns: 30px 1fr;
+      align-items: center;
+      gap: 9px;
+      padding: 10px 12px;
+      border-radius: 16px;
+      background: transparent;
+      color: #7a5d68;
+      text-align: left;
+    }
+
+    .nav button:hover,
+    .nav button.active {
+      background: #ffeaf3;
+      color: var(--brand-strong);
+    }
+
+    .icon {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      background: #fff2f7;
+      color: var(--brand-strong);
+      font-size: 15px;
+    }
+
+    .user-panel {
+      margin-top: auto;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff8fb;
+      display: grid;
+      gap: 10px;
+    }
+
+    .user-name {
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .user-role {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    main {
+      min-width: 0;
+      padding: 26px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .title h2 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    .title p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      min-height: 42px;
+      padding: 10px 14px;
+      border-radius: 15px;
+      background: linear-gradient(135deg, var(--brand), var(--brand-strong));
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      white-space: nowrap;
+      box-shadow: 0 10px 22px rgba(207, 79, 135, .18);
+    }
+
+    .btn.secondary {
+      background: var(--panel);
+      color: var(--ink);
+      border: 1px solid var(--line);
+      box-shadow: none;
+    }
+
+    .btn.syncing::before {
+      content: "";
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255,255,255,.55);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .sync-note {
+      color: var(--muted);
+      font-size: 12px;
+      min-height: 18px;
+      width: 100%;
+      text-align: right;
+    }
+
+    .section { display: none; }
+    .section.active { display: block; }
+
+    .grid { display: grid; gap: 16px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .card {
+      background: rgba(255,255,255,.92);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 18px;
+    }
+
+    .card h3 {
+      margin: 0 0 14px;
+      font-size: 18px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .tab {
+      min-height: 38px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: #fff;
+      border: 1px solid var(--line);
+      color: var(--muted);
+    }
+
+    .tab.active {
+      background: #ffe6f0;
+      color: var(--brand-strong);
+      border-color: #f4bad1;
+    }
+
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      color: var(--ink);
+      padding: 11px 12px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 126px;
+      resize: vertical;
+      line-height: 1.55;
+    }
+
+    input:focus, textarea:focus, select:focus {
+      border-color: #e889af;
+      box-shadow: 0 0 0 4px rgba(232,117,162,.14);
+    }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) 150px auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 12px;
+    }
+
+    .list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fff;
+    }
+
+    .item strong {
+      display: block;
+      overflow-wrap: anywhere;
+      line-height: 1.35;
+    }
+
+    .meta {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: var(--soft);
+      color: var(--brand-strong);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .badge.gold {
+      background: #fff6e4;
+      color: var(--gold);
+    }
+
+    .mini {
+      width: 36px;
+      height: 36px;
+      border-radius: 13px;
+      background: #fff4f8;
+      color: var(--brand-strong);
+      border: 1px solid var(--line);
+    }
+
+    .idea-board {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 16px;
+    }
+
+    .source-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .source-grid .field-wide { grid-column: span 2; }
+
+    .empty {
+      padding: 18px;
+      border: 1px dashed #edbad0;
+      border-radius: 16px;
+      color: var(--muted);
+      background: #fffafd;
+      text-align: center;
+      line-height: 1.5;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .stat {
+      padding: 16px;
+      border-radius: var(--radius);
+      background: #fff;
+      border: 1px solid var(--line);
+      box-shadow: 0 10px 24px rgba(232, 117, 162, .09);
+    }
+
+    .stat b {
+      display: block;
+      font-size: 28px;
+      line-height: 1;
+      margin-bottom: 7px;
+      color: var(--brand-strong);
+    }
+
+    .stat span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .hidden-file { display: none; }
+    .overlay { display: none; }
+
+    .editor-actions {
+      display: flex;
+      gap: 10px;
+      align-items: end;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+
+    .editor-actions > div { min-width: 180px; flex: 1; }
+    .editor-actions .btn { flex: 0 0 auto; }
+
+    .history-panel {
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+
+    .history-panel summary {
+      cursor: pointer;
+      color: var(--brand-strong);
+      font-weight: 700;
+    }
+
+    .history-content {
+      margin-top: 10px;
+      white-space: pre-wrap;
+      color: var(--ink);
+      line-height: 1.55;
+    }
+
+    .remember-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .remember-row input { width: 18px; height: 18px; }
+
+    @media (max-width: 920px) {
+      .app { display: block; }
+      .mobile-top { display: flex; }
+      .sidebar {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: min(320px, 86vw);
+        transform: translateX(-105%);
+        transition: transform .22s ease;
+      }
+      body.nav-open .sidebar { transform: translateX(0); }
+      .overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(52,36,43,.24);
+        z-index: 8;
+      }
+      body.nav-open .overlay { display: block; }
+      main { padding: 18px 14px 30px; }
+      .topbar, .idea-board { display: grid; }
+      .actions { justify-content: start; }
+      .sync-note { text-align: left; }
+      .grid.two, .grid.three, .stats, .source-grid { grid-template-columns: 1fr; }
+      .source-grid .field-wide { grid-column: auto; }
+      .form-row { grid-template-columns: 1fr; }
+      .item { grid-template-columns: 1fr; }
+      .title h2 { font-size: 25px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="login-screen" id="loginScreen">
+    <form class="login-card" id="loginForm">
+      <h1>用户的工作台</h1>
+      <p>登录后进入你的 AI 内容创作管理空间。</p>
+      <div class="login-form">
+        <div><label for="loginName">用户名</label><input id="loginName" required placeholder="例如：小夏" /></div>
+        <div><label for="loginAccount">账号邮箱</label><input id="loginAccount" type="email" required placeholder="用于多端同步的邮箱" /></div>
+        <div><label for="loginPassword">密码</label><input id="loginPassword" type="password" required placeholder="请输入密码" /></div>
+        <label class="remember-row"><input id="rememberLogin" type="checkbox" />记住用户名、账号和密码（仅此设备）</label>
+        <button class="btn" type="submit">登录</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="mobile-top">
+    <button class="menu-btn" id="menuBtn" aria-label="打开菜单">☰</button>
+    <strong>用户的工作台</strong>
+    <button class="btn secondary" id="mobileSyncBtn">同步</button>
+  </div>
+  <div class="overlay" id="overlay"></div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>用户的工作台</h1>
+        <p>选题、计划、写作、复盘和技能沉淀，集中在一个清爽空间。</p>
+      </div>
+      <nav class="nav" aria-label="主菜单">
+        <button class="active" data-section="dashboard"><span class="icon">⌂</span><span>今日总览</span></button>
+        <button data-section="plan"><span class="icon">✓</span><span>任务计划</span></button>
+        <button data-section="skills"><span class="icon">◇</span><span>Skills 管理</span></button>
+        <button data-section="admin"><span class="icon">⚙</span><span>后台管理</span></button>
+        <button data-section="entries"><span class="icon">↗</span><span>全部入口</span></button>
+        <button data-section="topics"><span class="icon">◎</span><span>选题合集库</span></button>
+        <button data-section="studio"><span class="icon">✎</span><span>写作室</span></button>
+        <button data-section="review"><span class="icon">↺</span><span>经验复盘</span></button>
+      </nav>
+      <div class="user-panel">
+        <div>
+          <div class="user-name" id="sidebarUserName">用户</div>
+          <div class="user-role">用户</div>
+        </div>
+        <button class="btn secondary" id="logoutBtn">退出登录</button>
+      </div>
+    </aside>
+
+    <main>
+      <div class="topbar">
+        <div class="title">
+          <h2 id="page-title">今日总览</h2>
+          <p id="page-subtitle">你的 AI 内容生产指挥台：从灵感到发布，再到复盘。</p>
+        </div>
+        <div class="actions">
+          <button class="btn" id="syncBtn">同步</button>
+          <button class="btn secondary" id="exportBtn">导出数据</button>
+          <button class="btn secondary" id="importBtn">导入数据</button>
+          <input class="hidden-file" id="importFile" type="file" accept="application/json" />
+          <div class="sync-note" id="syncNote"></div>
+        </div>
+      </div>
+
+      <section class="section active" id="dashboard">
+        <div class="stats">
+          <div class="stat"><b id="statTasks">0</b><span>任务</span></div>
+          <div class="stat"><b id="statTopics">0</b><span>选题</span></div>
+          <div class="stat"><b id="statSkills">0</b><span>Skills</span></div>
+          <div class="stat"><b id="statEntries">0</b><span>入口</span></div>
+        </div>
+        <div class="grid two">
+          <div class="card">
+            <h3>今天先抓什么</h3>
+            <textarea data-store="todayFocus" placeholder="例如：刷 X / Reddit / YouTube 的 AI 爆款，筛 3 个中文化角度，写 1 条短视频脚本。"></textarea>
+            <div class="editor-actions"><div><label for="todayFocusDate">日期</label><input id="todayFocusDate" type="date" /></div><button class="btn" data-save-history="todayFocus">保存今日记录</button></div>
+            <div class="history-panel"><strong>历史记录</strong><div class="list" id="todayFocusHistory"></div></div>
+          </div>
+          <div class="card">
+            <h3>新增入口模块</h3>
+            <div class="list">
+              <div class="item"><strong>素材版权与来源记录</strong><span class="badge">已加入</span></div>
+              <div class="item"><strong>发布日历与平台适配</strong><span class="badge">已加入</span></div>
+              <div class="item"><strong>账号数据看板</strong><span class="badge">已加入</span></div>
+              <div class="item"><strong>Prompt / 模板库</strong><span class="badge gold">已加入</span></div>
+              <div class="item"><strong>选题评分机制</strong><span class="badge gold">已加入</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="plan">
+        <div class="tabs" data-tabs="planTabs">
+          <button class="tab active" data-tab="plans">我的计划</button>
+          <button class="tab" data-tab="tasks">任务管理</button>
+        </div>
+        <div data-tab-panel="plans">
+          <div class="grid three">
+            <div class="card"><h3>日计划</h3><textarea data-store="planDay" placeholder="今天必须完成的 1-3 件事"></textarea><div class="editor-actions"><div><label>计划日期</label><input id="planDayDate" type="date" /></div><button class="btn" data-save-history="planDay">保存</button></div></div>
+            <div class="card"><h3>周计划</h3><textarea data-store="planWeek" placeholder="本周选题、拍摄、发布、复盘安排"></textarea><div class="editor-actions"><div><label>开始日期</label><input id="planWeekStart" type="date" /></div><div><label>结束日期</label><input id="planWeekEnd" type="date" /></div><button class="btn" data-save-history="planWeek">保存</button></div></div>
+            <div class="card"><h3>月计划</h3><textarea data-store="planMonth" placeholder="本月内容主题、增长目标、学习目标"></textarea><div class="editor-actions"><div><label>计划月份</label><input id="planMonthDate" type="month" /></div><button class="btn" data-save-history="planMonth">保存</button></div></div>
+            <div class="card"><h3>季度计划</h3><textarea data-store="planQuarter" placeholder="季度栏目、商业化、能力建设"></textarea><div class="editor-actions"><div><label>开始日期</label><input id="planQuarterStart" type="date" /></div><div><label>结束日期</label><input id="planQuarterEnd" type="date" /></div><button class="btn" data-save-history="planQuarter">保存</button></div></div>
+            <div class="card"><h3>年计划</h3><textarea data-store="planYear" placeholder="年度定位、作品数量、账号目标"></textarea><div class="editor-actions"><div><label>计划年份</label><input id="planYearDate" type="number" min="2020" max="2100" /></div><button class="btn" data-save-history="planYear">保存</button></div></div>
+          </div>
+          <div class="card" style="margin-top:16px"><h3>计划历史记录</h3><div class="list" id="planHistory"></div></div>
+        </div>
+        <div data-tab-panel="tasks" hidden>
+          <div class="card">
+            <h3>新增任务</h3>
+            <div class="form-row">
+              <div><label for="taskText">任务内容</label><input id="taskText" placeholder="例如：整理 Claude Code 爆款视频的中文脚本" /></div>
+              <div><label for="taskStatus">状态</label><select id="taskStatus"><option>待办</option><option>进行中</option><option>已完成</option></select></div>
+              <button class="btn" id="addTask">添加</button>
+            </div>
+            <div class="list" id="taskList"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="skills">
+        <div class="card">
+          <h3>Skills 管理</h3>
+          <div class="form-row">
+            <div><label for="skillName">Skill 名称</label><input id="skillName" placeholder="例如：爆款选题分析 Skill" /></div>
+            <div><label for="skillType">来源</label><select id="skillType"><option>自制</option><option>他人</option><option>待研究</option></select></div>
+            <button class="btn" id="addSkill">记录</button>
+          </div>
+          <textarea id="skillNote" placeholder="用途、触发场景、链接、版本、需要改进的地方"></textarea>
+          <div class="list" id="skillList"></div>
+        </div>
+      </section>
+
+      <section class="section" id="admin">
+        <div class="grid two">
+          <div class="card"><h3>后台管理</h3><textarea data-store="adminNotes" placeholder="账号定位、栏目结构、SOP、团队分工、素材路径、常用工具等。"></textarea><div class="editor-actions"><div><label>记录日期</label><input id="adminNotesDate" type="date" /></div><button class="btn" data-save-history="adminNotes">保存记录</button></div></div>
+          <div class="card"><h3>平台档案</h3><textarea data-store="platformProfile" placeholder="抖音：标题风格、封面规则、发布时间；小红书：笔记结构、标签、评论区策略。"></textarea><div class="editor-actions"><div><label>记录日期</label><input id="platformProfileDate" type="date" /></div><button class="btn" data-save-history="platformProfile">保存记录</button></div></div>
+        </div>
+        <div class="card" style="margin-top:16px"><h3>后台管理历史</h3><div class="list" id="adminHistory"></div></div>
+      </section>
+
+      <section class="section" id="entries">
+        <div class="card">
+          <h3>全部入口</h3>
+          <div class="form-row">
+            <div><label for="entryName">入口名称</label><input id="entryName" placeholder="例如：YouTube 选题池" /></div>
+            <div><label for="entryUrl">链接或位置</label><input id="entryUrl" placeholder="https:// 或本地路径" /></div>
+            <button class="btn" id="addEntry">添加</button>
+          </div>
+          <div class="list" id="entryList"></div>
+        </div>
+      </section>
+
+      <section class="section" id="topics">
+        <div class="card">
+          <h3>选题合集库</h3>
+          <div class="source-grid">
+            <div><label for="topicPlatform">平台</label><select id="topicPlatform"><option>X</option><option>Reddit</option><option>YouTube</option><option>其他</option></select></div>
+            <div class="field-wide"><label for="topicTitle">选题标题</label><input id="topicTitle" placeholder="例如：某 AI Agent 工具爆火的真实原因" /></div>
+            <div><label for="topicHeat">热度</label><select id="topicHeat"><option>高</option><option>中</option><option>低</option></select></div>
+            <div class="field-wide"><label for="topicLink">来源链接</label><input id="topicLink" placeholder="原视频、帖子或评论区链接" /></div>
+            <div class="field-wide"><label for="topicAngle">中文化角度</label><input id="topicAngle" placeholder="给中文用户的解释、案例或观点" /></div>
+          </div>
+          <div style="margin-top:12px"><button class="btn" id="addTopic">收入选题库</button></div>
+          <div class="list" id="topicList"></div>
+        </div>
+      </section>
+
+      <section class="section" id="studio">
+        <div class="idea-board">
+          <div class="card"><h3>写作室</h3><textarea data-store="writingRoom" placeholder="写下你的观点、脚本草稿、标题、开头 3 秒钩子、评论区引导。"></textarea><div class="editor-actions"><div><label>标题</label><input id="writingRoomTitle" placeholder="这篇内容的标题" /></div><div><label>日期</label><input id="writingRoomDate" type="date" /></div><button class="btn" data-save-history="writingRoom">保存文章</button></div></div>
+          <div class="card"><h3>脚本结构</h3><textarea data-store="scriptTemplate" placeholder="钩子：&#10;背景：&#10;核心解释：&#10;中文用户案例：&#10;结尾行动："></textarea><div class="editor-actions"><div><label>标题</label><input id="scriptTemplateTitle" placeholder="脚本名称" /></div><div><label>日期</label><input id="scriptTemplateDate" type="date" /></div><button class="btn" data-save-history="scriptTemplate">保存脚本</button></div></div>
+        </div>
+        <div class="card" style="margin-top:16px"><h3>写作历史</h3><div class="list" id="studioHistory"></div></div>
+      </section>
+
+      <section class="section" id="review">
+        <div class="grid two">
+          <div class="card"><h3>经验复盘</h3><textarea data-store="reviewNotes" placeholder="哪些选题爆了？为什么？哪些翻译/改写方式更适合中文平台？"></textarea></div>
+          <div class="card"><h3>下次优化</h3><textarea data-store="nextActions" placeholder="保留什么、停止什么、尝试什么。"></textarea></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const STORAGE_KEY = "ai_creator_workbench_v2";
+    const OLD_STORAGE_KEY = "ai_creator_workbench_v1";
+    const REMEMBER_LOGIN_KEY = "ai_creator_workbench_login";
+    const SUPABASE_URL = "https://luqvozkjtutrrjyseuoe.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx1cXZvemtqdHV0cnJqeXNldW9lIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI5MjE3MjcsImV4cCI6MjA5ODQ5NzcyN30.HwnqOriQun1J7sNVPqkiCSJdsBqUh-AVgHml-hWjWd0";
+    const SUPABASE_TABLE = "workbench_sync";
+    const defaultEntries = [
+      { name: "素材版权与来源记录", url: "入口：记录原始链接、作者、发布时间、授权状态" },
+      { name: "发布日历与平台适配", url: "入口：管理抖音 / 小红书标题、封面、标签、发布时间" },
+      { name: "账号数据看板", url: "入口：记录播放、完播、点赞、收藏、评论、转粉" },
+      { name: "Prompt / 模板库", url: "入口：沉淀翻译、总结、脚本、标题、评论区模板" },
+      { name: "选题评分机制", url: "入口：按热度、时效、中文价值、可视化难度评分" }
+    ];
+    const initialState = {
+      user: null,
+      lists: { tasks: [], skills: [], entries: [], topics: [], history: [] },
+      fields: {}
+    };
+    let state = loadState();
+    seedDefaultEntries();
+
+    const pageMeta = {
+      dashboard: ["今日总览", "你的 AI 内容生产指挥台：从灵感到发布，再到复盘。"],
+      plan: ["任务计划", "拆解日、周、月、季度、年度目标，并跟踪每条任务状态。"],
+      skills: ["Skills 管理", "记录自制和外部 Skills，沉淀你的个人 AI 工作流。"],
+      admin: ["后台管理", "管理账号定位、平台档案、SOP 和常用后台信息。"],
+      entries: ["全部入口", "把未来新增页面、工具、资料入口集中归档。"],
+      topics: ["选题合集库", "收集 X、Reddit、YouTube 上的 AI 爆款内容和中文化角度。"],
+      studio: ["写作室", "放下你的想法、脚本、标题和短视频表达结构。"],
+      review: ["经验复盘", "把发布后的数据、经验和下一步动作沉淀下来。"]
+    };
+
+    function loadState() {
+      try {
+        const next = JSON.parse(localStorage.getItem(STORAGE_KEY) || localStorage.getItem(OLD_STORAGE_KEY));
+        return normalizeState(next || structuredClone(initialState));
+      } catch {
+        return structuredClone(initialState);
+      }
+    }
+
+    function normalizeState(next) {
+      return {
+        user: next.user || null,
+        lists: {
+          tasks: next.lists?.tasks || [],
+          skills: next.lists?.skills || [],
+          entries: next.lists?.entries || [],
+          topics: next.lists?.topics || [],
+          history: next.lists?.history || []
+        },
+        fields: next.fields || {}
+      };
+    }
+
+    function saveState() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      renderStats();
+    }
+
+    function seedDefaultEntries() {
+      const existing = new Set(state.lists.entries.map(item => item.name));
+      defaultEntries.forEach(item => {
+        if (!existing.has(item.name)) {
+          state.lists.entries.push({ id: crypto.randomUUID(), createdAt: "系统默认入口", ...item, pinned: true });
+        }
+      });
+      saveState();
+    }
+
+    function stamp() {
+      return new Date().toLocaleString("zh-CN", { hour12: false });
+    }
+
+    function escapeHtml(value) {
+      return String(value || "").replace(/[&<>"']/g, char => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+      }[char]));
+    }
+
+    async function sha256(value) {
+      const bytes = new TextEncoder().encode(value);
+      const hashBuffer = await crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(hashBuffer)).map(byte => byte.toString(16).padStart(2, "0")).join("");
+    }
+
+    function cloudConfigured() {
+      return Boolean(SUPABASE_URL && SUPABASE_ANON_KEY && !SUPABASE_URL.includes("你的") && !SUPABASE_ANON_KEY.includes("你的"));
+    }
+
+    function cloudHeaders(extra = {}, accessToken = state.user?.accessToken) {
+      return {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+        ...extra
+      };
+    }
+
+    function setSyncLoading(isLoading, text) {
+      const syncButtons = [document.getElementById("syncBtn"), document.getElementById("mobileSyncBtn")];
+      syncButtons.forEach(item => item.classList.toggle("syncing", isLoading));
+      document.getElementById("syncNote").textContent = text || "";
+    }
+
+    function supabaseBaseUrl() {
+      return SUPABASE_URL.replace(/\/(?:rest|auth)\/v1\/?$/i, "").replace(/\/$/, "");
+    }
+
+    function syncUrl(query = "") {
+      return `${supabaseBaseUrl()}/rest/v1/${SUPABASE_TABLE}${query}`;
+    }
+
+    function authUrl(path) {
+      return `${supabaseBaseUrl()}/auth/v1/${path}`;
+    }
+
+    async function authenticateUser(name, account, password) {
+      const email = account.trim();
+      const signIn = await fetch(authUrl("token?grant_type=password"), {
+        method: "POST",
+        headers: cloudHeaders({}, SUPABASE_ANON_KEY),
+        body: JSON.stringify({ email, password })
+      });
+      if (signIn.ok) return await signIn.json();
+
+      const signUp = await fetch(authUrl("signup"), {
+        method: "POST",
+        headers: cloudHeaders({}, SUPABASE_ANON_KEY),
+        body: JSON.stringify({ email, password, data: { name } })
+      });
+      if (!signUp.ok) throw new Error(await signUp.text());
+      const created = await signUp.json();
+      if (created.access_token) return created;
+      throw new Error("账号已创建，但 Supabase 当前要求邮箱验证。请验证邮箱后重新登录，或在 Supabase 关闭 Confirm email。");
+    }
+
+    async function pullCloudData(options = {}) {
+      if (!cloudConfigured()) {
+        setSyncLoading(false, "云端未配置：请先在 HTML 中填写 Supabase URL 和 anon key");
+        return false;
+      }
+      if (!state.user?.userId || !state.user?.accessToken) {
+        setSyncLoading(false, "请用账号和密码重新登录后再同步");
+        return false;
+      }
+      if (!options.silent) setSyncLoading(true, "正在从云端读取...");
+      try {
+        const response = await fetch(syncUrl(`?user_id=eq.${encodeURIComponent(state.user.userId)}&select=data,updated_at&limit=1`), {
+          headers: cloudHeaders()
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const rows = await response.json();
+        if (rows.length && rows[0].data) {
+          const currentUser = state.user;
+          state = normalizeState(rows[0].data);
+          state.user = currentUser;
+          seedDefaultEntries();
+          saveState();
+          document.querySelectorAll("[data-store]").forEach(field => { field.value = state.fields[field.dataset.store] || ""; });
+          renderAllLists();
+          renderUser();
+          setSyncLoading(false, `已读取云端数据：${stamp()}`);
+          return true;
+        }
+        setSyncLoading(false, "云端暂无数据，先在本机编辑后点击同步");
+        return false;
+      } catch (error) {
+        setSyncLoading(false, "云端读取失败，请检查 Supabase 配置和网络");
+        console.error(error);
+        return false;
+      }
+    }
+
+    async function pushCloudData() {
+      if (!cloudConfigured()) {
+        setSyncLoading(false, "云端未配置：请先在 HTML 中填写 Supabase URL 和 anon key");
+        return false;
+      }
+      if (!state.user?.userId || !state.user?.accessToken) {
+        setSyncLoading(false, "请用账号和密码重新登录后再同步");
+        return false;
+      }
+      setSyncLoading(true, "正在同步到云端...");
+      try {
+        const payload = {
+          user_id: state.user.userId,
+          account: state.user.account,
+          user_name: state.user.name,
+          data: state,
+          updated_at: new Date().toISOString()
+        };
+        const response = await fetch(syncUrl(), {
+          method: "POST",
+          headers: cloudHeaders({ Prefer: "resolution=merge-duplicates,return=minimal" }),
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error(await response.text());
+        setSyncLoading(false, `已同步到云端：${stamp()}`);
+        return true;
+      } catch (error) {
+        setSyncLoading(false, "云端同步失败，请检查 Supabase 配置和数据表");
+        console.error(error);
+        return false;
+      }
+    }
+
+    function bindLogin() {
+      const loginScreen = document.getElementById("loginScreen");
+      try {
+        const remembered = JSON.parse(localStorage.getItem(REMEMBER_LOGIN_KEY) || "null");
+        if (remembered) {
+          document.getElementById("loginName").value = remembered.name || "";
+          document.getElementById("loginAccount").value = remembered.account || "";
+          document.getElementById("loginPassword").value = remembered.password || "";
+          document.getElementById("rememberLogin").checked = true;
+        }
+      } catch {}
+      if (!state.user) loginScreen.classList.add("active");
+      document.getElementById("loginForm").addEventListener("submit", async event => {
+        event.preventDefault();
+        const name = document.getElementById("loginName").value.trim();
+        const account = document.getElementById("loginAccount").value.trim();
+        const password = document.getElementById("loginPassword").value;
+        const remember = document.getElementById("rememberLogin").checked;
+        if (!cloudConfigured()) {
+          setSyncLoading(false, "云端未配置：请先在 HTML 中填写 Supabase URL 和 anon key");
+          return;
+        }
+        setSyncLoading(true, "正在登录云端账号...");
+        try {
+          const session = await authenticateUser(name, account, password);
+          if (remember) {
+            localStorage.setItem(REMEMBER_LOGIN_KEY, JSON.stringify({ name, account, password }));
+          } else {
+            localStorage.removeItem(REMEMBER_LOGIN_KEY);
+          }
+          state.user = {
+            name,
+            account,
+            userId: session.user.id,
+            accessToken: session.access_token,
+            refreshToken: session.refresh_token || ""
+          };
+          saveState();
+          renderUser();
+          loginScreen.classList.remove("active");
+          await pullCloudData();
+        } catch (error) {
+          setSyncLoading(false, "登录失败：请检查 Supabase 配置、邮箱账号和密码");
+          alert(error.message || "登录失败");
+          console.error(error);
+        }
+      });
+      document.getElementById("logoutBtn").addEventListener("click", () => {
+        state.user = null;
+        saveState();
+        renderUser();
+        loginScreen.classList.add("active");
+      });
+    }
+
+    function renderUser() {
+      document.getElementById("sidebarUserName").textContent = state.user?.name || "用户";
+    }
+
+    function bindNavigation() {
+      document.querySelectorAll(".nav button").forEach(button => {
+        button.addEventListener("click", () => {
+          const id = button.dataset.section;
+          document.querySelectorAll(".nav button").forEach(item => item.classList.toggle("active", item === button));
+          document.querySelectorAll(".section").forEach(section => section.classList.toggle("active", section.id === id));
+          document.getElementById("page-title").textContent = pageMeta[id][0];
+          document.getElementById("page-subtitle").textContent = pageMeta[id][1];
+          document.body.classList.remove("nav-open");
+        });
+      });
+      document.getElementById("menuBtn").addEventListener("click", () => document.body.classList.add("nav-open"));
+      document.getElementById("overlay").addEventListener("click", () => document.body.classList.remove("nav-open"));
+    }
+
+    function bindTabs() {
+      document.querySelectorAll("[data-tabs] .tab").forEach(tab => {
+        tab.addEventListener("click", () => {
+          const parent = tab.closest("[data-tabs]");
+          parent.querySelectorAll(".tab").forEach(item => item.classList.toggle("active", item === tab));
+          document.querySelectorAll("[data-tab-panel]").forEach(panel => {
+            panel.hidden = panel.dataset.tabPanel !== tab.dataset.tab;
+          });
+        });
+      });
+    }
+
+    function bindStoredFields() {
+      document.querySelectorAll("[data-store]").forEach(field => {
+        field.value = state.fields[field.dataset.store] || "";
+        field.addEventListener("input", () => {
+          state.fields[field.dataset.store] = field.value;
+          saveState();
+        });
+      });
+    }
+
+    const historyConfig = {
+      todayFocus: { title: "今天先抓什么", group: "today", dateIds: ["todayFocusDate"] },
+      planDay: { title: "日计划", group: "plan", dateIds: ["planDayDate"] },
+      planWeek: { title: "周计划", group: "plan", dateIds: ["planWeekStart", "planWeekEnd"] },
+      planMonth: { title: "月计划", group: "plan", dateIds: ["planMonthDate"] },
+      planQuarter: { title: "季度计划", group: "plan", dateIds: ["planQuarterStart", "planQuarterEnd"] },
+      planYear: { title: "年计划", group: "plan", dateIds: ["planYearDate"] },
+      adminNotes: { title: "后台管理", group: "admin", dateIds: ["adminNotesDate"] },
+      platformProfile: { title: "平台档案", group: "admin", dateIds: ["platformProfileDate"] },
+      writingRoom: { title: "写作室", group: "studio", dateIds: ["writingRoomDate"], titleId: "writingRoomTitle" },
+      scriptTemplate: { title: "脚本结构", group: "studio", dateIds: ["scriptTemplateDate"], titleId: "scriptTemplateTitle" }
+    };
+
+    function localDate() {
+      const now = new Date();
+      return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    }
+
+    function initializeDateFields() {
+      document.querySelectorAll('input[type="date"]').forEach(input => { if (!input.value) input.value = localDate(); });
+      const month = document.getElementById("planMonthDate");
+      if (month && !month.value) month.value = localDate().slice(0, 7);
+      const year = document.getElementById("planYearDate");
+      if (year && !year.value) year.value = new Date().getFullYear();
+    }
+
+    function saveHistory(key) {
+      const config = historyConfig[key];
+      const content = (state.fields[key] || "").trim();
+      if (!content) return alert("请先写下内容再保存。");
+      const dates = config.dateIds.map(id => document.getElementById(id)?.value).filter(Boolean);
+      if (!dates.length) return alert("请先选择日期。");
+      const customTitle = config.titleId ? document.getElementById(config.titleId).value.trim() : "";
+      state.lists.history.unshift({
+        id: crypto.randomUUID(), key, group: config.group,
+        title: customTitle || config.title,
+        period: dates.join(" 至 "), content, createdAt: stamp()
+      });
+      saveState();
+      renderHistory();
+    }
+
+    function removeHistory(id) {
+      state.lists.history = state.lists.history.filter(item => item.id !== id);
+      saveState();
+      renderHistory();
+    }
+
+    function historyMarkup(group) {
+      const items = state.lists.history.filter(item => item.group === group);
+      return items.length ? items.map(item => `
+        <details class="item">
+          <summary><strong>${escapeHtml(item.title)}</strong><div class="meta">日期：${escapeHtml(item.period)} · 保存于 ${escapeHtml(item.createdAt)}</div></summary>
+          <div class="history-content">${escapeHtml(item.content)}</div>
+          <button class="mini" title="删除历史记录" onclick="removeHistory('${item.id}')">×</button>
+        </details>`).join("") : `<div class="empty">还没有保存过历史记录。</div>`;
+    }
+
+    function renderHistory() {
+      document.getElementById("todayFocusHistory").innerHTML = historyMarkup("today");
+      document.getElementById("planHistory").innerHTML = historyMarkup("plan");
+      document.getElementById("adminHistory").innerHTML = historyMarkup("admin");
+      document.getElementById("studioHistory").innerHTML = historyMarkup("studio");
+    }
+
+    function bindHistory() {
+      document.querySelectorAll("[data-save-history]").forEach(button => {
+        button.addEventListener("click", () => saveHistory(button.dataset.saveHistory));
+      });
+      initializeDateFields();
+    }
+
+    function addListItem(listName, item) {
+      state.lists[listName].unshift({ id: crypto.randomUUID(), createdAt: stamp(), ...item });
+      saveState();
+      renderAllLists();
+    }
+
+    function removeListItem(listName, id) {
+      state.lists[listName] = state.lists[listName].filter(item => item.id !== id);
+      seedDefaultEntries();
+      saveState();
+      renderAllLists();
+    }
+
+    function updateTaskStatus(id, status) {
+      const task = state.lists.tasks.find(item => item.id === id);
+      if (task) task.status = status;
+      saveState();
+      renderTasks();
+    }
+
+    function renderTasks() {
+      const target = document.getElementById("taskList");
+      const items = state.lists.tasks;
+      target.innerHTML = items.length ? items.map(item => `
+        <div class="item">
+          <div><strong>${escapeHtml(item.text)}</strong><div class="meta">创建于 ${escapeHtml(item.createdAt)}</div></div>
+          <select aria-label="任务状态" onchange="updateTaskStatus('${item.id}', this.value)">
+            ${["待办", "进行中", "已完成"].map(status => `<option ${status === item.status ? "selected" : ""}>${status}</option>`).join("")}
+          </select>
+          <button class="mini" title="删除" onclick="removeListItem('tasks','${item.id}')">×</button>
+        </div>`).join("") : `<div class="empty">还没有任务，先写下今天最关键的一条。</div>`;
+    }
+
+    function renderSkills() {
+      const target = document.getElementById("skillList");
+      const items = state.lists.skills;
+      target.innerHTML = items.length ? items.map(item => `
+        <div class="item">
+          <div><strong>${escapeHtml(item.name)}</strong><div class="meta">${escapeHtml(item.note || "暂无备注")} · ${escapeHtml(item.createdAt)}</div></div>
+          <span class="badge">${escapeHtml(item.type)}</span>
+          <button class="mini" title="删除" onclick="removeListItem('skills','${item.id}')">×</button>
+        </div>`).join("") : `<div class="empty">记录你自制或收藏的 Skill，之后会变成个人能力库。</div>`;
+    }
+
+    function renderEntries() {
+      const target = document.getElementById("entryList");
+      const items = state.lists.entries;
+      target.innerHTML = items.length ? items.map(item => `
+        <div class="item">
+          <div><strong>${escapeHtml(item.name)}</strong><div class="meta">${escapeHtml(item.url)} · ${escapeHtml(item.createdAt)}</div></div>
+          <span class="badge ${item.pinned ? "gold" : ""}">${item.pinned ? "默认入口" : "入口"}</span>
+          <button class="mini" title="删除" onclick="removeListItem('entries','${item.id}')">×</button>
+        </div>`).join("") : `<div class="empty">这里会成为你所有工具、页面、资料的总目录。</div>`;
+    }
+
+    function renderTopics() {
+      const target = document.getElementById("topicList");
+      const items = state.lists.topics;
+      target.innerHTML = items.length ? items.map(item => `
+        <div class="item">
+          <div>
+            <strong>${escapeHtml(item.title)}</strong>
+            <div class="meta">${escapeHtml(item.platform)} · 热度 ${escapeHtml(item.heat)} · ${escapeHtml(item.angle || "未写中文化角度")}</div>
+            <div class="meta">${escapeHtml(item.link || "未填来源链接")} · ${escapeHtml(item.createdAt)}</div>
+          </div>
+          <span class="badge gold">${escapeHtml(item.heat)}</span>
+          <button class="mini" title="删除" onclick="removeListItem('topics','${item.id}')">×</button>
+        </div>`).join("") : `<div class="empty">把 X、Reddit、YouTube 的爆款 AI 内容先收进来，再判断能否中文化。</div>`;
+    }
+
+    function renderAllLists() {
+      renderTasks();
+      renderSkills();
+      renderEntries();
+      renderTopics();
+      renderHistory();
+      renderStats();
+    }
+
+    function renderStats() {
+      document.getElementById("statTasks").textContent = state.lists.tasks.length;
+      document.getElementById("statTopics").textContent = state.lists.topics.length;
+      document.getElementById("statSkills").textContent = state.lists.skills.length;
+      document.getElementById("statEntries").textContent = state.lists.entries.length;
+    }
+
+    function bindForms() {
+      document.getElementById("addTask").addEventListener("click", () => {
+        const text = document.getElementById("taskText").value.trim();
+        if (!text) return;
+        addListItem("tasks", { text, status: document.getElementById("taskStatus").value });
+        document.getElementById("taskText").value = "";
+      });
+      document.getElementById("addSkill").addEventListener("click", () => {
+        const name = document.getElementById("skillName").value.trim();
+        if (!name) return;
+        addListItem("skills", {
+          name,
+          type: document.getElementById("skillType").value,
+          note: document.getElementById("skillNote").value.trim()
+        });
+        document.getElementById("skillName").value = "";
+        document.getElementById("skillNote").value = "";
+      });
+      document.getElementById("addEntry").addEventListener("click", () => {
+        const name = document.getElementById("entryName").value.trim();
+        const url = document.getElementById("entryUrl").value.trim();
+        if (!name) return;
+        addListItem("entries", { name, url });
+        document.getElementById("entryName").value = "";
+        document.getElementById("entryUrl").value = "";
+      });
+      document.getElementById("addTopic").addEventListener("click", () => {
+        const title = document.getElementById("topicTitle").value.trim();
+        if (!title) return;
+        addListItem("topics", {
+          platform: document.getElementById("topicPlatform").value,
+          title,
+          heat: document.getElementById("topicHeat").value,
+          link: document.getElementById("topicLink").value.trim(),
+          angle: document.getElementById("topicAngle").value.trim()
+        });
+        ["topicTitle", "topicLink", "topicAngle"].forEach(id => document.getElementById(id).value = "");
+      });
+    }
+
+    function bindImportExport() {
+      document.getElementById("exportBtn").addEventListener("click", () => {
+        const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = `user-workbench-${new Date().toISOString().slice(0,10)}.json`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+      });
+      document.getElementById("importBtn").addEventListener("click", () => document.getElementById("importFile").click());
+      document.getElementById("importFile").addEventListener("change", event => {
+        const file = event.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            state = normalizeState(JSON.parse(reader.result));
+            seedDefaultEntries();
+            saveState();
+            document.querySelectorAll("[data-store]").forEach(field => { field.value = state.fields[field.dataset.store] || ""; });
+            renderUser();
+            renderAllLists();
+            alert("导入完成");
+          } catch {
+            alert("导入失败，请确认文件是本工作台导出的 JSON。");
+          }
+        };
+        reader.readAsText(file);
+      });
+    }
+
+    function bindSync() {
+      const syncButtons = [document.getElementById("syncBtn"), document.getElementById("mobileSyncBtn")];
+      syncButtons.forEach(button => {
+        button.addEventListener("click", pushCloudData);
+      });
+    }
+
+    window.removeListItem = removeListItem;
+    window.updateTaskStatus = updateTaskStatus;
+    window.removeHistory = removeHistory;
+    bindLogin();
+    bindNavigation();
+    bindTabs();
+    bindStoredFields();
+    bindHistory();
+    bindForms();
+    bindImportExport();
+    bindSync();
+    renderUser();
+    renderAllLists();
+    if (state.user?.userId && state.user?.accessToken) pullCloudData({ silent: true });
+  </script>
+</body>
+</html>
