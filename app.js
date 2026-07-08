@@ -1,6 +1,11 @@
-/* AI Content OS V1
-   Sections: constants -> models -> storage -> ai router -> workflow -> views -> events */
+/* AI Content OS V1.1
+   Architecture: constants -> utils -> models/migration -> stores -> ai router -> workflow -> views -> events
+   V1 platform scope: 小红书 / 抖音 / B站 only.
+*/
 
+// =========================
+// core/constants.js
+// =========================
 const STORAGE_KEY = "ai_content_os_v1";
 const LEGACY_KEYS = ["ai_content_studio_v1", "ai_creator_workbench_v2", "ai_creator_workbench_v1"];
 
@@ -34,11 +39,34 @@ const STATUS_LABELS = Object.freeze({
   ARCHIVED: "已归档"
 });
 
-const PLATFORMS = Object.freeze(["Reddit", "X", "YouTube", "GitHub", "Hacker News", "Product Hunt", "Official Blog"]);
-const TARGET_PLATFORMS = Object.freeze(["小红书", "抖音", "B站", "公众号", "Newsletter"]);
-const CONTENT_TYPES = Object.freeze(["图文", "短视频", "长文", "口播", "Newsletter"]);
+const SOURCE_PLATFORMS = Object.freeze(["Reddit", "X", "YouTube", "GitHub", "Hacker News", "Product Hunt", "Official Blog"]);
+const TARGET_PLATFORMS = Object.freeze(["小红书", "抖音", "B站"]);
+const CONTENT_TYPES = Object.freeze(["图文", "短视频", "视频脚本", "口播"]);
 const PUBLISH_STATUS = Object.freeze({ DRAFT: "DRAFT", SCHEDULED: "SCHEDULED", PUBLISHED: "PUBLISHED", FAILED: "FAILED" });
 const PUBLISH_STATUS_LABELS = Object.freeze({ DRAFT: "草稿", SCHEDULED: "已排期", PUBLISHED: "已发布", FAILED: "发布失败" });
+const LEGACY_LONG_FORM_PLATFORM = ["公", "众", "号"].join("");
+const ASSET_STATUS = Object.freeze({ DRAFT: "DRAFT", READY: "READY", ARCHIVED: "ARCHIVED" });
+const ASSET_TYPES = Object.freeze({
+  XHS_POST: "xiaohongshu_post",
+  DOUYIN_SCRIPT: "douyin_script",
+  BILIBILI_SCRIPT: "bilibili_script",
+  VIDEO_STORYBOARD: "video_storyboard",
+  COVER_TITLE: "cover_title",
+  COVER_PROMPT: "cover_prompt",
+  VOICEOVER_TEXT: "voiceover_text",
+  SUBTITLE_TEXT: "subtitle_text"
+});
+
+const ASSET_LABELS = Object.freeze({
+  xiaohongshu_post: "小红书图文文案",
+  douyin_script: "抖音 60 秒脚本",
+  bilibili_script: "B站视频脚本",
+  video_storyboard: "视频分镜",
+  cover_title: "封面标题",
+  cover_prompt: "封面提示词",
+  voiceover_text: "配音文本",
+  subtitle_text: "字幕文本"
+});
 
 const NAV_ITEMS = [
   ["dashboard", "⌂", "Dashboard 今日工作台", "Dashboard", "今天该优先处理哪些海外 AI 热点，一眼看清。"],
@@ -46,22 +74,24 @@ const NAV_ITEMS = [
   ["library", "▦", "Content Library 内容库", "Content Library", "所有 Content 对象的数据库视图。"],
   ["workspace", "✎", "Content Workspace 内容工作区", "Content Workspace", "围绕单条 Content 完成分析、生成和审核。"],
   ["video", "▶", "Video Pipeline 视频流水线", "Video Pipeline", "管理脚本、分镜、配音、字幕、封面和视频就绪状态。"],
-  ["publish", "□", "Publish Center 发布中心", "Publish Center", "管理每条内容的发布计划。"],
-  ["analytics", "↗", "Analytics 数据复盘", "Analytics", "录入发布数据，并生成 mock 复盘建议。"],
+  ["publish", "□", "Publish Center 发布中心", "Publish Center", "管理小红书、抖音、B站发布计划。"],
+  ["analytics", "↗", "Analytics 数据复盘", "Analytics", "录入小红书、抖音、B站发布数据，并生成 mock 复盘建议。"],
   ["prompts", "#", "Prompt Library 提示词库", "Prompt Library", "把提示词作为可维护的数据对象管理。"],
   ["knowledge", "◈", "Knowledge Base 知识库", "Knowledge Base", "沉淀知识条目和关联内容。"],
   ["settings", "⚙", "Settings 设置", "Settings", "AI Capabilities、存储 Provider 和后台配置占位。"]
 ];
 
+// =========================
+// core/state.js
+// =========================
 const appState = {
   page: "dashboard",
   selectedContentId: null,
-  viewMode: "card",
-  radarViewMode: "card",
   editContentId: null,
   editPromptId: null,
   editKnowledgeId: null,
-  editPublish: null,
+  editPublishJobId: null,
+  radarViewMode: "card",
   filters: {
     global: "",
     radarQuery: "",
@@ -76,50 +106,50 @@ const appState = {
   }
 };
 
+// =========================
+// core/utils.js
+// =========================
 const uid = prefix => `${prefix}_${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(16).slice(2)}`;
 const now = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);
 const clampScore = value => Math.max(0, Math.min(100, Number(value) || 0));
-const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
 const splitTags = value => String(value || "").split(/[,，\s]+/).map(item => item.trim()).filter(Boolean);
+const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
+const isTargetPlatform = platform => TARGET_PLATFORMS.includes(platform);
+const safeTargetPlatforms = list => (Array.isArray(list) ? list : [list]).filter(isTargetPlatform);
 const statusClass = status => `status ${String(status || "").toLowerCase()}`;
 const statusPill = status => `<span class="${statusClass(status)}">${STATUS_LABELS[status] || status}</span>`;
 const scoreBadge = score => `<span class="score">${clampScore(score)}分</span>`;
 const tagChips = tags => `<div class="chips">${(tags || []).map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}</div>`;
-const platformOptions = selected => PLATFORMS.map(item => `<option ${item === selected ? "selected" : ""}>${item}</option>`).join("");
-const targetOptions = selected => TARGET_PLATFORMS.map(item => `<option ${item === selected ? "selected" : ""}>${item}</option>`).join("");
+const sourcePlatformOptions = selected => SOURCE_PLATFORMS.map(item => `<option ${item === selected ? "selected" : ""}>${item}</option>`).join("");
+const targetPlatformOptions = selected => TARGET_PLATFORMS.map(item => `<option ${item === selected ? "selected" : ""}>${item}</option>`).join("");
 const statusOptions = selected => Object.values(CONTENT_STATUS).map(item => `<option value="${item}" ${item === selected ? "selected" : ""}>${STATUS_LABELS[item]}</option>`).join("");
 
-function normalizeVideoPipeline(value = {}) {
-  return {
-    scriptDone: Boolean(value.scriptDone),
-    storyboardDone: Boolean(value.storyboardDone),
-    voiceoverDone: Boolean(value.voiceoverDone),
-    subtitleDone: Boolean(value.subtitleDone),
-    coverDone: Boolean(value.coverDone),
-    videoDone: Boolean(value.videoDone),
-    readyToPublish: Boolean(value.readyToPublish)
-  };
-}
+function empty(text) { return `<div class="empty">${text}</div>`; }
+function kv(label, value) { return `<div class="divider"></div><strong>${label}</strong><div class="meta">${value || "—"}</div>`; }
 
+// =========================
+// models/normalizers.js
+// =========================
 function normalizeContent(item = {}) {
   const createdAt = item.createdAt || now();
+  const targetPlatforms = safeTargetPlatforms(item.targetPlatforms).length ? safeTargetPlatforms(item.targetPlatforms) : [platformFromLegacy(item.fitPlatform || item.targetPlatform || "抖音")];
   return {
     id: item.id || uid("content"),
     title: item.title || "未命名 Content",
     status: Object.values(CONTENT_STATUS).includes(item.status) ? item.status : CONTENT_STATUS.DISCOVERED,
     sourcePlatform: item.sourcePlatform || item.platform || "Reddit",
     sourceUrl: item.sourceUrl || item.link || "",
-    sourceTitle: item.sourceTitle || item.title || "",
+    sourceTitle: item.sourceTitle || item.originalTitle || item.title || "",
     sourceAuthor: item.sourceAuthor || "",
-    sourcePublishedAt: item.sourcePublishedAt || today(),
+    sourcePublishedAt: item.sourcePublishedAt || item.publishedAt || today(),
     sourceLanguage: item.sourceLanguage || "en",
     originalText: item.originalText || "",
-    originalSummary: item.originalSummary || item.originalSummary || "",
-    topic: item.topic || "AI 热点",
+    originalSummary: item.originalSummary || item.summary || "",
+    topic: item.topic || "海外 AI 热点",
     tags: Array.isArray(item.tags) ? item.tags : splitTags(item.tags),
-    contentType: item.contentType || "短视频",
-    targetPlatforms: Array.isArray(item.targetPlatforms) ? item.targetPlatforms : [item.fitPlatform || "抖音"],
+    contentType: CONTENT_TYPES.includes(item.contentType) ? item.contentType : "短视频",
+    targetPlatforms,
     hotScore: clampScore(item.hotScore ?? item.heat ?? 70),
     trendScore: clampScore(item.trendScore ?? 70),
     chinaFitScore: clampScore(item.chinaFitScore ?? 70),
@@ -130,27 +160,131 @@ function normalizeContent(item = {}) {
     selectedAngle: item.selectedAngle || item.angle || "",
     aiAnalysis: item.aiAnalysis || "",
     commentSummary: item.commentSummary || "",
-    xiaohongshuDraft: item.xiaohongshuDraft || "",
-    douyinScript: item.douyinScript || "",
-    bilibiliScript: item.bilibiliScript || "",
-    wechatArticle: item.wechatArticle || "",
-    newsletterDraft: item.newsletterDraft || "",
-    videoStoryboard: item.videoStoryboard || "",
-    coverTitle: item.coverTitle || "",
-    coverPrompt: item.coverPrompt || "",
-    voiceoverText: item.voiceoverText || "",
-    subtitleText: item.subtitleText || "",
-    publishJobs: Array.isArray(item.publishJobs) ? item.publishJobs : [],
-    analytics: Array.isArray(item.analytics) ? item.analytics : [],
-    reviewNotes: item.reviewNotes || "",
     copyrightStatus: item.copyrightStatus || "待检查",
-    videoPipeline: normalizeVideoPipeline(item.videoPipeline),
     statusHistory: Array.isArray(item.statusHistory) ? item.statusHistory : [{ status: item.status || CONTENT_STATUS.DISCOVERED, at: createdAt, note: "初始化" }],
     createdAt,
     updatedAt: item.updatedAt || createdAt
   };
 }
 
+function normalizeGeneratedAsset(item = {}) {
+  const createdAt = item.createdAt || now();
+  return {
+    id: item.id || uid("asset"),
+    contentId: item.contentId || "",
+    platform: isTargetPlatform(item.platform) ? item.platform : platformForAssetType(item.assetType),
+    assetType: Object.values(ASSET_TYPES).includes(item.assetType) ? item.assetType : ASSET_TYPES.XHS_POST,
+    content: item.content || "",
+    version: Number(item.version) || 1,
+    status: Object.values(ASSET_STATUS).includes(item.status) ? item.status : ASSET_STATUS.DRAFT,
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+}
+
+function normalizeVideoProject(item = {}) {
+  const createdAt = item.createdAt || now();
+  const base = {
+    id: item.id || uid("video"),
+    contentId: item.contentId || "",
+    scriptDone: Boolean(item.scriptDone),
+    storyboardDone: Boolean(item.storyboardDone),
+    voiceoverDone: Boolean(item.voiceoverDone),
+    subtitleDone: Boolean(item.subtitleDone),
+    coverDone: Boolean(item.coverDone),
+    videoDone: Boolean(item.videoDone),
+    readyToPublish: Boolean(item.readyToPublish),
+    progress: Number(item.progress) || 0,
+    notes: item.notes || "",
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+  base.progress = calculateVideoProgress(base);
+  return base;
+}
+
+function normalizePublishJob(item = {}) {
+  const createdAt = item.createdAt || now();
+  return {
+    id: item.id || uid("job"),
+    contentId: item.contentId || "",
+    platform: isTargetPlatform(item.platform) ? item.platform : "小红书",
+    scheduledAt: item.scheduledAt || "",
+    status: Object.values(PUBLISH_STATUS).includes(item.status) ? item.status : PUBLISH_STATUS.DRAFT,
+    url: item.url || "",
+    notes: item.notes || "",
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+}
+
+function normalizeAnalyticsRecord(item = {}) {
+  return {
+    id: item.id || uid("analytics"),
+    contentId: item.contentId || "",
+    platform: isTargetPlatform(item.platform) ? item.platform : "抖音",
+    publishedAt: item.publishedAt || now(),
+    views: Number(item.views) || 0,
+    likes: Number(item.likes) || 0,
+    comments: Number(item.comments) || 0,
+    saves: Number(item.saves) || 0,
+    shares: Number(item.shares) || 0,
+    completionRate: item.completionRate || "",
+    followersGained: Number(item.followersGained) || 0,
+    reviewNotes: item.reviewNotes || "",
+    createdAt: item.createdAt || now()
+  };
+}
+
+function normalizePrompt(item = {}) {
+  const createdAt = item.createdAt || now();
+  return {
+    id: item.id || uid("prompt"),
+    name: item.name || "未命名 Prompt",
+    category: item.category || "内容生成",
+    platform: platformFromLegacy(item.platform || "通用"),
+    template: item.template || "",
+    variables: Array.isArray(item.variables) ? item.variables : splitTags(item.variables),
+    version: item.version || "1.0",
+    successRate: Number(item.successRate) || 0,
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+}
+
+function normalizeKnowledge(item = {}) {
+  return {
+    id: item.id || uid("knowledge"),
+    title: item.title || "未命名知识",
+    source: item.source || "手动录入",
+    topic: item.topic || "AI 内容",
+    tags: Array.isArray(item.tags) ? item.tags : splitTags(item.tags),
+    summary: item.summary || "",
+    linkedContentIds: Array.isArray(item.linkedContentIds) ? item.linkedContentIds : [],
+    createdAt: item.createdAt || now()
+  };
+}
+
+function platformFromLegacy(platform) {
+  if (isTargetPlatform(platform)) return platform;
+  if (platform === LEGACY_LONG_FORM_PLATFORM) return "B站";
+  return "抖音";
+}
+
+function platformForAssetType(assetType) {
+  if (assetType === ASSET_TYPES.XHS_POST || assetType === ASSET_TYPES.COVER_TITLE) return "小红书";
+  if (assetType === ASSET_TYPES.BILIBILI_SCRIPT) return "B站";
+  return "抖音";
+}
+
+function calculateVideoProgress(project) {
+  const keys = ["scriptDone", "storyboardDone", "voiceoverDone", "subtitleDone", "coverDone", "videoDone", "readyToPublish"];
+  return Math.round(keys.filter(key => project[key]).length / keys.length * 100);
+}
+
+// =========================
+// stores/database.js
+// =========================
 class StorageProvider {
   load() { throw new Error("StorageProvider.load not implemented"); }
   save() { throw new Error("StorageProvider.save not implemented"); }
@@ -173,29 +307,134 @@ class SupabaseProvider extends StorageProvider {
 }
 
 const storageProvider = new LocalStorageProvider(STORAGE_KEY);
+let db = migrateDatabase(storageProvider.load());
+saveDb();
 
-function normalizeAppData(data) {
-  const base = data && data.contentItems ? data : createInitialData();
-  return {
-    contentItems: (base.contentItems || []).map(normalizeContent),
-    promptTemplates: (base.promptTemplates || createMockPrompts()).map(normalizePrompt),
-    knowledgeItems: (base.knowledgeItems || createMockKnowledge()).map(normalizeKnowledge),
+function saveDb() {
+  storageProvider.save(db);
+  renderHealth();
+}
+
+function migrateDatabase(raw) {
+  const source = raw && raw.contentItems ? raw : createInitialData();
+  const newDb = {
+    schemaVersion: 2,
+    contentItems: [],
+    generatedAssets: [],
+    archivedGeneratedAssets: [],
+    videoProjects: [],
+    publishJobs: [],
+    analyticsRecords: [],
+    promptTemplates: [],
+    knowledgeItems: [],
     settings: {
-      provider: base.settings?.provider || "LocalStorageProvider",
-      aiCapabilities: base.settings?.aiCapabilities || ["热点分析", "评论总结", "多平台改写", "视频脚本生成"],
-      adminNotes: base.settings?.adminNotes || "当前 V1 只启用本地 Provider 和 mock AI Router。"
+      provider: source.settings?.provider || "LocalStorageProvider",
+      aiCapabilities: source.settings?.aiCapabilities || ["热点分析", "评论总结", "小红书改写", "短视频脚本生成", "视频分镜"],
+      adminNotes: source.settings?.adminNotes || "当前 V1.1 只启用小红书、抖音、B站三类发布目标。"
+    }
+  };
+
+  const existingAssets = Array.isArray(source.generatedAssets) ? source.generatedAssets : [];
+  const existingArchived = Array.isArray(source.archivedGeneratedAssets) ? source.archivedGeneratedAssets : [];
+  const existingVideoProjects = Array.isArray(source.videoProjects) ? source.videoProjects : [];
+  const existingJobs = Array.isArray(source.publishJobs) ? source.publishJobs : [];
+  const existingAnalytics = Array.isArray(source.analyticsRecords) ? source.analyticsRecords : [];
+
+  (source.contentItems || []).forEach(oldItem => {
+    const content = normalizeContent(oldItem);
+    newDb.contentItems.push(content);
+
+    migrateLegacyAsset(newDb, content.id, "小红书", ASSET_TYPES.XHS_POST, oldItem.xiaohongshuDraft);
+    migrateLegacyAsset(newDb, content.id, "抖音", ASSET_TYPES.DOUYIN_SCRIPT, oldItem.douyinScript);
+    migrateLegacyAsset(newDb, content.id, "B站", ASSET_TYPES.BILIBILI_SCRIPT, oldItem.bilibiliScript);
+    migrateLegacyAsset(newDb, content.id, "抖音", ASSET_TYPES.VIDEO_STORYBOARD, oldItem.videoStoryboard);
+    migrateLegacyAsset(newDb, content.id, "小红书", ASSET_TYPES.COVER_TITLE, oldItem.coverTitle);
+    migrateLegacyAsset(newDb, content.id, "小红书", ASSET_TYPES.COVER_PROMPT, oldItem.coverPrompt);
+    migrateLegacyAsset(newDb, content.id, "抖音", ASSET_TYPES.VOICEOVER_TEXT, oldItem.voiceoverText);
+    migrateLegacyAsset(newDb, content.id, "抖音", ASSET_TYPES.SUBTITLE_TEXT, oldItem.subtitleText);
+
+    if (oldItem.wechatArticle) newDb.archivedGeneratedAssets.push({ id: uid("legacy"), contentId: content.id, legacyType: "long_article", content: oldItem.wechatArticle, createdAt: now() });
+    if (oldItem.newsletterDraft) newDb.archivedGeneratedAssets.push({ id: uid("legacy"), contentId: content.id, legacyType: "email_digest", content: oldItem.newsletterDraft, createdAt: now() });
+
+    (oldItem.publishJobs || []).forEach(job => {
+      const platform = platformFromLegacy(job.platform);
+      if (isTargetPlatform(platform)) newDb.publishJobs.push(normalizePublishJob({ ...job, contentId: content.id, platform }));
+    });
+    (oldItem.analytics || []).forEach(record => {
+      const platform = platformFromLegacy(record.platform);
+      if (isTargetPlatform(platform)) newDb.analyticsRecords.push(normalizeAnalyticsRecord({ ...record, contentId: content.id, platform }));
+    });
+    if (oldItem.videoPipeline) newDb.videoProjects.push(normalizeVideoProject({ ...oldItem.videoPipeline, contentId: content.id }));
+  });
+
+  existingAssets.forEach(item => {
+    const asset = normalizeGeneratedAsset(item);
+    if (newDb.contentItems.some(content => content.id === asset.contentId)) upsertGeneratedAsset(newDb.generatedAssets, asset);
+  });
+  existingArchived.forEach(item => newDb.archivedGeneratedAssets.push(item));
+  existingVideoProjects.forEach(item => {
+    const project = normalizeVideoProject(item);
+    if (!newDb.videoProjects.some(existing => existing.contentId === project.contentId)) newDb.videoProjects.push(project);
+  });
+  existingJobs.forEach(item => newDb.publishJobs.push(normalizePublishJob(item)));
+  existingAnalytics.forEach(item => newDb.analyticsRecords.push(normalizeAnalyticsRecord(item)));
+
+  newDb.promptTemplates = (source.promptTemplates || createMockPrompts()).map(normalizePrompt);
+  newDb.knowledgeItems = (source.knowledgeItems || createMockKnowledge()).map(normalizeKnowledge);
+  ensureVideoProjectsForGeneratedVideo(newDb);
+  return newDb;
+}
+
+function migrateLegacyAsset(targetDb, contentId, platform, assetType, content) {
+  if (!content) return;
+  upsertGeneratedAsset(targetDb.generatedAssets, normalizeGeneratedAsset({ contentId, platform, assetType, content, status: ASSET_STATUS.READY }));
+}
+
+function upsertGeneratedAsset(list, asset) {
+  const index = list.findIndex(item => item.contentId === asset.contentId && item.assetType === asset.assetType && item.platform === asset.platform);
+  if (index >= 0) list[index] = { ...list[index], ...asset, version: Math.max(list[index].version || 1, asset.version || 1), updatedAt: now() };
+  else list.push(asset);
+}
+
+function ensureVideoProjectsForGeneratedVideo(targetDb = db) {
+  const videoAssetTypes = [ASSET_TYPES.DOUYIN_SCRIPT, ASSET_TYPES.BILIBILI_SCRIPT, ASSET_TYPES.VIDEO_STORYBOARD];
+  const contentIds = [...new Set(targetDb.generatedAssets.filter(asset => videoAssetTypes.includes(asset.assetType)).map(asset => asset.contentId))];
+  contentIds.forEach(contentId => {
+    if (!targetDb.videoProjects.some(project => project.contentId === contentId)) {
+      targetDb.videoProjects.push(normalizeVideoProject({ contentId, scriptDone: true, storyboardDone: targetDb.generatedAssets.some(asset => asset.contentId === contentId && asset.assetType === ASSET_TYPES.VIDEO_STORYBOARD) }));
+    }
+  });
+}
+
+function createCrudStore(collectionName, normalizer) {
+  return {
+    getAll() { return db[collectionName].map(normalizer); },
+    getById(id) { return db[collectionName].find(item => item.id === id) || null; },
+    create(item) {
+      const record = normalizer({ ...item, id: item.id || uid(collectionName), createdAt: now(), updatedAt: now() });
+      db[collectionName].unshift(record);
+      saveDb();
+      return record;
+    },
+    update(id, patch) {
+      const index = db[collectionName].findIndex(item => item.id === id);
+      if (index < 0) return null;
+      db[collectionName][index] = normalizer({ ...db[collectionName][index], ...patch, updatedAt: now() });
+      saveDb();
+      return db[collectionName][index];
+    },
+    remove(id) {
+      db[collectionName] = db[collectionName].filter(item => item.id !== id);
+      saveDb();
     }
   };
 }
 
-let db = normalizeAppData(storageProvider.load());
-saveDb();
-
-function saveDb() { storageProvider.save(db); renderHealth(); }
-
+// =========================
+// stores/*.js
+// =========================
 const ContentStore = {
-  getAll() { return db.contentItems.map(normalizeContent); },
-  getById(id) { return db.contentItems.find(item => item.id === id) || null; },
+  ...createCrudStore("contentItems", normalizeContent),
   create(item) {
     const content = normalizeContent({ ...item, id: uid("content"), createdAt: now(), updatedAt: now() });
     db.contentItems.unshift(content);
@@ -214,6 +453,10 @@ const ContentStore = {
   },
   remove(id) {
     db.contentItems = db.contentItems.filter(item => item.id !== id);
+    db.generatedAssets = db.generatedAssets.filter(item => item.contentId !== id);
+    db.videoProjects = db.videoProjects.filter(item => item.contentId !== id);
+    db.publishJobs = db.publishJobs.filter(item => item.contentId !== id);
+    db.analyticsRecords = db.analyticsRecords.filter(item => item.contentId !== id);
     if (appState.selectedContentId === id) appState.selectedContentId = db.contentItems[0]?.id || null;
     saveDb();
   },
@@ -237,20 +480,43 @@ const ContentStore = {
   }
 };
 
-const PromptStore = {
-  getAll: () => db.promptTemplates,
-  create(item) { db.promptTemplates.unshift(normalizePrompt({ ...item, id: uid("prompt"), createdAt: now(), updatedAt: now() })); saveDb(); },
-  update(id, patch) { db.promptTemplates = db.promptTemplates.map(item => item.id === id ? normalizePrompt({ ...item, ...patch, updatedAt: now() }) : item); saveDb(); },
-  remove(id) { db.promptTemplates = db.promptTemplates.filter(item => item.id !== id); saveDb(); }
+const GeneratedAssetStore = {
+  ...createCrudStore("generatedAssets", normalizeGeneratedAsset),
+  getByContentId(contentId) { return this.getAll().filter(item => item.contentId === contentId); },
+  upsert(item) {
+    const asset = normalizeGeneratedAsset({ ...item, updatedAt: now() });
+    const index = db.generatedAssets.findIndex(existing => existing.contentId === asset.contentId && existing.platform === asset.platform && existing.assetType === asset.assetType);
+    if (index >= 0) db.generatedAssets[index] = normalizeGeneratedAsset({ ...db.generatedAssets[index], ...asset, version: (db.generatedAssets[index].version || 1) + 1, status: ASSET_STATUS.READY, updatedAt: now() });
+    else db.generatedAssets.unshift(normalizeGeneratedAsset({ ...asset, status: ASSET_STATUS.READY }));
+    saveDb();
+    return index >= 0 ? db.generatedAssets[index] : db.generatedAssets[0];
+  }
 };
 
-const KnowledgeStore = {
-  getAll: () => db.knowledgeItems,
-  create(item) { db.knowledgeItems.unshift(normalizeKnowledge({ ...item, id: uid("knowledge"), createdAt: now() })); saveDb(); },
-  update(id, patch) { db.knowledgeItems = db.knowledgeItems.map(item => item.id === id ? normalizeKnowledge({ ...item, ...patch }) : item); saveDb(); },
-  remove(id) { db.knowledgeItems = db.knowledgeItems.filter(item => item.id !== id); saveDb(); }
+const VideoProjectStore = {
+  ...createCrudStore("videoProjects", normalizeVideoProject),
+  getByContentId(contentId) { return this.getAll().find(item => item.contentId === contentId) || null; },
+  ensureForContent(contentId) {
+    return this.getByContentId(contentId) || this.create({ contentId });
+  }
 };
 
+const PublishJobStore = {
+  ...createCrudStore("publishJobs", normalizePublishJob),
+  getByContentId(contentId) { return this.getAll().filter(item => item.contentId === contentId); }
+};
+
+const AnalyticsStore = {
+  ...createCrudStore("analyticsRecords", normalizeAnalyticsRecord),
+  getByContentId(contentId) { return this.getAll().filter(item => item.contentId === contentId); }
+};
+
+const PromptStore = createCrudStore("promptTemplates", normalizePrompt);
+const KnowledgeStore = createCrudStore("knowledgeItems", normalizeKnowledge);
+
+// =========================
+// ai/aiRouter.js
+// =========================
 const providers = {
   AIProvider: { enabled: true, mode: "mock" },
   OpenAIProvider: { enabled: false, placeholder: true },
@@ -262,7 +528,7 @@ const providers = {
 const aiRouter = {
   providers,
   async generateText(prompt, options = {}) {
-    return `【Mock 生成】${options.format || "内容"}：围绕「${options.title || "AI 热点"}」输出中文化表达。核心钩子：把海外讨论翻译成普通创作者能理解的机会点。`;
+    return `【Mock 生成】${options.format || "内容"}：围绕「${options.title || "AI 热点"}」输出中文化表达。核心钩子：把海外讨论翻译成中文用户能理解的机会点。`;
   },
   async summarize(text, options = {}) {
     return `【Mock 总结】${options.title || "该热点"} 的核心是：${String(text || "海外 AI 社区正在讨论新趋势").slice(0, 90)}。`;
@@ -271,75 +537,115 @@ const aiRouter = {
     const score = Math.round(content.hotScore * .28 + content.trendScore * .18 + content.chinaFitScore * .26 + content.controversyScore * .1 + content.businessScore * .12 + (100 - content.difficultyScore) * .06);
     return clampScore(score);
   },
-  async generateScript(content, platform) {
-    return `【${platform} Mock 脚本】开头 3 秒：${content.title} 为什么突然火了？\n中段：解释海外讨论、中文用户痛点和一个具体例子。\n结尾：你觉得这是效率革命还是新的焦虑？评论区聊聊。`;
+  async generateScript(content, platform, options = {}) {
+    const assetType = options.assetType || "script";
+    if (platform === "小红书") {
+      return `标题：${content.title}\n\n1. 海外正在热议什么：${content.sourceTitle}\n2. 中文用户为什么要关注：${content.selectedAngle}\n3. 我的判断：这是一个值得做成系列的 AI 选题。\n\n标签：${content.tags.map(tag => `#${tag}`).join(" ")}`;
+    }
+    if (platform === "B站") {
+      return `【B站视频脚本】\n开场：${content.title}\n背景：${content.originalSummary}\n分析：海外讨论背后的技术和产品趋势。\n结尾：给出创作者/开发者可以马上尝试的 3 个动作。`;
+    }
+    if (assetType === ASSET_TYPES.VIDEO_STORYBOARD) {
+      return `镜头1：强钩子标题卡「${content.title}」\n镜头2：展示海外平台讨论截图占位\n镜头3：解释 3 个中文化观点\n镜头4：结尾提问，引导评论区讨论`;
+    }
+    return `【抖音 60 秒脚本】\n开头 3 秒：${content.title} 为什么突然火了？\n中段：解释海外讨论、中文用户痛点和一个具体例子。\n结尾：你觉得这是效率革命还是新的焦虑？评论区聊聊。`;
   }
 };
 
+// =========================
+// workflow/workflowPipeline.js
+// =========================
 const workflowPipeline = {
   analyzeContent(contentId) {
     const content = ContentStore.getById(contentId);
     if (!content) return null;
-    const patch = {
+    return ContentStore.update(contentId, {
       status: CONTENT_STATUS.ANALYZED,
-      aiAnalysis: `中文总结：${content.title} 背后反映了 AI 工具从“辅助”走向“替代部分流程”的趋势。\n争议点：效率提升 vs 能力退化。\n推荐形式：先做短视频，再拆小红书图文。`,
+      aiAnalysis: `中文总结：${content.title} 背后反映了 AI 工具从“辅助”走向“替代部分流程”的趋势。\n争议点：效率提升 vs 能力退化。\n推荐形式：先做短视频，再拆成小红书图文。`,
       commentSummary: "评论观点集中在：是否会替代初级岗位、学习门槛是否下降、真实生产力是否提升。",
       selectedAngle: content.selectedAngle || "把海外技术争议翻译成中文创作者可理解的机会与风险。"
-    };
-    return ContentStore.update(contentId, patch);
+    });
   },
   async generateContent(contentId, targetPlatform) {
     const content = ContentStore.getById(contentId);
-    if (!content) return null;
-    const generated = await aiRouter.generateScript(content, targetPlatform);
-    const patch = { status: CONTENT_STATUS.WRITING };
-    if (targetPlatform === "小红书") patch.xiaohongshuDraft = `标题：${content.title}\n\n${await aiRouter.generateText(content.originalSummary, { title: content.title, format: "小红书图文" })}\n\n标签：${content.tags.map(tag => `#${tag}`).join(" ")}`;
-    if (targetPlatform === "抖音") patch.douyinScript = generated;
-    if (targetPlatform === "B站") patch.bilibiliScript = `【B站 Mock 脚本】\n1. 背景：${content.sourceTitle}\n2. 技术脉络：为什么海外开发者关注它\n3. 中文视角：普通人如何使用\n4. 结论：适合做成系列。`;
-    if (targetPlatform === "公众号") patch.wechatArticle = `# ${content.title}\n\n## 背景\n${content.originalSummary}\n\n## 中文用户为什么要关注\n${content.selectedAngle}\n\n## 我的判断\n这是一个值得持续追踪的 AI 内容母题。`;
-    if (targetPlatform === "视频分镜") {
-      patch.videoStoryboard = `镜头1：强钩子标题卡「${content.title}」\n镜头2：展示海外平台讨论截图占位\n镜头3：3 个中文化解释点\n镜头4：结尾提问引导评论`;
-      patch.coverTitle = content.coverTitle || content.title.slice(0, 18);
-      patch.coverPrompt = `粉色科技感封面，关键词：${content.tags.join("、")}`;
-      patch.voiceoverText = patch.douyinScript || generated;
-      patch.subtitleText = patch.voiceoverText;
-      patch.videoPipeline = { ...content.videoPipeline, scriptDone: true, storyboardDone: true };
+    if (!content || !isTargetPlatform(targetPlatform)) return null;
+    const assets = [];
+    if (targetPlatform === "小红书") {
+      assets.push(await createAsset(content, "小红书", ASSET_TYPES.XHS_POST));
+      assets.push(await createAsset(content, "小红书", ASSET_TYPES.COVER_TITLE, `封面标题：${content.title.slice(0, 18)}`));
     }
-    return ContentStore.update(contentId, patch);
+    if (targetPlatform === "抖音") {
+      assets.push(await createAsset(content, "抖音", ASSET_TYPES.DOUYIN_SCRIPT));
+      assets.push(await createAsset(content, "抖音", ASSET_TYPES.VIDEO_STORYBOARD));
+      assets.push(await createAsset(content, "抖音", ASSET_TYPES.VOICEOVER_TEXT));
+      assets.push(await createAsset(content, "抖音", ASSET_TYPES.SUBTITLE_TEXT));
+      const project = VideoProjectStore.ensureForContent(contentId);
+      VideoProjectStore.update(project.id, { scriptDone: true, storyboardDone: true, voiceoverDone: true, subtitleDone: true });
+    }
+    if (targetPlatform === "B站") {
+      assets.push(await createAsset(content, "B站", ASSET_TYPES.BILIBILI_SCRIPT));
+      assets.push(await createAsset(content, "B站", ASSET_TYPES.VIDEO_STORYBOARD));
+      assets.push(await createAsset(content, "B站", ASSET_TYPES.COVER_TITLE, `B站封面：${content.title.slice(0, 18)}`));
+      const project = VideoProjectStore.ensureForContent(contentId);
+      VideoProjectStore.update(project.id, { scriptDone: true, storyboardDone: true, coverDone: true });
+    }
+    ContentStore.update(contentId, { status: CONTENT_STATUS.WRITING });
+    return assets;
   },
   async generateAllFormats(contentId) {
     await this.generateContent(contentId, "小红书");
     await this.generateContent(contentId, "抖音");
     await this.generateContent(contentId, "B站");
-    await this.generateContent(contentId, "公众号");
-    await this.generateContent(contentId, "视频分镜");
     return this.markReadyForReview(contentId);
   },
   markReadyForReview(contentId) { return ContentStore.update(contentId, { status: CONTENT_STATUS.REVIEWING }); },
   schedulePublish(contentId, platform, time) {
-    const content = ContentStore.getById(contentId);
-    if (!content) return null;
-    const publishJobs = [...content.publishJobs, { id: uid("job"), platform, scheduledAt: time, status: PUBLISH_STATUS.SCHEDULED, url: "", notes: "" }];
-    return ContentStore.update(contentId, { publishJobs, status: CONTENT_STATUS.SCHEDULED });
+    if (!isTargetPlatform(platform)) return null;
+    const job = PublishJobStore.create({ contentId, platform, scheduledAt: time, status: PUBLISH_STATUS.SCHEDULED });
+    ContentStore.update(contentId, { status: CONTENT_STATUS.SCHEDULED });
+    return job;
   },
   recordAnalytics(contentId, analytics) {
-    const content = ContentStore.getById(contentId);
-    if (!content) return null;
-    const record = { ...analytics, reviewNotes: analytics.reviewNotes || "这条内容标题冲突感强，适合继续做系列；建议下一条加强开头 3 秒钩子。" };
-    return ContentStore.update(contentId, { analytics: [record, ...content.analytics], status: CONTENT_STATUS.TRACKING, reviewNotes: record.reviewNotes });
+    const record = AnalyticsStore.create({
+      ...analytics,
+      contentId,
+      reviewNotes: analytics.reviewNotes || "这条内容标题冲突感强，适合继续做系列；建议下一条加强开头 3 秒钩子。"
+    });
+    ContentStore.update(contentId, { status: CONTENT_STATUS.TRACKING });
+    return record;
   }
 };
 
+async function createAsset(content, platform, assetType, fixedContent = "") {
+  const generated = fixedContent || await aiRouter.generateScript(content, platform, { assetType });
+  return GeneratedAssetStore.upsert({ contentId: content.id, platform, assetType, content: generated, status: ASSET_STATUS.READY });
+}
+
 window.ContentStore = ContentStore;
+window.GeneratedAssetStore = GeneratedAssetStore;
+window.VideoProjectStore = VideoProjectStore;
+window.PublishJobStore = PublishJobStore;
+window.AnalyticsStore = AnalyticsStore;
+window.PromptStore = PromptStore;
+window.KnowledgeStore = KnowledgeStore;
 window.StorageProvider = StorageProvider;
 window.LocalStorageProvider = LocalStorageProvider;
 window.SupabaseProvider = SupabaseProvider;
 window.aiRouter = aiRouter;
 window.workflowPipeline = workflowPipeline;
 
+// =========================
+// mock/mockData.js
+// =========================
 function createInitialData() {
   return {
+    schemaVersion: 2,
     contentItems: createMockContents(),
+    generatedAssets: [],
+    archivedGeneratedAssets: [],
+    videoProjects: [],
+    publishJobs: [],
+    analyticsRecords: [],
     promptTemplates: createMockPrompts(),
     knowledgeItems: createMockKnowledge(),
     settings: { provider: "LocalStorageProvider" }
@@ -350,12 +656,12 @@ function createMockContents() {
   const items = [
     ["Reddit", "Will AI agents replace junior developers?", "AI Agent 会不会取代初级程序员？", 94, 88, 91, CONTENT_STATUS.ANALYZED, ["抖音", "小红书"], ["AI Agent", "程序员", "职业焦虑"], "海外开发者争议集中在岗位替代、学习路径和真实生产力。"],
     ["YouTube", "My Claude Code workflow is replacing half my toolchain", "Claude Code 工作流为什么爆火？", 90, 92, 90, CONTENT_STATUS.SELECTED, ["B站", "抖音"], ["Claude Code", "工作流", "开发者工具"], "适合拆成工具演示和效率方法论两条内容线。"],
-    ["X", "Rumors around OpenAI's next model are getting louder", "OpenAI 新模型传闻又来了", 87, 84, 86, CONTENT_STATUS.DISCOVERED, ["小红书", "公众号"], ["OpenAI", "模型传闻", "AI 新闻"], "关注点在模型能力边界、发布时间和对创作者工具链的影响。"],
+    ["X", "Rumors around OpenAI's next model are getting louder", "OpenAI 新模型传闻又来了", 87, 84, 86, CONTENT_STATUS.DISCOVERED, ["小红书", "抖音"], ["OpenAI", "模型传闻", "AI 新闻"], "关注点在模型能力边界、发布时间和对创作者工具链的影响。"],
     ["GitHub", "Open-source AI video generation project trends globally", "AI 视频生成开源项目登上 GitHub Trending", 89, 86, 88, CONTENT_STATUS.COLLECTED, ["B站", "抖音"], ["GitHub", "AI 视频", "开源"], "适合做项目拆解、效果展示和普通用户可用性判断。"],
-    ["Hacker News", "Does Cursor make developers weaker?", "Cursor 会不会降低编程能力？", 91, 90, 92, CONTENT_STATUS.REVIEWING, ["公众号", "B站"], ["Cursor", "编程能力", "开发者"], "争议性强，适合做深度观点和评论区互动。"],
-    ["Product Hunt", "A new AI presentation builder launches", "新的 AI PPT 工具上线 Product Hunt", 80, 78, 79, CONTENT_STATUS.ANALYZED, ["小红书", "公众号"], ["AI PPT", "效率工具", "Product Hunt"], "更偏实用工具测评，可做小红书图文清单。"],
+    ["Hacker News", "Does Cursor make developers weaker?", "Cursor 会不会降低编程能力？", 91, 90, 92, CONTENT_STATUS.REVIEWING, ["B站", "抖音"], ["Cursor", "编程能力", "开发者"], "争议性强，适合做深度观点和评论区互动。"],
+    ["Product Hunt", "A new AI presentation builder launches", "新的 AI PPT 工具上线 Product Hunt", 80, 78, 79, CONTENT_STATUS.ANALYZED, ["小红书"], ["AI PPT", "效率工具", "Product Hunt"], "更偏实用工具测评，可做小红书图文清单。"],
     ["Official Blog", "Claude usage tips for long context work", "Claude 长上下文使用技巧", 84, 87, 85, CONTENT_STATUS.VIDEO_READY, ["小红书", "B站"], ["Anthropic", "Claude", "提示词"], "可沉淀为提示词库和教程类内容。"],
-    ["Official Blog", "DeepMind shares new AI research update", "Google DeepMind 发布 AI Research 新进展", 78, 74, 76, CONTENT_STATUS.PUBLISHED, ["公众号"], ["DeepMind", "AI Research", "研究"], "适合做研究趋势观察，不适合当天短视频优先级。"]
+    ["Official Blog", "DeepMind shares new AI research update", "Google DeepMind 发布 AI Research 新进展", 78, 74, 76, CONTENT_STATUS.PUBLISHED, ["B站"], ["DeepMind", "AI Research", "研究"], "适合做研究趋势观察。"]
   ];
   return items.map(([sourcePlatform, sourceTitle, title, hotScore, chinaFitScore, finalScore, status, targetPlatforms, tags, aiAnalysis], index) => normalizeContent({
     title,
@@ -386,43 +692,15 @@ function createMockContents() {
   }));
 }
 
-function normalizePrompt(item = {}) {
-  return {
-    id: item.id || uid("prompt"),
-    name: item.name || "未命名 Prompt",
-    category: item.category || "内容生成",
-    platform: item.platform || "通用",
-    template: item.template || "",
-    variables: Array.isArray(item.variables) ? item.variables : splitTags(item.variables),
-    version: item.version || "1.0",
-    successRate: Number(item.successRate) || 0,
-    createdAt: item.createdAt || now(),
-    updatedAt: item.updatedAt || now()
-  };
-}
-
 function createMockPrompts() {
   return [
     ["海外热点分析", "分析", "通用", "请分析 {sourceTitle} 的海外热度、中文适配角度和争议点。", ["sourceTitle"], 86],
     ["Reddit 评论总结", "评论总结", "Reddit", "总结 Reddit 评论中的支持、反对和中立观点：{comments}", ["comments"], 82],
     ["小红书爆款改写", "改写", "小红书", "把 {topic} 改写成小红书图文，要求标题有冲突感。", ["topic"], 88],
     ["抖音 60 秒脚本", "脚本", "抖音", "围绕 {title} 写 60 秒口播脚本，前三秒必须有钩子。", ["title"], 84],
-    ["公众号深度文章", "长文", "公众号", "把 {title} 写成公众号深度文章结构，包含背景、争议和观点。", ["title"], 79],
+    ["B站视频脚本", "脚本", "B站", "把 {title} 写成 B站视频脚本，包含背景、演示和观点。", ["title"], 81],
     ["标题 A/B 测试", "标题", "通用", "为 {content} 生成 10 个标题，标注适合平台。", ["content"], 81]
   ].map(([name, category, platform, template, variables, successRate]) => normalizePrompt({ name, category, platform, template, variables, successRate }));
-}
-
-function normalizeKnowledge(item = {}) {
-  return {
-    id: item.id || uid("knowledge"),
-    title: item.title || "未命名知识",
-    source: item.source || "手动录入",
-    topic: item.topic || "AI 内容",
-    tags: Array.isArray(item.tags) ? item.tags : splitTags(item.tags),
-    summary: item.summary || "",
-    linkedContentIds: Array.isArray(item.linkedContentIds) ? item.linkedContentIds : [],
-    createdAt: item.createdAt || now()
-  };
 }
 
 function createMockKnowledge() {
@@ -433,6 +711,9 @@ function createMockKnowledge() {
   ];
 }
 
+// =========================
+// views/*.js
+// =========================
 function setPage(page) {
   appState.page = page;
   const item = NAV_ITEMS.find(nav => nav[0] === page) || NAV_ITEMS[0];
@@ -456,7 +737,7 @@ function render() {
   const views = {
     dashboard: renderDashboard,
     hotRadar: renderHotRadar,
-    library: renderLibrary,
+    library: renderContentLibrary,
     workspace: renderWorkspace,
     video: renderVideoPipeline,
     publish: renderPublishCenter,
@@ -471,23 +752,17 @@ function render() {
 }
 
 function renderDashboard() {
-  const items = filteredGlobal();
-  const all = ContentStore.getAll();
-  const high = all.filter(item => item.finalScore >= 85);
-  const toGenerate = all.filter(item => [CONTENT_STATUS.ANALYZED, CONTENT_STATUS.SELECTED].includes(item.status));
-  const review = all.filter(item => item.status === CONTENT_STATUS.REVIEWING);
-  const publish = all.filter(item => [CONTENT_STATUS.VIDEO_READY, CONTENT_STATUS.SCHEDULED].includes(item.status));
-  const published = all.filter(item => item.status === CONTENT_STATUS.PUBLISHED);
-  const top5 = [...items].sort((a, b) => b.finalScore - a.finalScore).slice(0, 5);
-  const changes = [...all].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 5);
+  const all = filteredGlobal();
+  const top5 = [...all].sort((a, b) => b.finalScore - a.finalScore).slice(0, 5);
+  const changes = [...ContentStore.getAll()].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 5);
   return `
     <div class="grid three">
-      ${statCard("今日抓取热点", all.length, "Mock 热点池总量")}
-      ${statCard("高分内容", high.length, "finalScore ≥ 85")}
-      ${statCard("待生成内容", toGenerate.length, "ANALYZED / SELECTED")}
-      ${statCard("待审核", review.length, "REVIEWING")}
-      ${statCard("待发布", publish.length, "VIDEO_READY / SCHEDULED")}
-      ${statCard("已发布", published.length, "PUBLISHED")}
+      ${statCard("今日抓取热点", ContentStore.getAll().length, "Mock 热点池总量")}
+      ${statCard("高分内容", ContentStore.getAll().filter(item => item.finalScore >= 85).length, "finalScore ≥ 85")}
+      ${statCard("待生成内容", ContentStore.getAll().filter(item => [CONTENT_STATUS.ANALYZED, CONTENT_STATUS.SELECTED].includes(item.status)).length, "ANALYZED / SELECTED")}
+      ${statCard("待审核", ContentStore.getAll().filter(item => item.status === CONTENT_STATUS.REVIEWING).length, "REVIEWING")}
+      ${statCard("待发布", ContentStore.getAll().filter(item => [CONTENT_STATUS.VIDEO_READY, CONTENT_STATUS.SCHEDULED].includes(item.status)).length, "VIDEO_READY / SCHEDULED")}
+      ${statCard("已发布", ContentStore.getAll().filter(item => item.status === CONTENT_STATUS.PUBLISHED).length, "PUBLISHED")}
     </div>
     <div class="grid two">
       <div class="card"><h3>今日推荐 Top 5</h3><div class="grid">${top5.map(compactContentRow).join("")}</div></div>
@@ -497,10 +772,7 @@ function renderDashboard() {
           <div class="meta">更新时间：${new Date(item.updatedAt).toLocaleString("zh-CN")} · ${item.sourcePlatform}</div>
         </div>`).join("")}</div></div>
     </div>
-    <div class="card">
-      <h3>AI Copilot 模拟建议</h3>
-      <p>今天建议优先处理 finalScore 最高的 3 条内容。适合先做短视频，再改写成小红书图文。</p>
-    </div>
+    <div class="card"><h3>AI Copilot 模拟建议</h3><p>今天建议优先处理 finalScore 最高的 3 条内容。适合先做短视频，再改写成小红书图文。</p></div>
   `;
 }
 
@@ -526,16 +798,13 @@ function renderHotRadar() {
     platform: appState.filters.radarPlatform,
     score: appState.filters.radarScore
   }).sort((a, b) => b[appState.filters.radarSort] - a[appState.filters.radarSort]);
-  return `
-    ${renderRadarToolbar()}
-    ${appState.radarViewMode === "table" ? renderContentTable(items, "radar") : `<div class="grid two">${items.map(renderRadarCard).join("") || empty("没有匹配的热点。")}</div>`}
-  `;
+  return `${renderRadarToolbar()}${appState.radarViewMode === "table" ? renderContentTable(items, "radar") : `<div class="grid two">${items.map(renderRadarCard).join("") || empty("没有匹配的热点。")}</div>`}`;
 }
 
 function renderRadarToolbar() {
   return `<div class="card toolbar">
     <input class="grow" id="radarQuery" value="${escapeHtml(appState.filters.radarQuery)}" placeholder="搜索热点标题、标签、平台..." />
-    <select id="radarPlatform"><option value="">全部平台</option>${PLATFORMS.map(p => `<option ${p === appState.filters.radarPlatform ? "selected" : ""}>${p}</option>`).join("")}</select>
+    <select id="radarPlatform"><option value="">全部平台</option>${SOURCE_PLATFORMS.map(p => `<option ${p === appState.filters.radarPlatform ? "selected" : ""}>${p}</option>`).join("")}</select>
     <select id="radarScore"><option value="">全部分数</option><option value="80" ${appState.filters.radarScore === "80" ? "selected" : ""}>80+</option><option value="90" ${appState.filters.radarScore === "90" ? "selected" : ""}>90+</option></select>
     <select id="radarSort"><option value="finalScore" ${appState.filters.radarSort === "finalScore" ? "selected" : ""}>按 finalScore</option><option value="hotScore" ${appState.filters.radarSort === "hotScore" ? "selected" : ""}>按 hotScore</option><option value="trendScore" ${appState.filters.radarSort === "trendScore" ? "selected" : ""}>按 trendScore</option></select>
     <div class="view-toggle toolbar"><button class="btn small ghost ${appState.radarViewMode === "card" ? "active" : ""}" data-radar-view="card">卡片</button><button class="btn small ghost ${appState.radarViewMode === "table" ? "active" : ""}" data-radar-view="table">表格</button></div>
@@ -557,18 +826,14 @@ function renderRadarCard(item) {
   </div>`;
 }
 
-function renderLibrary() {
+function renderContentLibrary() {
   const items = ContentStore.filter({
     query: appState.filters.libraryQuery,
     status: appState.filters.libraryStatus,
     platform: appState.filters.libraryPlatform,
     tag: appState.filters.libraryTag
   });
-  return `
-    ${renderLibraryToolbar()}
-    ${renderContentForm()}
-    ${appState.filters.libraryView === "table" ? renderContentTable(items, "library") : `<div class="grid two">${items.map(renderLibraryCard).join("") || empty("内容库暂无匹配内容。")}</div>`}
-  `;
+  return `${renderLibraryToolbar()}${renderContentForm()}${appState.filters.libraryView === "table" ? renderContentTable(items, "library") : `<div class="grid two">${items.map(renderLibraryCard).join("") || empty("内容库暂无匹配内容。")}</div>`}`;
 }
 
 function allTags() {
@@ -579,7 +844,7 @@ function renderLibraryToolbar() {
   return `<div class="card toolbar">
     <input class="grow" id="libraryQuery" value="${escapeHtml(appState.filters.libraryQuery)}" placeholder="搜索内容库..." />
     <select id="libraryStatus"><option value="">全部状态</option>${Object.values(CONTENT_STATUS).map(s => `<option value="${s}" ${s === appState.filters.libraryStatus ? "selected" : ""}>${STATUS_LABELS[s]}</option>`).join("")}</select>
-    <select id="libraryPlatform"><option value="">全部平台</option>${PLATFORMS.map(p => `<option ${p === appState.filters.libraryPlatform ? "selected" : ""}>${p}</option>`).join("")}</select>
+    <select id="libraryPlatform"><option value="">全部平台</option>${SOURCE_PLATFORMS.map(p => `<option ${p === appState.filters.libraryPlatform ? "selected" : ""}>${p}</option>`).join("")}</select>
     <select id="libraryTag"><option value="">全部标签</option>${allTags().map(tag => `<option ${tag === appState.filters.libraryTag ? "selected" : ""}>${escapeHtml(tag)}</option>`).join("")}</select>
     <div class="view-toggle toolbar"><button class="btn small ghost ${appState.filters.libraryView === "card" ? "active" : ""}" data-library-view="card">卡片</button><button class="btn small ghost ${appState.filters.libraryView === "table" ? "active" : ""}" data-library-view="table">表格</button></div>
   </div>`;
@@ -592,7 +857,7 @@ function renderContentForm() {
     <div class="form-grid">
       <div class="span-2"><label>中文标题</label><input id="contentTitle" value="${escapeHtml(item?.title)}" placeholder="例如：Claude Code 工作流为什么爆火？" /></div>
       <div><label>状态</label><select id="contentStatus">${statusOptions(item?.status || CONTENT_STATUS.DISCOVERED)}</select></div>
-      <div><label>来源平台</label><select id="contentPlatform">${platformOptions(item?.sourcePlatform)}</select></div>
+      <div><label>来源平台</label><select id="contentPlatform">${sourcePlatformOptions(item?.sourcePlatform)}</select></div>
       <div class="span-2"><label>原始标题</label><input id="contentSourceTitle" value="${escapeHtml(item?.sourceTitle)}" /></div>
       <div class="span-2"><label>原始链接</label><input id="contentSourceUrl" value="${escapeHtml(item?.sourceUrl)}" placeholder="https://..." /></div>
       <div><label>发布时间</label><input id="contentPublishedAt" type="date" value="${escapeHtml(item?.sourcePublishedAt || today())}" /></div>
@@ -600,16 +865,13 @@ function renderContentForm() {
       <div><label>趋势评分</label><input id="contentTrendScore" type="number" min="0" max="100" value="${escapeHtml(item?.trendScore ?? 80)}" /></div>
       <div><label>中文适配</label><input id="contentChinaFit" type="number" min="0" max="100" value="${escapeHtml(item?.chinaFitScore ?? 80)}" /></div>
       <div><label>最终评分</label><input id="contentFinalScore" type="number" min="0" max="100" value="${escapeHtml(item?.finalScore ?? 80)}" /></div>
-      <div><label>推荐平台</label><select id="contentTargetPlatform">${targetOptions(item?.targetPlatforms?.[0])}</select></div>
+      <div><label>推荐平台</label><select id="contentTargetPlatform">${targetPlatformOptions(item?.targetPlatforms?.[0])}</select></div>
       <div><label>内容类型</label><select id="contentType">${CONTENT_TYPES.map(type => `<option ${type === item?.contentType ? "selected" : ""}>${type}</option>`).join("")}</select></div>
       <div class="span-all"><label>标签（逗号分隔）</label><input id="contentTags" value="${escapeHtml((item?.tags || []).join('，'))}" /></div>
       <div class="span-all"><label>原文摘要</label><textarea id="contentSummary">${escapeHtml(item?.originalSummary)}</textarea></div>
       <div class="span-all"><label>模拟分析结果</label><textarea id="contentAnalysis">${escapeHtml(item?.aiAnalysis)}</textarea></div>
     </div>
-    <div class="toolbar" style="margin-top:12px">
-      <button class="btn" data-save-content>${item ? "保存编辑" : "新增 Content"}</button>
-      ${item ? `<button class="btn ghost" data-cancel-edit>取消编辑</button>` : ""}
-    </div>
+    <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-content>${item ? "保存编辑" : "新增 Content"}</button>${item ? `<button class="btn ghost" data-cancel-edit>取消编辑</button>` : ""}</div>
   </div>`;
 }
 
@@ -665,6 +927,7 @@ function renderWorkspace() {
   const content = ContentStore.getById(appState.selectedContentId) || ContentStore.getAll()[0];
   if (!content) return empty("还没有 Content，请先在 Content Library 新增。");
   appState.selectedContentId = content.id;
+  const assets = GeneratedAssetStore.getByContentId(content.id);
   return `<div class="card toolbar">
       <select id="workspaceSelect">${ContentStore.getAll().map(item => `<option value="${item.id}" ${item.id === content.id ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}</select>
       <button class="btn ghost" data-analyze="${content.id}">Mock 分析</button>
@@ -695,76 +958,79 @@ function renderWorkspace() {
         <h3>生成结果</h3>
         <div class="toolbar">
           <button class="btn small ghost" data-generate="${content.id}:小红书">生成小红书</button>
-          <button class="btn small ghost" data-generate="${content.id}:抖音">生成抖音脚本</button>
-          <button class="btn small ghost" data-generate="${content.id}:公众号">生成公众号</button>
-          <button class="btn small ghost" data-generate="${content.id}:视频分镜">生成视频分镜</button>
+          <button class="btn small ghost" data-generate="${content.id}:抖音">生成抖音</button>
+          <button class="btn small ghost" data-generate="${content.id}:B站">生成 B站</button>
         </div>
-        ${kv("小红书文案", content.xiaohongshuDraft || "未生成")}
-        ${kv("抖音 60 秒脚本", content.douyinScript || "未生成")}
-        ${kv("B站脚本", content.bilibiliScript || "未生成")}
-        ${kv("公众号结构", content.wechatArticle || "未生成")}
-        ${kv("封面标题", content.coverTitle || "未生成")}
-        ${kv("视频分镜", content.videoStoryboard || "未生成")}
+        ${renderAssetGroup("小红书", assets, [ASSET_TYPES.XHS_POST, ASSET_TYPES.COVER_TITLE])}
+        ${renderAssetGroup("抖音", assets, [ASSET_TYPES.DOUYIN_SCRIPT, ASSET_TYPES.VIDEO_STORYBOARD, ASSET_TYPES.VOICEOVER_TEXT, ASSET_TYPES.SUBTITLE_TEXT])}
+        ${renderAssetGroup("B站", assets, [ASSET_TYPES.BILIBILI_SCRIPT, ASSET_TYPES.VIDEO_STORYBOARD, ASSET_TYPES.COVER_TITLE])}
       </div>
     </div>`;
 }
 
-function kv(label, value) {
-  return `<div class="divider"></div><strong>${label}</strong><div class="meta">${value || "—"}</div>`;
+function renderAssetGroup(platform, assets, types) {
+  return `<div class="divider"></div><strong>${platform}</strong>${types.map(type => {
+    const asset = assets.find(item => item.platform === platform && item.assetType === type) || assets.find(item => item.assetType === type && type === ASSET_TYPES.VIDEO_STORYBOARD);
+    return `<div class="meta"><b>${ASSET_LABELS[type]}</b><br>${escapeHtml(asset?.content || "未生成")}</div>`;
+  }).join("")}`;
 }
 
 function renderVideoPipeline() {
-  const items = ContentStore.getAll().filter(item => item.douyinScript || item.videoStoryboard || [CONTENT_STATUS.WRITING, CONTENT_STATUS.REVIEWING, CONTENT_STATUS.VIDEO_READY, CONTENT_STATUS.SCHEDULED].includes(item.status));
-  return `<div class="grid">${items.map(renderVideoItem).join("") || empty("还没有进入视频制作阶段的内容。")}</div>`;
+  ensureVideoProjectsForGeneratedVideo();
+  const projects = VideoProjectStore.getAll();
+  return `<div class="grid">${projects.map(renderVideoProject).join("") || empty("还没有进入视频制作阶段的内容。")}</div>`;
 }
 
-function renderVideoItem(item) {
+function renderVideoProject(project) {
+  const item = ContentStore.getById(project.contentId);
+  if (!item) return "";
   const keys = [["scriptDone", "脚本"], ["storyboardDone", "分镜"], ["voiceoverDone", "配音"], ["subtitleDone", "字幕"], ["coverDone", "封面"], ["videoDone", "成片"], ["readyToPublish", "可发布"]];
-  const done = keys.filter(([key]) => item.videoPipeline?.[key]).length;
-  const percent = Math.round(done / keys.length * 100);
   return `<div class="card item-card">
     <div class="item-head"><h3 class="item-title">${escapeHtml(item.title)}</h3>${statusPill(item.status)}</div>
-    <div class="meta">${item.targetPlatforms.join(" / ")} · 进度 ${percent}%</div>
-    <div class="progress"><i style="width:${percent}%"></i></div>
-    <div class="checks">${keys.map(([key, label]) => `<label><input type="checkbox" data-video-check="${item.id}:${key}" ${item.videoPipeline?.[key] ? "checked" : ""}/> ${label}</label>`).join("")}</div>
-    <div class="toolbar"><button class="btn small" data-video-ready="${item.id}">标记视频就绪</button><button class="btn small ghost" data-open-workspace="${item.id}">进入工作区</button></div>
+    <div class="meta">${item.targetPlatforms.join(" / ")} · 进度 ${project.progress}%</div>
+    <div class="progress"><i style="width:${project.progress}%"></i></div>
+    <div class="checks">${keys.map(([key, label]) => `<label><input type="checkbox" data-video-check="${project.id}:${key}" ${project[key] ? "checked" : ""}/> ${label}</label>`).join("")}</div>
+    <div class="toolbar"><button class="btn small" data-video-ready="${project.id}">标记视频就绪</button><button class="btn small ghost" data-open-workspace="${item.id}">进入工作区</button></div>
   </div>`;
 }
 
 function renderPublishCenter() {
   const selected = ContentStore.getById(appState.selectedContentId) || ContentStore.getAll()[0];
-  const jobs = ContentStore.getAll().flatMap(content => content.publishJobs.map(job => ({ ...job, contentId: content.id, title: content.title })));
+  const editJob = appState.editPublishJobId ? PublishJobStore.getById(appState.editPublishJobId) : null;
   return `<div class="card">
-    <h3>新增 / 编辑发布计划</h3>
+    <h3>${editJob ? "编辑发布计划" : "新增发布计划"}</h3>
     <div class="form-grid">
-      <div class="span-2"><label>内容</label><select id="publishContentId">${ContentStore.getAll().map(item => `<option value="${item.id}" ${item.id === selected?.id ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}</select></div>
-      <div><label>平台</label><select id="publishPlatform">${targetOptions()}</select></div>
-      <div><label>发布时间</label><input id="publishScheduledAt" type="datetime-local" /></div>
-      <div><label>状态</label><select id="publishStatus">${Object.values(PUBLISH_STATUS).map(s => `<option value="${s}">${PUBLISH_STATUS_LABELS[s]}</option>`).join("")}</select></div>
-      <div class="span-2"><label>链接</label><input id="publishUrl" placeholder="发布后填入链接" /></div>
-      <div class="span-all"><label>备注</label><textarea id="publishNotes"></textarea></div>
+      <div class="span-2"><label>内容</label><select id="publishContentId">${ContentStore.getAll().map(item => `<option value="${item.id}" ${item.id === (editJob?.contentId || selected?.id) ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}</select></div>
+      <div><label>平台</label><select id="publishPlatform">${targetPlatformOptions(editJob?.platform)}</select></div>
+      <div><label>发布时间</label><input id="publishScheduledAt" type="datetime-local" value="${escapeHtml(editJob?.scheduledAt || "")}" /></div>
+      <div><label>状态</label><select id="publishStatus">${Object.values(PUBLISH_STATUS).map(s => `<option value="${s}" ${s === editJob?.status ? "selected" : ""}>${PUBLISH_STATUS_LABELS[s]}</option>`).join("")}</select></div>
+      <div class="span-2"><label>链接</label><input id="publishUrl" value="${escapeHtml(editJob?.url)}" placeholder="发布后填入链接" /></div>
+      <div class="span-all"><label>备注</label><textarea id="publishNotes">${escapeHtml(editJob?.notes)}</textarea></div>
     </div>
-    <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-publish>保存发布计划</button></div>
+    <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-publish>${editJob ? "保存发布计划" : "新增发布计划"}</button>${editJob ? `<button class="btn ghost" data-cancel-publish>取消</button>` : ""}</div>
   </div>
-  <div class="card"><h3>发布计划</h3>${jobs.length ? renderJobsTable(jobs) : empty("暂无发布计划。")}</div>`;
+  <div class="card"><h3>发布计划</h3>${PublishJobStore.getAll().length ? renderJobsTable(PublishJobStore.getAll()) : empty("暂无发布计划。")}</div>`;
 }
 
 function renderJobsTable(jobs) {
   return `<div class="table-wrap"><table><thead><tr><th>发布日期</th><th>平台</th><th>标题</th><th>状态</th><th>链接</th><th>备注</th><th>操作</th></tr></thead><tbody>
-    ${jobs.map(job => `<tr>
-      <td>${escapeHtml(job.scheduledAt)}</td><td>${escapeHtml(job.platform)}</td><td>${escapeHtml(job.title)}</td><td>${PUBLISH_STATUS_LABELS[job.status] || job.status}</td><td>${escapeHtml(job.url || "—")}</td><td>${escapeHtml(job.notes || "—")}</td>
-      <td><button class="btn small ghost" data-edit-job="${job.contentId}:${job.id}">编辑</button> <button class="btn small danger" data-remove-job="${job.contentId}:${job.id}">删除</button></td>
-    </tr>`).join("")}
+    ${jobs.map(job => {
+      const content = ContentStore.getById(job.contentId);
+      return `<tr>
+        <td>${escapeHtml(job.scheduledAt)}</td><td>${escapeHtml(job.platform)}</td><td>${escapeHtml(content?.title || "内容已删除")}</td><td>${PUBLISH_STATUS_LABELS[job.status] || job.status}</td><td>${escapeHtml(job.url || "—")}</td><td>${escapeHtml(job.notes || "—")}</td>
+        <td><button class="btn small ghost" data-edit-job="${job.id}">编辑</button> <button class="btn small danger" data-remove-job="${job.id}">删除</button></td>
+      </tr>`;
+    }).join("")}
   </tbody></table></div>`;
 }
 
 function renderAnalytics() {
-  const published = ContentStore.getAll().filter(item => [CONTENT_STATUS.PUBLISHED, CONTENT_STATUS.TRACKING].includes(item.status) || item.analytics.length);
+  const records = AnalyticsStore.getAll();
   return `<div class="card">
     <h3>手动录入数据</h3>
     <div class="form-grid">
       <div class="span-2"><label>内容</label><select id="analyticsContentId">${ContentStore.getAll().map(item => `<option value="${item.id}">${escapeHtml(item.title)}</option>`).join("")}</select></div>
-      <div><label>平台</label><select id="analyticsPlatform">${targetOptions()}</select></div>
+      <div><label>平台</label><select id="analyticsPlatform">${targetPlatformOptions()}</select></div>
       <div><label>发布时间</label><input id="analyticsPublishedAt" type="datetime-local" /></div>
       <div><label>播放量</label><input id="analyticsViews" type="number" value="0" /></div>
       <div><label>点赞</label><input id="analyticsLikes" type="number" value="0" /></div>
@@ -776,17 +1042,20 @@ function renderAnalytics() {
     </div>
     <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-analytics>保存并生成 mock 复盘</button></div>
   </div>
-  <div class="grid">${published.map(item => `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(item.title)}</h3>${statusPill(item.status)}</div>${item.analytics.map(a => `<div class="meta">${a.platform} · 播放 ${a.views} · 赞 ${a.likes} · 评 ${a.comments} · 完播 ${escapeHtml(a.completionRate || "—")} · 涨粉 ${a.followersGained}</div><p>${escapeHtml(a.reviewNotes)}</p>`).join("") || "<div class='meta'>暂无数据</div>"}</div>`).join("") || empty("暂无已发布或追踪中的内容。")}</div>`;
+  <div class="grid">${records.map(record => {
+    const item = ContentStore.getById(record.contentId);
+    return `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(item?.title || "内容已删除")}</h3><span class="chip">${record.platform}</span></div><div class="meta">播放 ${record.views} · 赞 ${record.likes} · 评 ${record.comments} · 完播 ${escapeHtml(record.completionRate || "—")} · 涨粉 ${record.followersGained}</div><p>${escapeHtml(record.reviewNotes)}</p></div>`;
+  }).join("") || empty("暂无数据复盘记录。")}</div>`;
 }
 
 function renderPromptLibrary() {
-  const item = appState.editPromptId ? db.promptTemplates.find(p => p.id === appState.editPromptId) : null;
+  const item = appState.editPromptId ? PromptStore.getById(appState.editPromptId) : null;
   return `<div class="card">
     <h3>${item ? "编辑 Prompt" : "新增 Prompt"}</h3>
     <div class="form-grid">
       <div><label>名称</label><input id="promptName" value="${escapeHtml(item?.name)}" /></div>
       <div><label>分类</label><input id="promptCategory" value="${escapeHtml(item?.category)}" /></div>
-      <div><label>平台</label><input id="promptPlatform" value="${escapeHtml(item?.platform)}" /></div>
+      <div><label>平台</label><select id="promptPlatform"><option>通用</option>${TARGET_PLATFORMS.map(p => `<option ${p === item?.platform ? "selected" : ""}>${p}</option>`).join("")}</select></div>
       <div><label>版本</label><input id="promptVersion" value="${escapeHtml(item?.version || "1.0")}" /></div>
       <div><label>成功率</label><input id="promptSuccessRate" type="number" min="0" max="100" value="${escapeHtml(item?.successRate ?? 80)}" /></div>
       <div><label>变量</label><input id="promptVariables" value="${escapeHtml((item?.variables || []).join('，'))}" /></div>
@@ -794,11 +1063,11 @@ function renderPromptLibrary() {
     </div>
     <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-prompt>${item ? "保存 Prompt" : "新增 Prompt"}</button>${item ? `<button class="btn ghost" data-cancel-prompt>取消</button>` : ""}</div>
   </div>
-  <div class="grid two">${db.promptTemplates.map(p => `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(p.name)}</h3><span class="score">${p.successRate}%</span></div><div class="meta">${p.category} · ${p.platform} · v${p.version}</div>${tagChips(p.variables)}<p>${escapeHtml(p.template)}</p><div class="toolbar"><button class="btn small ghost" data-edit-prompt="${p.id}">编辑</button><button class="btn small danger" data-remove-prompt="${p.id}">删除</button></div></div>`).join("")}</div>`;
+  <div class="grid two">${PromptStore.getAll().map(p => `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(p.name)}</h3><span class="score">${p.successRate}%</span></div><div class="meta">${p.category} · ${p.platform} · v${p.version}</div>${tagChips(p.variables)}<p>${escapeHtml(p.template)}</p><div class="toolbar"><button class="btn small ghost" data-edit-prompt="${p.id}">编辑</button><button class="btn small danger" data-remove-prompt="${p.id}">删除</button></div></div>`).join("")}</div>`;
 }
 
 function renderKnowledgeBase() {
-  const item = appState.editKnowledgeId ? db.knowledgeItems.find(k => k.id === appState.editKnowledgeId) : null;
+  const item = appState.editKnowledgeId ? KnowledgeStore.getById(appState.editKnowledgeId) : null;
   return `<div class="card">
     <h3>${item ? "编辑知识条目" : "新增知识条目"}</h3>
     <div class="form-grid">
@@ -810,38 +1079,18 @@ function renderKnowledgeBase() {
     </div>
     <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-knowledge>${item ? "保存知识" : "新增知识"}</button>${item ? `<button class="btn ghost" data-cancel-knowledge>取消</button>` : ""}</div>
   </div>
-  <div class="grid two">${db.knowledgeItems.map(k => `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(k.title)}</h3><span class="chip">${escapeHtml(k.topic)}</span></div><div class="meta">来源：${escapeHtml(k.source)} · 关联内容：${k.linkedContentIds.length}</div>${tagChips(k.tags)}<p>${escapeHtml(k.summary)}</p><div class="toolbar"><button class="btn small ghost" data-edit-knowledge="${k.id}">编辑</button><button class="btn small danger" data-remove-knowledge="${k.id}">删除</button></div></div>`).join("")}</div>`;
+  <div class="grid two">${KnowledgeStore.getAll().map(k => `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(k.title)}</h3><span class="chip">${escapeHtml(k.topic)}</span></div><div class="meta">来源：${escapeHtml(k.source)} · 关联内容：${k.linkedContentIds.length}</div>${tagChips(k.tags)}<p>${escapeHtml(k.summary)}</p><div class="toolbar"><button class="btn small ghost" data-edit-knowledge="${k.id}">编辑</button><button class="btn small danger" data-remove-knowledge="${k.id}">删除</button></div></div>`).join("")}</div>`;
 }
 
 function renderSettings() {
   return `<div class="grid two">
-    <div class="card">
-      <h3>Storage Providers</h3>
-      <p>当前启用：<strong>${db.settings.provider}</strong></p>
-      <div class="mini-stack">
-        <span class="chip">StorageProvider</span>
-        <span class="chip">LocalStorageProvider 已实现</span>
-        <span class="chip">SupabaseProvider placeholder</span>
-      </div>
-    </div>
-    <div class="card">
-      <h3>AI Capabilities</h3>
-      <p>原 Skills 管理已合并到这里。所有生成行为通过统一 aiRouter mock 方法。</p>
-      <div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div>
-    </div>
-    <div class="card">
-      <h3>AI Router Providers</h3>
-      <div class="mini-stack">${Object.entries(providers).map(([name, meta]) => `<span class="chip">${name} · ${meta.enabled ? "mock enabled" : "placeholder"}</span>`).join("")}</div>
-    </div>
-    <div class="card">
-      <h3>后台配置</h3>
-      <textarea id="settingsNotes">${escapeHtml(db.settings.adminNotes)}</textarea>
-      <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-settings>保存设置</button></div>
-    </div>
+    <div class="card"><h3>Storage Providers</h3><p>当前启用：<strong>${db.settings.provider}</strong></p><div class="mini-stack"><span class="chip">StorageProvider</span><span class="chip">LocalStorageProvider 已实现</span><span class="chip">SupabaseProvider placeholder</span></div></div>
+    <div class="card"><h3>AI Capabilities</h3><p>原 Skills 管理已合并到这里。所有生成行为通过统一 aiRouter mock 方法。</p><div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>
+    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span></div></div>
+    <div class="card"><h3>后台配置</h3><textarea id="settingsNotes">${escapeHtml(db.settings.adminNotes)}</textarea><div class="toolbar" style="margin-top:12px"><button class="btn" data-save-settings>保存设置</button></div></div>
   </div>`;
 }
 
-function empty(text) { return `<div class="empty">${text}</div>`; }
 function filteredGlobal() { return appState.filters.global ? ContentStore.search(appState.filters.global) : ContentStore.getAll(); }
 
 function bindScopedInputs() {
@@ -862,15 +1111,17 @@ function bindScopedInputs() {
 function renderHealth() {
   const target = document.getElementById("systemHealth");
   if (!target) return;
-  const all = db.contentItems || [];
   target.innerHTML = `
-    <span class="chip">Content ${all.length}</span>
-    <span class="chip">Prompt ${db.promptTemplates?.length || 0}</span>
-    <span class="chip">Knowledge ${db.knowledgeItems?.length || 0}</span>
+    <span class="chip">Content ${db.contentItems?.length || 0}</span>
+    <span class="chip">Asset ${db.generatedAssets?.length || 0}</span>
+    <span class="chip">Video ${db.videoProjects?.length || 0}</span>
     <span class="chip">Provider ${db.settings?.provider || "LocalStorageProvider"}</span>
   `;
 }
 
+// =========================
+// main.js
+// =========================
 document.addEventListener("click", async event => {
   const target = event.target.closest("button");
   if (!target) return;
@@ -878,12 +1129,12 @@ document.addEventListener("click", async event => {
   if (target.id === "menuBtn") return document.body.classList.add("nav-open");
   if (target.id === "resetMockBtn" || target.id === "mobileResetBtn") {
     localStorage.removeItem(STORAGE_KEY);
-    db = normalizeAppData(null);
+    db = migrateDatabase(null);
     appState.selectedContentId = null;
     saveDb();
     return render();
   }
-  if (target.id === "newContentTopBtn") { appState.page = "library"; appState.editContentId = null; return setPage("library"); }
+  if (target.id === "newContentTopBtn") { appState.editContentId = null; return setPage("library"); }
   if (target.dataset.openWorkspace) { appState.selectedContentId = target.dataset.openWorkspace; return setPage("workspace"); }
   if (target.dataset.status) {
     const [id, status] = target.dataset.status.split(":");
@@ -913,48 +1164,30 @@ document.addEventListener("click", async event => {
     return render();
   }
   if (target.dataset.videoReady) {
-    const item = ContentStore.getById(target.dataset.videoReady);
-    ContentStore.update(item.id, { status: CONTENT_STATUS.VIDEO_READY, videoPipeline: { ...item.videoPipeline, readyToPublish: true } });
+    const project = VideoProjectStore.getById(target.dataset.videoReady);
+    if (project) {
+      VideoProjectStore.update(project.id, { readyToPublish: true });
+      ContentStore.update(project.contentId, { status: CONTENT_STATUS.VIDEO_READY });
+    }
     return render();
   }
   if (target.dataset.savePublish !== undefined) {
-    const content = ContentStore.getById(document.getElementById("publishContentId").value);
-    if (!content) return;
-    const job = {
-      id: appState.editPublish?.jobId || uid("job"),
+    const payload = {
+      contentId: document.getElementById("publishContentId").value,
       platform: document.getElementById("publishPlatform").value,
       scheduledAt: document.getElementById("publishScheduledAt").value || new Date().toISOString().slice(0, 16),
       status: document.getElementById("publishStatus").value,
       url: document.getElementById("publishUrl").value.trim(),
       notes: document.getElementById("publishNotes").value.trim()
     };
-    const publishJobs = appState.editPublish
-      ? content.publishJobs.map(item => item.id === job.id ? job : item)
-      : [job, ...content.publishJobs];
-    ContentStore.update(content.id, { publishJobs, status: job.status === PUBLISH_STATUS.PUBLISHED ? CONTENT_STATUS.PUBLISHED : CONTENT_STATUS.SCHEDULED });
-    appState.editPublish = null;
+    const job = appState.editPublishJobId ? PublishJobStore.update(appState.editPublishJobId, payload) : PublishJobStore.create(payload);
+    ContentStore.update(payload.contentId, { status: payload.status === PUBLISH_STATUS.PUBLISHED ? CONTENT_STATUS.PUBLISHED : CONTENT_STATUS.SCHEDULED });
+    appState.editPublishJobId = null;
     return render();
   }
-  if (target.dataset.editJob) {
-    const [contentId, jobId] = target.dataset.editJob.split(":");
-    const content = ContentStore.getById(contentId);
-    const job = content?.publishJobs.find(item => item.id === jobId);
-    if (!job) return;
-    appState.editPublish = { contentId, jobId };
-    document.getElementById("publishContentId").value = contentId;
-    document.getElementById("publishPlatform").value = job.platform;
-    document.getElementById("publishScheduledAt").value = job.scheduledAt;
-    document.getElementById("publishStatus").value = job.status;
-    document.getElementById("publishUrl").value = job.url || "";
-    document.getElementById("publishNotes").value = job.notes || "";
-    return;
-  }
-  if (target.dataset.removeJob) {
-    const [contentId, jobId] = target.dataset.removeJob.split(":");
-    const content = ContentStore.getById(contentId);
-    ContentStore.update(contentId, { publishJobs: content.publishJobs.filter(job => job.id !== jobId) });
-    return render();
-  }
+  if (target.dataset.editJob) { appState.editPublishJobId = target.dataset.editJob; return render(); }
+  if (target.dataset.cancelPublish !== undefined) { appState.editPublishJobId = null; return render(); }
+  if (target.dataset.removeJob) { PublishJobStore.remove(target.dataset.removeJob); return render(); }
   if (target.dataset.saveAnalytics !== undefined) {
     workflowPipeline.recordAnalytics(document.getElementById("analyticsContentId").value, {
       platform: document.getElementById("analyticsPlatform").value,
@@ -973,7 +1206,7 @@ document.addEventListener("click", async event => {
     const payload = {
       name: document.getElementById("promptName").value.trim(),
       category: document.getElementById("promptCategory").value.trim(),
-      platform: document.getElementById("promptPlatform").value.trim(),
+      platform: document.getElementById("promptPlatform").value,
       template: document.getElementById("promptTemplate").value.trim(),
       variables: splitTags(document.getElementById("promptVariables").value),
       version: document.getElementById("promptVersion").value.trim(),
@@ -1014,8 +1247,8 @@ document.addEventListener("change", event => {
   const target = event.target;
   if (target.dataset.videoCheck) {
     const [id, key] = target.dataset.videoCheck.split(":");
-    const content = ContentStore.getById(id);
-    ContentStore.update(id, { videoPipeline: { ...content.videoPipeline, [key]: target.checked } });
+    const project = VideoProjectStore.getById(id);
+    if (project) VideoProjectStore.update(id, { [key]: target.checked });
     render();
   }
 });
