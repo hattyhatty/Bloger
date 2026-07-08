@@ -68,6 +68,16 @@ const TASK_TYPE_LABELS = Object.freeze({
   REVIEW_CONTENT: "审核内容",
   SCHEDULE_PUBLISH: "创建排期"
 });
+const AI_PROVIDERS = Object.freeze(["mock", "openai", "zai", "deepseek", "claude", "gemini", "custom"]);
+const AI_PROVIDER_DEFAULT_BASE_URLS = Object.freeze({
+  openai: "https://api.openai.com/v1",
+  zai: "",
+  deepseek: "https://api.deepseek.com",
+  claude: "",
+  gemini: "",
+  custom: "",
+  mock: ""
+});
 const ASSET_STATUS = Object.freeze({ DRAFT: "DRAFT", READY: "READY", ARCHIVED: "ARCHIVED" });
 const ASSET_TYPES = Object.freeze({
   XHS_POST: "xiaohongshu_post",
@@ -277,6 +287,30 @@ function normalizeTask(item = {}) {
   };
 }
 
+function normalizeAiApiConfig(item = {}) {
+  const provider = AI_PROVIDERS.includes(item.provider) ? item.provider : "mock";
+  return {
+    provider,
+    apiKey: item.apiKey || "",
+    baseUrl: item.baseUrl || "",
+    model: item.model || "mock",
+    temperature: Number.isFinite(Number(item.temperature)) ? Number(item.temperature) : 0.7,
+    maxTokens: Number(item.maxTokens) || 2000,
+    updatedAt: item.updatedAt || ""
+  };
+}
+
+function normalizeAiStatus(item = {}) {
+  return {
+    lastProvider: item.lastProvider || "",
+    lastModel: item.lastModel || "",
+    lastSuccess: Boolean(item.lastSuccess),
+    lastError: item.lastError || "",
+    lastFallbackReason: item.lastFallbackReason || "",
+    updatedAt: item.updatedAt || ""
+  };
+}
+
 function normalizePrompt(item = {}) {
   const createdAt = item.createdAt || now();
   return {
@@ -375,6 +409,9 @@ function migrateDatabase(raw) {
       adminNotes: source.settings?.adminNotes || "当前 V1.1 只启用小红书、抖音、B站三类发布目标。"
     }
   };
+
+  newDb.settings.aiApiConfig = normalizeAiApiConfig(source.settings?.aiApiConfig);
+  newDb.settings.aiStatus = normalizeAiStatus(source.settings?.aiStatus);
 
   const existingAssets = Array.isArray(source.generatedAssets) ? source.generatedAssets : [];
   const existingArchived = Array.isArray(source.archivedGeneratedAssets) ? source.archivedGeneratedAssets : [];
@@ -662,6 +699,125 @@ const aiRouter = {
   }
 };
 
+function getAiApiConfig() {
+  const config = normalizeAiApiConfig(db.settings?.aiApiConfig);
+  const defaultBaseUrl = AI_PROVIDER_DEFAULT_BASE_URLS[config.provider] || "";
+  return { ...config, baseUrl: config.baseUrl || defaultBaseUrl };
+}
+
+function getAiFallbackReason(config = getAiApiConfig()) {
+  if (config.provider === "mock") return "mock provider";
+  if (["claude", "gemini"].includes(config.provider)) return "provider placeholder";
+  if (!config.apiKey) return "missing api key";
+  if (!config.baseUrl) return "missing base url";
+  return "";
+}
+
+function mockAiText(prompt, options = {}) {
+  return `【Mock 生成】${options.format || "内容"}：围绕「${options.title || "AI 热点"}」输出中文化表达。核心钩子：把海外讨论翻译成中文用户能理解的机会点。`;
+}
+
+async function callOpenAICompatible({ baseUrl, apiKey, model, systemPrompt, userPrompt, temperature, maxTokens }) {
+  const url = `${String(baseUrl || "").replace(/\/$/, "")}/chat/completions`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ],
+      temperature,
+      max_tokens: maxTokens
+    })
+  });
+  if (!response.ok) throw new Error(`AI API HTTP ${response.status}`);
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content || "";
+}
+
+async function routeAiText(userPrompt, options = {}) {
+  const config = getAiApiConfig();
+  const fallbackReason = getAiFallbackReason(config);
+  if (fallbackReason) return mockAiText(userPrompt, options);
+  if (!["openai", "zai", "deepseek", "custom"].includes(config.provider)) return mockAiText(userPrompt, options);
+  try {
+    return await callOpenAICompatible({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      model: config.model,
+      systemPrompt: options.systemPrompt || "你是 AI Content OS 的内容生成助手。",
+      userPrompt,
+      temperature: config.temperature,
+      maxTokens: config.maxTokens
+    });
+  } catch {
+    return mockAiText(userPrompt, options);
+  }
+}
+
+async function testAiConnection() {
+  const config = getAiApiConfig();
+  const status = {
+    lastProvider: config.provider,
+    lastModel: config.model,
+    lastSuccess: false,
+    lastError: "",
+    lastFallbackReason: "",
+    updatedAt: now()
+  };
+  if (config.provider === "mock") {
+    status.lastSuccess = true;
+    status.lastFallbackReason = "Mock 模式正常。";
+  } else if (!config.apiKey) {
+    status.lastSuccess = true;
+    status.lastFallbackReason = "缺少 API Key，已 fallback 到 mock。";
+  } else if (!config.baseUrl) {
+    status.lastError = "缺少 Base URL。";
+  } else if (!["openai", "zai", "deepseek", "custom"].includes(config.provider)) {
+    status.lastSuccess = true;
+    status.lastFallbackReason = "当前 provider 先占位，已 fallback 到 mock。";
+  } else {
+    try {
+      await callOpenAICompatible({
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        model: config.model,
+        systemPrompt: "你是连接测试助手。",
+        userPrompt: "请回复：连接成功",
+        temperature: config.temperature,
+        maxTokens: Math.min(config.maxTokens || 2000, 200)
+      });
+      status.lastSuccess = true;
+    } catch (error) {
+      status.lastError = error.message || "连接失败";
+    }
+  }
+  db.settings.aiStatus = normalizeAiStatus(status);
+  saveDb();
+  render();
+  return db.settings.aiStatus;
+}
+
+Object.assign(aiRouter, {
+  getConfig: getAiApiConfig,
+  async generateText(prompt, options = {}) {
+    return routeAiText(prompt, options);
+  },
+  async summarize(text, options = {}) {
+    return routeAiText(`请总结以下内容：\n${text}`, { ...options, format: "总结" });
+  },
+  async generateScript(content, platform, options = {}) {
+    const assetType = options.assetType || "script";
+    const prompt = `请为平台「${platform}」生成 ${ASSET_LABELS[assetType] || "内容"}。\n标题：${content.title}\n来源标题：${content.sourceTitle}\n中文角度：${content.selectedAngle}\n摘要：${content.originalSummary}`;
+    return routeAiText(prompt, { ...options, title: content.title, format: `${platform} ${ASSET_LABELS[assetType] || "内容"}` });
+  }
+});
+
 // =========================
 // workflow/workflowPipeline.js
 // =========================
@@ -888,6 +1044,8 @@ window.LocalStorageProvider = LocalStorageProvider;
 window.SupabaseProvider = SupabaseProvider;
 window.aiRouter = aiRouter;
 window.workflowPipeline = workflowPipeline;
+window.callOpenAICompatible = callOpenAICompatible;
+window.testAiConnection = testAiConnection;
 window.PlannerAgent = PlannerAgent;
 window.ResearchAgent = ResearchAgent;
 window.WriterAgent = WriterAgent;
@@ -1007,7 +1165,7 @@ function render() {
     analytics: renderAnalytics,
     prompts: renderPromptLibrary,
     knowledge: renderKnowledgeBase,
-    settings: renderSettings
+    settings: renderSettingsV2
   };
   document.getElementById("app").innerHTML = (views[appState.page] || renderDashboard)();
   bindScopedInputs();
@@ -1391,6 +1549,53 @@ function renderSettings() {
   </div>`;
 }
 
+function renderSettingsV2() {
+  const config = getAiApiConfig();
+  const rawConfig = normalizeAiApiConfig(db.settings?.aiApiConfig);
+  const status = normalizeAiStatus(db.settings?.aiStatus);
+  const keyState = rawConfig.apiKey ? "已配置" : "未配置";
+  return `<div class="grid two">
+    <div class="card">
+      <h3>AI API 设置</h3>
+      <div class="form-grid">
+        <div><label>启用 Provider</label><select id="aiProvider">${AI_PROVIDERS.map(provider => `<option value="${provider}" ${provider === rawConfig.provider ? "selected" : ""}>${provider}</option>`).join("")}</select></div>
+        <div><label>API Key</label><input id="aiApiKey" type="password" value="" autocomplete="off" placeholder="${rawConfig.apiKey ? "已配置；留空则保留原 Key" : "未配置"}" /></div>
+        <div><label>Base URL</label><input id="aiBaseUrl" value="${escapeHtml(rawConfig.baseUrl)}" placeholder="例如：https://api.openai.com/v1" /></div>
+        <div><label>Model</label><input id="aiModel" value="${escapeHtml(rawConfig.model)}" placeholder="例如：gpt-5.5-mini" /></div>
+        <div><label>Temperature</label><input id="aiTemperature" type="number" min="0" max="2" step="0.1" value="${escapeHtml(rawConfig.temperature)}" /></div>
+        <div><label>Max Tokens</label><input id="aiMaxTokens" type="number" min="1" value="${escapeHtml(rawConfig.maxTokens)}" /></div>
+      </div>
+      <div class="toolbar" style="margin-top:12px">
+        <button class="btn" data-save-ai-settings>保存设置</button>
+        <button class="btn ghost" data-test-ai-connection>测试连接</button>
+      </div>
+      <div class="meta">安全提示：API Key 只存入当前浏览器 localStorage，不写死在代码里；页面状态只显示“已配置/未配置”。</div>
+    </div>
+    <div class="card">
+      <h3>AI 状态</h3>
+      ${kv("当前 Provider", config.provider)}
+      ${kv("当前 Model", config.model)}
+      ${kv("API Key", keyState)}
+      ${kv("Base URL", config.baseUrl || "未配置")}
+      ${kv("最近调用是否成功", status.updatedAt ? (status.lastSuccess ? "成功" : "失败") : "暂无测试")}
+      ${kv("最近错误", status.lastError || "—")}
+      ${kv("最近 fallback 原因", status.lastFallbackReason || "—")}
+      ${kv("更新时间", status.updatedAt ? new Date(status.updatedAt).toLocaleString("zh-CN") : "—")}
+    </div>
+    <div class="card">
+      <h3>Routing Policy</h3>
+      <p>当前 V1 所有任务默认使用 Settings 中启用的 provider，后续可扩展到不同任务绑定不同模型。</p>
+      <div class="mini-stack">
+        ${["planner.recommend", "research.analyze", "writer.xhs", "writer.douyin", "writer.bilibili", "review.content", "video.prepare"].map(route => `<span class="chip">${route} → ${config.provider}</span>`).join("")}
+      </div>
+    </div>
+    <div class="card"><h3>Storage Providers</h3><p>当前启用：<strong>${db.settings.provider}</strong></p><div class="mini-stack"><span class="chip">StorageProvider</span><span class="chip">LocalStorageProvider 已实现</span><span class="chip">SupabaseProvider placeholder</span></div></div>
+    <div class="card"><h3>AI Capabilities</h3><p>所有生成行为通过统一 aiRouter；真实调用仅预留给 openai / zai / deepseek / custom。</p><div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>
+    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
+    <div class="card"><h3>后台配置</h3><textarea id="settingsNotes">${escapeHtml(db.settings.adminNotes)}</textarea><div class="toolbar" style="margin-top:12px"><button class="btn" data-save-settings>保存设置</button></div></div>
+  </div>`;
+}
+
 function filteredGlobal() { return appState.filters.global ? ContentStore.search(appState.filters.global) : ContentStore.getAll(); }
 
 function bindScopedInputs() {
@@ -1412,12 +1617,17 @@ function renderHealth() {
   const target = document.getElementById("systemHealth");
   if (!target) return;
   const latestTasks = (db.tasks || []).map(normalizeTask).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 10);
+  const aiConfig = getAiApiConfig();
+  const rawAiConfig = normalizeAiApiConfig(db.settings?.aiApiConfig);
   target.innerHTML = `
     <span class="chip">Content ${db.contentItems?.length || 0}</span>
     <span class="chip">Asset ${db.generatedAssets?.length || 0}</span>
     <span class="chip">Video ${db.videoProjects?.length || 0}</span>
     <span class="chip">Tasks ${db.tasks?.length || 0}</span>
     <span class="chip">Provider ${db.settings?.provider || "LocalStorageProvider"}</span>
+    <span class="chip">AI Mode: ${aiConfig.provider}</span>
+    <span class="chip">Model: ${escapeHtml(aiConfig.model)}</span>
+    <span class="chip">Key: ${rawAiConfig.apiKey ? "已配置" : "未配置"}</span>
     <div class="divider"></div>
     <strong>Agent Command Bar</strong>
     <input id="agentCommandInput" placeholder="例如：今天值得做什么 / 分析当前内容 / 生成当前内容" />
@@ -1613,6 +1823,37 @@ document.addEventListener("click", async event => {
   if (target.dataset.editKnowledge) { appState.editKnowledgeId = target.dataset.editKnowledge; return render(); }
   if (target.dataset.cancelKnowledge !== undefined) { appState.editKnowledgeId = null; return render(); }
   if (target.dataset.removeKnowledge) { KnowledgeStore.remove(target.dataset.removeKnowledge); return render(); }
+  if (target.dataset.saveAiSettings !== undefined) {
+    const currentConfig = normalizeAiApiConfig(db.settings?.aiApiConfig);
+    db.settings.aiApiConfig = normalizeAiApiConfig({
+      provider: document.getElementById("aiProvider").value,
+      apiKey: document.getElementById("aiApiKey").value || currentConfig.apiKey,
+      baseUrl: document.getElementById("aiBaseUrl").value.trim(),
+      model: document.getElementById("aiModel").value.trim() || "mock",
+      temperature: document.getElementById("aiTemperature").value,
+      maxTokens: document.getElementById("aiMaxTokens").value,
+      updatedAt: now()
+    });
+    saveDb();
+    return render();
+  }
+  if (target.dataset.testAiConnection !== undefined) {
+    if (document.getElementById("aiProvider")) {
+      const currentConfig = normalizeAiApiConfig(db.settings?.aiApiConfig);
+      db.settings.aiApiConfig = normalizeAiApiConfig({
+        provider: document.getElementById("aiProvider").value,
+        apiKey: document.getElementById("aiApiKey").value || currentConfig.apiKey,
+        baseUrl: document.getElementById("aiBaseUrl").value.trim(),
+        model: document.getElementById("aiModel").value.trim() || "mock",
+        temperature: document.getElementById("aiTemperature").value,
+        maxTokens: document.getElementById("aiMaxTokens").value,
+        updatedAt: now()
+      });
+      saveDb();
+    }
+    await testAiConnection();
+    return;
+  }
   if (target.dataset.saveSettings !== undefined) {
     db.settings.adminNotes = document.getElementById("settingsNotes").value.trim();
     saveDb();
