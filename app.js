@@ -304,7 +304,9 @@ function normalizeAiStatus(item = {}) {
   return {
     lastProvider: item.lastProvider || "",
     lastModel: item.lastModel || "",
+    lastTask: item.lastTask || "",
     lastSuccess: Boolean(item.lastSuccess),
+    lastUsedFallback: Boolean(item.lastUsedFallback),
     lastError: item.lastError || "",
     lastFallbackReason: item.lastFallbackReason || "",
     updatedAt: item.updatedAt || ""
@@ -717,6 +719,44 @@ function mockAiText(prompt, options = {}) {
   return `【Mock 生成】${options.format || "内容"}：围绕「${options.title || "AI 热点"}」输出中文化表达。核心钩子：把海外讨论翻译成中文用户能理解的机会点。`;
 }
 
+function safeParseJSON(text, fallback) {
+  if (!text) return fallback;
+  const raw = String(text).trim();
+  const candidates = [
+    raw,
+    raw.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim()
+  ];
+  const objectMatch = raw.match(/\{[\s\S]*\}/);
+  const arrayMatch = raw.match(/\[[\s\S]*\]/);
+  if (objectMatch) candidates.push(objectMatch[0]);
+  if (arrayMatch) candidates.push(arrayMatch[0]);
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // try next candidate
+    }
+  }
+  return fallback;
+}
+
+function updateAiCallStatus({ task = "", success = false, usedFallback = false, error = "", fallbackReason = "" } = {}) {
+  const config = getAiApiConfig();
+  db.settings.aiStatus = normalizeAiStatus({
+    ...(db.settings?.aiStatus || {}),
+    lastProvider: config.provider,
+    lastModel: config.model,
+    lastTask: task,
+    lastSuccess: success,
+    lastUsedFallback: usedFallback,
+    lastError: error,
+    lastFallbackReason: fallbackReason,
+    updatedAt: now()
+  });
+  saveDb();
+  return db.settings.aiStatus;
+}
+
 async function callOpenAICompatible({ baseUrl, apiKey, model, systemPrompt, userPrompt, temperature, maxTokens }) {
   const url = `${String(baseUrl || "").replace(/\/$/, "")}/chat/completions`;
   const response = await fetch(url, {
@@ -743,10 +783,17 @@ async function callOpenAICompatible({ baseUrl, apiKey, model, systemPrompt, user
 async function routeAiText(userPrompt, options = {}) {
   const config = getAiApiConfig();
   const fallbackReason = getAiFallbackReason(config);
-  if (fallbackReason) return mockAiText(userPrompt, options);
-  if (!["openai", "zai", "deepseek", "custom"].includes(config.provider)) return mockAiText(userPrompt, options);
+  const task = options.task || options.format || "generateText";
+  if (fallbackReason) {
+    updateAiCallStatus({ task, success: true, usedFallback: true, fallbackReason });
+    return mockAiText(userPrompt, options);
+  }
+  if (!["openai", "zai", "deepseek", "custom"].includes(config.provider)) {
+    updateAiCallStatus({ task, success: true, usedFallback: true, fallbackReason: "unsupported provider" });
+    return mockAiText(userPrompt, options);
+  }
   try {
-    return await callOpenAICompatible({
+    const result = await callOpenAICompatible({
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
       model: config.model,
@@ -755,7 +802,10 @@ async function routeAiText(userPrompt, options = {}) {
       temperature: config.temperature,
       maxTokens: config.maxTokens
     });
+    updateAiCallStatus({ task, success: true });
+    return result;
   } catch {
+    updateAiCallStatus({ task, success: true, usedFallback: true, fallbackReason: "api call failed", error: "AI API 调用失败，已 fallback mock。" });
     return mockAiText(userPrompt, options);
   }
 }
@@ -765,7 +815,9 @@ async function testAiConnection() {
   const status = {
     lastProvider: config.provider,
     lastModel: config.model,
+    lastTask: "settings.testConnection",
     lastSuccess: false,
+    lastUsedFallback: false,
     lastError: "",
     lastFallbackReason: "",
     updatedAt: now()
@@ -775,11 +827,13 @@ async function testAiConnection() {
     status.lastFallbackReason = "Mock 模式正常。";
   } else if (!config.apiKey) {
     status.lastSuccess = true;
+    status.lastUsedFallback = true;
     status.lastFallbackReason = "缺少 API Key，已 fallback 到 mock。";
   } else if (!config.baseUrl) {
     status.lastError = "缺少 Base URL。";
   } else if (!["openai", "zai", "deepseek", "custom"].includes(config.provider)) {
     status.lastSuccess = true;
+    status.lastUsedFallback = true;
     status.lastFallbackReason = "当前 provider 先占位，已 fallback 到 mock。";
   } else {
     try {
@@ -805,6 +859,7 @@ async function testAiConnection() {
 
 Object.assign(aiRouter, {
   getConfig: getAiApiConfig,
+  safeParseJSON,
   async generateText(prompt, options = {}) {
     return routeAiText(prompt, options);
   },
@@ -817,6 +872,64 @@ Object.assign(aiRouter, {
     return routeAiText(prompt, { ...options, title: content.title, format: `${platform} ${ASSET_LABELS[assetType] || "内容"}` });
   }
 });
+
+function getPromptTemplateByName(name) {
+  return PromptStore.getAll().find(prompt => prompt.name === name) || null;
+}
+
+function applyPromptTemplate(template, variables = {}) {
+  return String(template || "").replace(/\{(\w+)\}/g, (_, key) => variables[key] ?? "");
+}
+
+function promptFor(name, fallback, variables = {}) {
+  const prompt = getPromptTemplateByName(name);
+  const template = prompt?.template || fallback;
+  return applyPromptTemplate(template, variables);
+}
+
+function defaultResearchResult(content) {
+  return {
+    aiAnalysis: `中文总结：${content.title} 背后反映了海外 AI 产品、技术或创作方式的新变化，适合转译成中文用户能理解的机会点。`,
+    commentSummary: "评论倾向集中在效率提升、能力替代、版权边界和实际可用性。",
+    selectedAngle: content.selectedAngle || "把海外 AI 热点翻译成中文创作者/普通用户能马上理解的机会、风险和行动建议。",
+    riskNotes: "未发现高风险表达，发布前仍建议人工检查来源与版权。",
+    recommendedPlatforms: safeTargetPlatforms(content.targetPlatforms).length ? safeTargetPlatforms(content.targetPlatforms) : ["小红书", "抖音", "B站"]
+  };
+}
+
+function defaultReviewResult(content, assets = []) {
+  const riskLevel = content.controversyScore >= 88 || content.copyrightStatus === "待检查" ? "medium" : "low";
+  return {
+    riskLevel,
+    reviewNotes: `审核建议：当前共 ${assets.length} 个内容资产，整体可进入人工复核。请确认没有直接搬运原文、原图或原视频。`,
+    suggestions: [
+      assets.length ? "生成资产已存在，建议检查标题和来源标注。" : "还没有生成资产，建议先生成内容。",
+      content.controversyScore >= 80 ? "争议性较高，标题避免绝对化和恐吓式表达。" : "风险较低，可保持当前表达。"
+    ]
+  };
+}
+
+function defaultPlatformAssetResult(content, platform) {
+  if (platform === "小红书") {
+    return {
+      xiaohongshu_post: `标题：${content.title}\n\n1. 海外正在讨论什么：${content.sourceTitle}\n2. 为什么中文用户要关注：${content.selectedAngle || content.aiAnalysis}\n3. 我的判断：这是一个值得做成系列的 AI 选题。\n\n标签：${content.tags.map(tag => `#${tag}`).join(" ")}`,
+      cover_title: content.title.slice(0, 18)
+    };
+  }
+  if (platform === "抖音") {
+    return {
+      douyin_script: `开头 3 秒：${content.title} 为什么突然火了？\n中段：解释海外讨论、中文用户痛点和一个具体例子。\n结尾：你觉得这是效率革命还是新的焦虑？评论区聊聊。`,
+      video_storyboard: `镜头1：强钩子标题卡《${content.title}》\n镜头2：展示海外平台讨论占位\n镜头3：解释 3 个中文化观点\n镜头4：结尾提问，引导评论区讨论`,
+      voiceover_text: `${content.title} 正在海外 AI 圈被讨论。真正值得关注的不是热闹本身，而是它会怎样影响中文用户的工作、学习和创作方式。`,
+      subtitle_text: `${content.title}\n海外 AI 热点\n中文用户怎么看\n评论区聊聊`
+    };
+  }
+  return {
+    bilibili_script: `【B站视频脚本】\n开场：${content.title}\n背景：${content.originalSummary}\n分析：海外讨论背后的技术和产品趋势。\n结尾：给创作者或开发者可以马上尝试的 3 个动作。`,
+    video_storyboard: `P1 标题开场\nP2 背景介绍\nP3 观点拆解\nP4 案例展示\nP5 总结与互动`,
+    cover_title: `B站封面：${content.title.slice(0, 18)}`
+  };
+}
 
 // =========================
 // workflow/workflowPipeline.js
@@ -913,17 +1026,126 @@ const PlannerAgent = {
 };
 
 const ResearchAgent = {
-  analyze(contentId) {
-    return workflowPipeline.analyzeContent(contentId);
+  async analyze(contentId) {
+    const content = ContentStore.getById(contentId);
+    if (!content) throw new Error("找不到当前 Content");
+    const fallback = defaultResearchResult(content);
+    const prompt = `${promptFor("海外热点分析", "请分析 {sourceTitle} 的海外热度、中文平台适配角度和争议点。", {
+      sourceTitle: content.sourceTitle,
+      title: content.title,
+      topic: content.topic
+    })}
+
+请只返回 JSON，不要输出解释文字：
+{
+  "aiAnalysis": "",
+  "commentSummary": "",
+  "selectedAngle": "",
+  "riskNotes": "",
+  "recommendedPlatforms": ["小红书", "抖音", "B站"]
+}
+
+Content:
+标题：${content.title}
+来源平台：${content.sourcePlatform}
+原始标题：${content.sourceTitle}
+原始摘要：${content.originalSummary}
+原始文本：${content.originalText}
+热度：${content.hotScore}
+中文适配度：${content.chinaFitScore}
+争议性：${content.controversyScore}`;
+    const text = await aiRouter.generateText(prompt, {
+      task: "research.analyze",
+      title: content.title,
+      format: "热点分析 JSON",
+      systemPrompt: "你是 AI Content OS 的海外 AI 热点研究员。你必须输出可解析 JSON。"
+    });
+    const result = safeParseJSON(text, fallback);
+    const normalized = {
+      ...fallback,
+      ...result,
+      recommendedPlatforms: safeTargetPlatforms(result.recommendedPlatforms).length ? safeTargetPlatforms(result.recommendedPlatforms) : fallback.recommendedPlatforms
+    };
+    ContentStore.update(contentId, {
+      aiAnalysis: normalized.aiAnalysis,
+      commentSummary: normalized.commentSummary,
+      selectedAngle: normalized.selectedAngle,
+      reviewNotes: normalized.riskNotes,
+      status: CONTENT_STATUS.ANALYZED
+    });
+    return normalized;
   }
 };
 
 const WriterAgent = {
   async generate(contentId, platform) {
-    return workflowPipeline.generateContent(contentId, platform);
+    const content = ContentStore.getById(contentId);
+    if (!content) throw new Error("找不到当前 Content");
+    if (!isTargetPlatform(platform)) throw new Error("当前只支持小红书、抖音、B站");
+    const promptNames = {
+      "小红书": "小红书爆款改写",
+      "抖音": "抖音 60 秒脚本",
+      "B站": "B站视频脚本"
+    };
+    const schemas = {
+      "小红书": `{"xiaohongshu_post":"","cover_title":""}`,
+      "抖音": `{"douyin_script":"","video_storyboard":"","voiceover_text":"","subtitle_text":""}`,
+      "B站": `{"bilibili_script":"","video_storyboard":"","cover_title":""}`
+    };
+    const fallback = defaultPlatformAssetResult(content, platform);
+    const prompt = `${promptFor(promptNames[platform], "请围绕 {title} 生成适合对应平台的中文内容。", {
+      title: content.title,
+      topic: content.topic,
+      sourceTitle: content.sourceTitle,
+      content: content.aiAnalysis || content.originalSummary
+    })}
+
+请只返回 JSON，不要输出解释文字，JSON schema：
+${schemas[platform]}
+
+Content:
+标题：${content.title}
+来源平台：${content.sourcePlatform}
+原始标题：${content.sourceTitle}
+中文爆款角度：${content.selectedAngle}
+AI 分析：${content.aiAnalysis}
+评论总结：${content.commentSummary}
+原始摘要：${content.originalSummary}
+标签：${content.tags.join(", ")}`;
+    const text = await aiRouter.generateText(prompt, {
+      task: `writer.${platform}`,
+      title: content.title,
+      format: `${platform} 资产 JSON`,
+      systemPrompt: "你是 AI Content OS 的中文内容创作 Agent。你必须输出可解析 JSON。"
+    });
+    const result = safeParseJSON(text, fallback);
+    const data = { ...fallback, ...result };
+    const assets = [];
+    if (platform === "小红书") {
+      assets.push(GeneratedAssetStore.upsert({ contentId, platform, assetType: ASSET_TYPES.XHS_POST, content: data.xiaohongshu_post, status: ASSET_STATUS.READY }));
+      assets.push(GeneratedAssetStore.upsert({ contentId, platform, assetType: ASSET_TYPES.COVER_TITLE, content: data.cover_title, status: ASSET_STATUS.READY }));
+    }
+    if (platform === "抖音") {
+      assets.push(GeneratedAssetStore.upsert({ contentId, platform, assetType: ASSET_TYPES.DOUYIN_SCRIPT, content: data.douyin_script, status: ASSET_STATUS.READY }));
+      assets.push(GeneratedAssetStore.upsert({ contentId, platform, assetType: ASSET_TYPES.VIDEO_STORYBOARD, content: data.video_storyboard, status: ASSET_STATUS.READY }));
+      assets.push(GeneratedAssetStore.upsert({ contentId, platform, assetType: ASSET_TYPES.VOICEOVER_TEXT, content: data.voiceover_text, status: ASSET_STATUS.READY }));
+      assets.push(GeneratedAssetStore.upsert({ contentId, platform, assetType: ASSET_TYPES.SUBTITLE_TEXT, content: data.subtitle_text, status: ASSET_STATUS.READY }));
+    }
+    if (platform === "B站") {
+      assets.push(GeneratedAssetStore.upsert({ contentId, platform, assetType: ASSET_TYPES.BILIBILI_SCRIPT, content: data.bilibili_script, status: ASSET_STATUS.READY }));
+      assets.push(GeneratedAssetStore.upsert({ contentId, platform, assetType: ASSET_TYPES.VIDEO_STORYBOARD, content: data.video_storyboard, status: ASSET_STATUS.READY }));
+      assets.push(GeneratedAssetStore.upsert({ contentId, platform, assetType: ASSET_TYPES.COVER_TITLE, content: data.cover_title, status: ASSET_STATUS.READY }));
+    }
+    ContentStore.update(contentId, { status: CONTENT_STATUS.WRITING });
+    return assets;
   },
   async generateAll(contentId) {
-    return workflowPipeline.generateAllFormats(contentId);
+    const assets = [];
+    assets.push(...await WriterAgent.generate(contentId, "小红书"));
+    assets.push(...await WriterAgent.generate(contentId, "抖音"));
+    assets.push(...await WriterAgent.generate(contentId, "B站"));
+    ContentStore.update(contentId, { status: CONTENT_STATUS.REVIEWING });
+    return assets;
   }
 };
 
@@ -961,16 +1183,45 @@ const PublisherAgent = {
 };
 
 const ReviewAgent = {
-  review(contentId) {
+  async review(contentId) {
     const content = ContentStore.getById(contentId);
     if (!content) throw new Error("找不到当前 Content");
     const assets = GeneratedAssetStore.getByContentId(contentId);
-    const riskLevel = content.controversyScore >= 88 || content.copyrightStatus === "待检查" ? "medium" : "low";
-    const suggestions = [
-      assets.length ? "生成资产完整度可用，建议进入人工审核。" : "还没有生成资产，建议先执行生成任务。",
-      content.controversyScore >= 80 ? "争议点较强，发布时标题避免绝对化表达。" : "风险较低，可保持当前表达。"
-    ];
-    const reviewNotes = `ReviewAgent mock：风险等级 ${riskLevel}。${suggestions.join(" ")}`;
+    const fallback = defaultReviewResult(content, assets);
+    const prompt = `请审核下面这条 AI 内容及其生成资产。
+
+检查：
+- 是否像直接搬运
+- 是否有版权风险
+- 是否标题夸张
+- 是否适合小红书/抖音/B站
+- 是否需要人工修改
+
+请只返回 JSON，不要输出解释文字：
+{
+  "riskLevel": "low",
+  "reviewNotes": "",
+  "suggestions": []
+}
+
+Content:
+标题：${content.title}
+来源：${content.sourceUrl}
+原始标题：${content.sourceTitle}
+AI 分析：${content.aiAnalysis}
+
+Generated Assets:
+${assets.map(asset => `[${asset.platform}/${asset.assetType}]\n${asset.content}`).join("\n\n")}`;
+    const text = await aiRouter.generateText(prompt, {
+      task: "review.content",
+      title: content.title,
+      format: "审核 JSON",
+      systemPrompt: "你是 AI Content OS 的内容安全与原创度审核 Agent。你必须输出可解析 JSON。"
+    });
+    const result = safeParseJSON(text, fallback);
+    const riskLevel = ["low", "medium", "high"].includes(result.riskLevel) ? result.riskLevel : fallback.riskLevel;
+    const suggestions = Array.isArray(result.suggestions) ? result.suggestions : fallback.suggestions;
+    const reviewNotes = result.reviewNotes || fallback.reviewNotes;
     ContentStore.update(contentId, {
       reviewNotes,
       status: riskLevel === "high" ? CONTENT_STATUS.WRITING : CONTENT_STATUS.REVIEWING
@@ -1045,6 +1296,7 @@ window.SupabaseProvider = SupabaseProvider;
 window.aiRouter = aiRouter;
 window.workflowPipeline = workflowPipeline;
 window.callOpenAICompatible = callOpenAICompatible;
+window.safeParseJSON = safeParseJSON;
 window.testAiConnection = testAiConnection;
 window.PlannerAgent = PlannerAgent;
 window.ResearchAgent = ResearchAgent;
@@ -1388,9 +1640,9 @@ function renderWorkspace() {
   const assets = GeneratedAssetStore.getByContentId(content.id);
   return `<div class="card toolbar">
       <select id="workspaceSelect">${ContentStore.getAll().map(item => `<option value="${item.id}" ${item.id === content.id ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}</select>
-      <button class="btn ghost" data-analyze="${content.id}">Mock 分析</button>
+      <button class="btn ghost" data-analyze="${content.id}">AI 分析</button>
       <button class="btn" data-generate-all="${content.id}">全部生成</button>
-      <button class="btn ghost" data-review="${content.id}">标记待审核</button>
+      <button class="btn ghost" data-review="${content.id}">AI 审核</button>
     </div>
     <div class="grid workspace-grid">
       <div class="card">
@@ -1619,6 +1871,8 @@ function renderHealth() {
   const latestTasks = (db.tasks || []).map(normalizeTask).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 10);
   const aiConfig = getAiApiConfig();
   const rawAiConfig = normalizeAiApiConfig(db.settings?.aiApiConfig);
+  const aiStatus = normalizeAiStatus(db.settings?.aiStatus);
+  const aiCallState = aiStatus.lastUsedFallback ? "Fallback" : (aiStatus.lastSuccess ? "Success" : "—");
   target.innerHTML = `
     <span class="chip">Content ${db.contentItems?.length || 0}</span>
     <span class="chip">Asset ${db.generatedAssets?.length || 0}</span>
@@ -1628,6 +1882,10 @@ function renderHealth() {
     <span class="chip">AI Mode: ${aiConfig.provider}</span>
     <span class="chip">Model: ${escapeHtml(aiConfig.model)}</span>
     <span class="chip">Key: ${rawAiConfig.apiKey ? "已配置" : "未配置"}</span>
+    <span class="chip">AI Task: ${escapeHtml(aiStatus.lastTask || "—")}</span>
+    <span class="chip">AI Call: ${aiCallState}</span>
+    ${aiStatus.lastError ? `<span class="chip">AI Error: ${escapeHtml(aiStatus.lastError)}</span>` : ""}
+    ${aiStatus.lastFallbackReason ? `<span class="chip">Fallback: ${escapeHtml(aiStatus.lastFallbackReason)}</span>` : ""}
     <div class="divider"></div>
     <strong>Agent Command Bar</strong>
     <input id="agentCommandInput" placeholder="例如：今天值得做什么 / 分析当前内容 / 生成当前内容" />
@@ -1728,14 +1986,14 @@ document.addEventListener("click", async event => {
     ContentStore.update(id, { status });
     return render();
   }
-  if (target.dataset.analyze) { workflowPipeline.analyzeContent(target.dataset.analyze); return render(); }
+  if (target.dataset.analyze) { await ResearchAgent.analyze(target.dataset.analyze); return render(); }
   if (target.dataset.generate) {
     const [id, platform] = target.dataset.generate.split(":");
-    await workflowPipeline.generateContent(id, platform);
+    await WriterAgent.generate(id, platform);
     return render();
   }
-  if (target.dataset.generateAll) { await workflowPipeline.generateAllFormats(target.dataset.generateAll); return render(); }
-  if (target.dataset.review) { workflowPipeline.markReadyForReview(target.dataset.review); return render(); }
+  if (target.dataset.generateAll) { await WriterAgent.generateAll(target.dataset.generateAll); return render(); }
+  if (target.dataset.review) { await ReviewAgent.review(target.dataset.review); return render(); }
   if (target.dataset.editContent) { appState.editContentId = target.dataset.editContent; return setPage("library"); }
   if (target.dataset.cancelEdit !== undefined) { appState.editContentId = null; return render(); }
   if (target.dataset.saveContent !== undefined) {
