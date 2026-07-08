@@ -45,6 +45,29 @@ const CONTENT_TYPES = Object.freeze(["图文", "短视频", "视频脚本", "口
 const PUBLISH_STATUS = Object.freeze({ DRAFT: "DRAFT", SCHEDULED: "SCHEDULED", PUBLISHED: "PUBLISHED", FAILED: "FAILED" });
 const PUBLISH_STATUS_LABELS = Object.freeze({ DRAFT: "草稿", SCHEDULED: "已排期", PUBLISHED: "已发布", FAILED: "发布失败" });
 const LEGACY_LONG_FORM_PLATFORM = ["公", "众", "号"].join("");
+const TASK_STATUS = Object.freeze({ PENDING: "PENDING", RUNNING: "RUNNING", SUCCESS: "SUCCESS", FAILED: "FAILED" });
+const TASK_TYPES = Object.freeze({
+  RECOMMEND_TODAY: "RECOMMEND_TODAY",
+  ANALYZE_CONTENT: "ANALYZE_CONTENT",
+  GENERATE_XHS: "GENERATE_XHS",
+  GENERATE_DOUYIN: "GENERATE_DOUYIN",
+  GENERATE_BILIBILI: "GENERATE_BILIBILI",
+  GENERATE_ALL: "GENERATE_ALL",
+  PREPARE_VIDEO: "PREPARE_VIDEO",
+  REVIEW_CONTENT: "REVIEW_CONTENT",
+  SCHEDULE_PUBLISH: "SCHEDULE_PUBLISH"
+});
+const TASK_TYPE_LABELS = Object.freeze({
+  RECOMMEND_TODAY: "推荐今日内容",
+  ANALYZE_CONTENT: "分析内容",
+  GENERATE_XHS: "生成小红书",
+  GENERATE_DOUYIN: "生成抖音",
+  GENERATE_BILIBILI: "生成B站",
+  GENERATE_ALL: "生成全部",
+  PREPARE_VIDEO: "准备视频",
+  REVIEW_CONTENT: "审核内容",
+  SCHEDULE_PUBLISH: "创建排期"
+});
 const ASSET_STATUS = Object.freeze({ DRAFT: "DRAFT", READY: "READY", ARCHIVED: "ARCHIVED" });
 const ASSET_TYPES = Object.freeze({
   XHS_POST: "xiaohongshu_post",
@@ -160,6 +183,7 @@ function normalizeContent(item = {}) {
     selectedAngle: item.selectedAngle || item.angle || "",
     aiAnalysis: item.aiAnalysis || "",
     commentSummary: item.commentSummary || "",
+    reviewNotes: item.reviewNotes || "",
     copyrightStatus: item.copyrightStatus || "待检查",
     statusHistory: Array.isArray(item.statusHistory) ? item.statusHistory : [{ status: item.status || CONTENT_STATUS.DISCOVERED, at: createdAt, note: "初始化" }],
     createdAt,
@@ -233,6 +257,23 @@ function normalizeAnalyticsRecord(item = {}) {
     followersGained: Number(item.followersGained) || 0,
     reviewNotes: item.reviewNotes || "",
     createdAt: item.createdAt || now()
+  };
+}
+
+function normalizeTask(item = {}) {
+  const createdAt = item.createdAt || now();
+  return {
+    id: item.id || uid("task"),
+    type: Object.values(TASK_TYPES).includes(item.type) ? item.type : TASK_TYPES.ANALYZE_CONTENT,
+    title: item.title || TASK_TYPE_LABELS[item.type] || "Agent 任务",
+    status: Object.values(TASK_STATUS).includes(item.status) ? item.status : TASK_STATUS.PENDING,
+    payload: item.payload || {},
+    result: item.result || null,
+    error: item.error || "",
+    createdAt,
+    updatedAt: item.updatedAt || createdAt,
+    startedAt: item.startedAt || "",
+    finishedAt: item.finishedAt || ""
   };
 }
 
@@ -325,6 +366,7 @@ function migrateDatabase(raw) {
     videoProjects: [],
     publishJobs: [],
     analyticsRecords: [],
+    tasks: [],
     promptTemplates: [],
     knowledgeItems: [],
     settings: {
@@ -339,6 +381,7 @@ function migrateDatabase(raw) {
   const existingVideoProjects = Array.isArray(source.videoProjects) ? source.videoProjects : [];
   const existingJobs = Array.isArray(source.publishJobs) ? source.publishJobs : [];
   const existingAnalytics = Array.isArray(source.analyticsRecords) ? source.analyticsRecords : [];
+  const existingTasks = Array.isArray(source.tasks) ? source.tasks : [];
 
   (source.contentItems || []).forEach(oldItem => {
     const content = normalizeContent(oldItem);
@@ -378,6 +421,7 @@ function migrateDatabase(raw) {
   });
   existingJobs.forEach(item => newDb.publishJobs.push(normalizePublishJob(item)));
   existingAnalytics.forEach(item => newDb.analyticsRecords.push(normalizeAnalyticsRecord(item)));
+  existingTasks.forEach(item => newDb.tasks.push(normalizeTask(item)));
 
   newDb.promptTemplates = (source.promptTemplates || createMockPrompts()).map(normalizePrompt);
   newDb.knowledgeItems = (source.knowledgeItems || createMockKnowledge()).map(normalizeKnowledge);
@@ -511,6 +555,72 @@ const AnalyticsStore = {
   getByContentId(contentId) { return this.getAll().filter(item => item.contentId === contentId); }
 };
 
+const TaskQueue = {
+  getAll() { return (db.tasks || []).map(normalizeTask).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)); },
+  getById(id) { return (db.tasks || []).find(item => item.id === id) || null; },
+  add(type, payload = {}) {
+    const task = normalizeTask({
+      type,
+      payload,
+      title: buildTaskTitle(type, payload),
+      status: TASK_STATUS.PENDING,
+      createdAt: now(),
+      updatedAt: now()
+    });
+    db.tasks = db.tasks || [];
+    db.tasks.unshift(task);
+    saveDb();
+    return task;
+  },
+  update(id, patch) {
+    db.tasks = db.tasks || [];
+    const index = db.tasks.findIndex(item => item.id === id);
+    if (index < 0) return null;
+    db.tasks[index] = normalizeTask({ ...db.tasks[index], ...patch, updatedAt: now() });
+    saveDb();
+    return db.tasks[index];
+  },
+  async runNext() {
+    const task = [...(db.tasks || [])].reverse().find(item => item.status === TASK_STATUS.PENDING);
+    if (!task) return null;
+    this.update(task.id, { status: TASK_STATUS.RUNNING, startedAt: now(), error: "" });
+    try {
+      const result = await TaskExecutor.execute(this.getById(task.id));
+      return this.update(task.id, { status: TASK_STATUS.SUCCESS, result, finishedAt: now() });
+    } catch (error) {
+      return this.update(task.id, { status: TASK_STATUS.FAILED, error: error.message || String(error), finishedAt: now() });
+    }
+  },
+  async runAll() {
+    const results = [];
+    while ((db.tasks || []).some(item => item.status === TASK_STATUS.PENDING)) {
+      results.push(await this.runNext());
+    }
+    return results;
+  },
+  async retry(taskId) {
+    const task = this.getById(taskId);
+    if (!task) return null;
+    this.update(taskId, { status: TASK_STATUS.RUNNING, error: "", result: null, startedAt: now(), finishedAt: "" });
+    try {
+      const result = await TaskExecutor.execute(this.getById(taskId));
+      return this.update(taskId, { status: TASK_STATUS.SUCCESS, result, finishedAt: now() });
+    } catch (error) {
+      return this.update(taskId, { status: TASK_STATUS.FAILED, error: error.message || String(error), finishedAt: now() });
+    }
+  },
+  clearCompleted() {
+    db.tasks = (db.tasks || []).filter(item => item.status !== TASK_STATUS.SUCCESS);
+    saveDb();
+  }
+};
+
+function buildTaskTitle(type, payload = {}) {
+  const content = payload.contentId ? ContentStore.getById(payload.contentId) : null;
+  const suffix = content ? ` · ${content.title}` : "";
+  return `${TASK_TYPE_LABELS[type] || type}${suffix}`;
+}
+
 const PromptStore = createCrudStore("promptTemplates", normalizePrompt);
 const KnowledgeStore = createCrudStore("knowledgeItems", normalizeKnowledge);
 
@@ -616,6 +726,150 @@ const workflowPipeline = {
   }
 };
 
+// =========================
+// agents/*.js
+// =========================
+const PlannerAgent = {
+  recommendToday(limit = 5) {
+    const statusBoost = {
+      ANALYZED: 12,
+      SELECTED: 10,
+      DISCOVERED: 6,
+      COLLECTED: 6,
+      REVIEWING: 4,
+      VIDEO_READY: 3
+    };
+    return ContentStore.getAll()
+      .filter(content => content.status !== CONTENT_STATUS.ARCHIVED && content.status !== CONTENT_STATUS.PUBLISHED)
+      .map(content => {
+        const priorityScore = Math.round(content.finalScore * .45 + content.hotScore * .25 + content.chinaFitScore * .2 + (statusBoost[content.status] || 0));
+        return {
+          contentId: content.id,
+          title: content.title,
+          reason: `finalScore ${content.finalScore}，hotScore ${content.hotScore}，中文适配 ${content.chinaFitScore}，当前状态「${STATUS_LABELS[content.status]}」适合推进。`,
+          recommendedPlatforms: content.targetPlatforms,
+          priorityScore
+        };
+      })
+      .sort((a, b) => b.priorityScore - a.priorityScore)
+      .slice(0, limit);
+  }
+};
+
+const ResearchAgent = {
+  analyze(contentId) {
+    return workflowPipeline.analyzeContent(contentId);
+  }
+};
+
+const WriterAgent = {
+  async generate(contentId, platform) {
+    return workflowPipeline.generateContent(contentId, platform);
+  },
+  async generateAll(contentId) {
+    return workflowPipeline.generateAllFormats(contentId);
+  }
+};
+
+const VideoAgent = {
+  async prepare(contentId) {
+    const content = ContentStore.getById(contentId);
+    if (!content) throw new Error("找不到当前 Content");
+    const hasDouyin = GeneratedAssetStore.getByContentId(contentId).some(asset => asset.assetType === ASSET_TYPES.DOUYIN_SCRIPT);
+    const hasBilibili = GeneratedAssetStore.getByContentId(contentId).some(asset => asset.assetType === ASSET_TYPES.BILIBILI_SCRIPT);
+    if (!hasDouyin && !hasBilibili) await WriterAgent.generate(contentId, "抖音");
+    await createAsset(content, "抖音", ASSET_TYPES.VIDEO_STORYBOARD);
+    await createAsset(content, "抖音", ASSET_TYPES.VOICEOVER_TEXT);
+    await createAsset(content, "抖音", ASSET_TYPES.SUBTITLE_TEXT);
+    await createAsset(content, "B站", ASSET_TYPES.COVER_TITLE, `B站封面：${content.title.slice(0, 18)}`);
+    const project = VideoProjectStore.ensureForContent(contentId);
+    const updated = VideoProjectStore.update(project.id, {
+      scriptDone: true,
+      storyboardDone: true,
+      voiceoverDone: true,
+      subtitleDone: true,
+      coverDone: true,
+      readyToPublish: true,
+      notes: "VideoAgent mock 已准备脚本、分镜、配音、字幕和封面标题。"
+    });
+    ContentStore.update(contentId, { status: CONTENT_STATUS.VIDEO_READY });
+    return updated;
+  }
+};
+
+const PublisherAgent = {
+  schedule(contentId, platform, scheduledAt) {
+    if (!isTargetPlatform(platform)) throw new Error("当前只支持小红书、抖音、B站");
+    return workflowPipeline.schedulePublish(contentId, platform, scheduledAt);
+  }
+};
+
+const ReviewAgent = {
+  review(contentId) {
+    const content = ContentStore.getById(contentId);
+    if (!content) throw new Error("找不到当前 Content");
+    const assets = GeneratedAssetStore.getByContentId(contentId);
+    const riskLevel = content.controversyScore >= 88 || content.copyrightStatus === "待检查" ? "medium" : "low";
+    const suggestions = [
+      assets.length ? "生成资产完整度可用，建议进入人工审核。" : "还没有生成资产，建议先执行生成任务。",
+      content.controversyScore >= 80 ? "争议点较强，发布时标题避免绝对化表达。" : "风险较低，可保持当前表达。"
+    ];
+    const reviewNotes = `ReviewAgent mock：风险等级 ${riskLevel}。${suggestions.join(" ")}`;
+    ContentStore.update(contentId, {
+      reviewNotes,
+      status: riskLevel === "high" ? CONTENT_STATUS.WRITING : CONTENT_STATUS.REVIEWING
+    });
+    return { reviewNotes, riskLevel, suggestions };
+  }
+};
+
+const TaskExecutor = {
+  async execute(task) {
+    if (!task) throw new Error("任务不存在");
+    const payload = task.payload || {};
+    const requireContent = () => {
+      if (!payload.contentId || !ContentStore.getById(payload.contentId)) throw new Error("找不到任务对应的 Content");
+    };
+    switch (task.type) {
+      case TASK_TYPES.RECOMMEND_TODAY:
+        return PlannerAgent.recommendToday(payload.limit || 5);
+      case TASK_TYPES.ANALYZE_CONTENT:
+        requireContent();
+        return ResearchAgent.analyze(payload.contentId);
+      case TASK_TYPES.GENERATE_XHS:
+        requireContent();
+        return WriterAgent.generate(payload.contentId, "小红书");
+      case TASK_TYPES.GENERATE_DOUYIN:
+        requireContent();
+        return WriterAgent.generate(payload.contentId, "抖音");
+      case TASK_TYPES.GENERATE_BILIBILI:
+        requireContent();
+        return WriterAgent.generate(payload.contentId, "B站");
+      case TASK_TYPES.GENERATE_ALL:
+        requireContent();
+        return WriterAgent.generateAll(payload.contentId);
+      case TASK_TYPES.PREPARE_VIDEO:
+        requireContent();
+        return VideoAgent.prepare(payload.contentId);
+      case TASK_TYPES.REVIEW_CONTENT:
+        requireContent();
+        return ReviewAgent.review(payload.contentId);
+      case TASK_TYPES.SCHEDULE_PUBLISH:
+        requireContent();
+        return PublisherAgent.schedule(payload.contentId, payload.platform || "抖音", payload.scheduledAt || defaultScheduleTime());
+      default:
+        throw new Error(`未知任务类型：${task.type}`);
+    }
+  }
+};
+
+function defaultScheduleTime() {
+  const date = new Date();
+  date.setDate(date.getDate() + 1);
+  date.setHours(19, 0, 0, 0);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T19:00`;
+}
+
 async function createAsset(content, platform, assetType, fixedContent = "") {
   const generated = fixedContent || await aiRouter.generateScript(content, platform, { assetType });
   return GeneratedAssetStore.upsert({ contentId: content.id, platform, assetType, content: generated, status: ASSET_STATUS.READY });
@@ -628,11 +882,19 @@ window.PublishJobStore = PublishJobStore;
 window.AnalyticsStore = AnalyticsStore;
 window.PromptStore = PromptStore;
 window.KnowledgeStore = KnowledgeStore;
+window.TaskQueue = TaskQueue;
 window.StorageProvider = StorageProvider;
 window.LocalStorageProvider = LocalStorageProvider;
 window.SupabaseProvider = SupabaseProvider;
 window.aiRouter = aiRouter;
 window.workflowPipeline = workflowPipeline;
+window.PlannerAgent = PlannerAgent;
+window.ResearchAgent = ResearchAgent;
+window.WriterAgent = WriterAgent;
+window.VideoAgent = VideoAgent;
+window.PublisherAgent = PublisherAgent;
+window.ReviewAgent = ReviewAgent;
+window.TaskExecutor = TaskExecutor;
 
 // =========================
 // mock/mockData.js
@@ -646,6 +908,7 @@ function createInitialData() {
     videoProjects: [],
     publishJobs: [],
     analyticsRecords: [],
+    tasks: [],
     promptTemplates: createMockPrompts(),
     knowledgeItems: createMockKnowledge(),
     settings: { provider: "LocalStorageProvider" }
@@ -735,7 +998,7 @@ function renderNav() {
 function render() {
   renderNav();
   const views = {
-    dashboard: renderDashboard,
+    dashboard: renderDashboardV2,
     hotRadar: renderHotRadar,
     library: renderContentLibrary,
     workspace: renderWorkspace,
@@ -778,6 +1041,43 @@ function renderDashboard() {
 
 function statCard(label, value, hint) {
   return `<div class="card stat"><span>${label}</span><b>${value}</b><small class="meta">${hint}</small></div>`;
+}
+
+function renderDashboardV2() {
+  const all = filteredGlobal();
+  const top5 = [...all].sort((a, b) => b.finalScore - a.finalScore).slice(0, 5);
+  const changes = [...ContentStore.getAll()].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 5);
+  const agentRecommendations = PlannerAgent.recommendToday(5);
+  return `
+    <div class="grid three">
+      ${statCard("今日抓取热点", ContentStore.getAll().length, "Mock 热点池总量")}
+      ${statCard("高分内容", ContentStore.getAll().filter(item => item.finalScore >= 85).length, "finalScore ≥ 85")}
+      ${statCard("待生成内容", ContentStore.getAll().filter(item => [CONTENT_STATUS.ANALYZED, CONTENT_STATUS.SELECTED].includes(item.status)).length, "ANALYZED / SELECTED")}
+      ${statCard("待审核", ContentStore.getAll().filter(item => item.status === CONTENT_STATUS.REVIEWING).length, "REVIEWING")}
+      ${statCard("待发布", ContentStore.getAll().filter(item => [CONTENT_STATUS.VIDEO_READY, CONTENT_STATUS.SCHEDULED].includes(item.status)).length, "VIDEO_READY / SCHEDULED")}
+      ${statCard("已发布", ContentStore.getAll().filter(item => item.status === CONTENT_STATUS.PUBLISHED).length, "PUBLISHED")}
+    </div>
+    <div class="grid two">
+      <div class="card"><h3>今日推荐 Top 5</h3><div class="grid">${top5.map(compactContentRow).join("")}</div></div>
+      <div class="card"><h3>最近状态变化</h3><div class="grid">${changes.map(item => `
+        <div class="item-card card">
+          <div class="item-head"><strong>${escapeHtml(item.title)}</strong>${statusPill(item.status)}</div>
+          <div class="meta">更新时间：${new Date(item.updatedAt).toLocaleString("zh-CN")} · ${item.sourcePlatform}</div>
+        </div>`).join("")}</div></div>
+    </div>
+    <div class="card"><h3>AI Copilot 模拟建议</h3><p>今天建议优先处理 finalScore 最高的 3 条内容。适合先做短视频，再改写成小红书图文。</p></div>
+    <div class="card">
+      <h3>Agent 今日建议</h3>
+      <div class="grid">${agentRecommendations.map(item => `
+        <div class="item-card card">
+          <div class="item-head"><h4 class="item-title">${escapeHtml(item.title)}</h4><span class="score">${item.priorityScore}</span></div>
+          <div class="meta">${escapeHtml(item.reason)}</div>
+          <div class="chips">${item.recommendedPlatforms.map(platform => `<span class="chip">${platform}</span>`).join("")}</div>
+          <div class="toolbar"><button class="btn small" data-agent-chain="${item.contentId}">一键生成</button><button class="btn small ghost" data-open-workspace="${item.contentId}">进入工作区</button></div>
+        </div>
+      `).join("")}</div>
+    </div>
+  `;
 }
 
 function compactContentRow(item) {
@@ -1111,12 +1411,79 @@ function bindScopedInputs() {
 function renderHealth() {
   const target = document.getElementById("systemHealth");
   if (!target) return;
+  const latestTasks = (db.tasks || []).map(normalizeTask).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 10);
   target.innerHTML = `
     <span class="chip">Content ${db.contentItems?.length || 0}</span>
     <span class="chip">Asset ${db.generatedAssets?.length || 0}</span>
     <span class="chip">Video ${db.videoProjects?.length || 0}</span>
+    <span class="chip">Tasks ${db.tasks?.length || 0}</span>
     <span class="chip">Provider ${db.settings?.provider || "LocalStorageProvider"}</span>
+    <div class="divider"></div>
+    <strong>Agent Command Bar</strong>
+    <input id="agentCommandInput" placeholder="例如：今天值得做什么 / 分析当前内容 / 生成当前内容" />
+    <button class="btn small" data-run-command>执行命令</button>
+    <div class="meta" id="agentCommandResult">${escapeHtml(getLatestTaskSummary())}</div>
+    <div class="divider"></div>
+    <strong>Task Queue</strong>
+    <div class="toolbar">
+      <button class="btn small ghost" data-run-all-tasks>Run All</button>
+      <button class="btn small ghost" data-retry-failed-tasks>Retry Failed</button>
+      <button class="btn small ghost" data-clear-completed-tasks>Clear Completed</button>
+    </div>
+    <div class="mini-stack">
+      ${latestTasks.length ? latestTasks.map(renderTaskMini).join("") : `<div class="empty">暂无任务。</div>`}
+    </div>
   `;
+}
+
+function renderTaskMini(task) {
+  return `<div class="item-card card">
+    <div class="item-head"><strong>${escapeHtml(task.title)}</strong><span class="chip">${task.status}</span></div>
+    <div class="meta">${task.type} · ${new Date(task.createdAt).toLocaleString("zh-CN")}</div>
+    ${task.error ? `<div class="meta">错误：${escapeHtml(task.error)}</div>` : ""}
+    ${task.status === TASK_STATUS.FAILED ? `<button class="btn small ghost" data-retry-task="${task.id}">Retry</button>` : ""}
+  </div>`;
+}
+
+function getLatestTaskSummary() {
+  const latest = (db.tasks || []).map(normalizeTask).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
+  if (!latest) return "输入命令后，我会创建并执行 mock Agent 任务。";
+  if (latest.type === TASK_TYPES.RECOMMEND_TODAY && latest.result) return `已推荐 ${latest.result.length} 条今日内容。`;
+  return `最近任务：${latest.title} · ${latest.status}`;
+}
+
+async function runAgentCommand(commandText) {
+  const command = String(commandText || "").trim();
+  if (!command) return null;
+  const currentId = appState.selectedContentId || ContentStore.getAll()[0]?.id;
+  let task;
+  if (command.includes("今天值得做什么")) {
+    task = TaskQueue.add(TASK_TYPES.RECOMMEND_TODAY, { limit: 5 });
+  } else if (command.includes("分析当前内容")) {
+    task = TaskQueue.add(TASK_TYPES.ANALYZE_CONTENT, { contentId: currentId });
+  } else if (command.includes("生成当前内容")) {
+    task = TaskQueue.add(TASK_TYPES.GENERATE_ALL, { contentId: currentId });
+  } else if (command.includes("准备当前视频")) {
+    task = TaskQueue.add(TASK_TYPES.PREPARE_VIDEO, { contentId: currentId });
+  } else if (command.includes("审核当前内容")) {
+    task = TaskQueue.add(TASK_TYPES.REVIEW_CONTENT, { contentId: currentId });
+  } else if (command.includes("排期当前内容")) {
+    task = TaskQueue.add(TASK_TYPES.SCHEDULE_PUBLISH, { contentId: currentId, platform: "抖音", scheduledAt: defaultScheduleTime() });
+  } else {
+    task = TaskQueue.add(TASK_TYPES.RECOMMEND_TODAY, { limit: 5, command });
+  }
+  await TaskQueue.retry(task.id);
+  render();
+  return task;
+}
+
+async function createAgentTaskChain(contentId) {
+  TaskQueue.add(TASK_TYPES.ANALYZE_CONTENT, { contentId });
+  TaskQueue.add(TASK_TYPES.GENERATE_ALL, { contentId });
+  TaskQueue.add(TASK_TYPES.PREPARE_VIDEO, { contentId });
+  TaskQueue.add(TASK_TYPES.REVIEW_CONTENT, { contentId });
+  await TaskQueue.runAll();
+  render();
 }
 
 // =========================
@@ -1135,6 +1502,16 @@ document.addEventListener("click", async event => {
     return render();
   }
   if (target.id === "newContentTopBtn") { appState.editContentId = null; return setPage("library"); }
+  if (target.dataset.runCommand !== undefined) return runAgentCommand(document.getElementById("agentCommandInput")?.value);
+  if (target.dataset.runAllTasks !== undefined) { await TaskQueue.runAll(); return render(); }
+  if (target.dataset.retryFailedTasks !== undefined) {
+    const failed = TaskQueue.getAll().filter(task => task.status === TASK_STATUS.FAILED);
+    for (const task of failed) await TaskQueue.retry(task.id);
+    return render();
+  }
+  if (target.dataset.clearCompletedTasks !== undefined) { TaskQueue.clearCompleted(); return render(); }
+  if (target.dataset.retryTask) { await TaskQueue.retry(target.dataset.retryTask); return render(); }
+  if (target.dataset.agentChain) return createAgentTaskChain(target.dataset.agentChain);
   if (target.dataset.openWorkspace) { appState.selectedContentId = target.dataset.openWorkspace; return setPage("workspace"); }
   if (target.dataset.status) {
     const [id, status] = target.dataset.status.split(":");
@@ -1250,6 +1627,13 @@ document.addEventListener("change", event => {
     const project = VideoProjectStore.getById(id);
     if (project) VideoProjectStore.update(id, { [key]: target.checked });
     render();
+  }
+});
+
+document.addEventListener("keydown", event => {
+  if (event.target?.id === "agentCommandInput" && event.key === "Enter") {
+    event.preventDefault();
+    runAgentCommand(event.target.value);
   }
 });
 
