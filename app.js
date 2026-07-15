@@ -40,6 +40,10 @@ const STATUS_LABELS = Object.freeze({
 });
 
 const SOURCE_PLATFORMS = Object.freeze(["Reddit", "X", "YouTube", "GitHub", "Hacker News", "Product Hunt", "Official Blog"]);
+const RESEARCH_SOURCES = Object.freeze(["Reddit", "X", "YouTube"]);
+const RESEARCH_CATEGORIES = Object.freeze(["GPT", "Claude", "Gemini", "AI Coding", "AI Agent", "AI Video", "Open Source"]);
+const RESEARCH_SORTS = Object.freeze(["Trending", "New", "Engagement"]);
+const RESEARCH_DATES = Object.freeze(["Today", "7 Days", "30 Days"]);
 const TARGET_PLATFORMS = Object.freeze(["小红书", "抖音", "B站"]);
 const CONTENT_TYPES = Object.freeze(["图文", "短视频", "视频脚本", "口播"]);
 const PUBLISH_STATUS = Object.freeze({ DRAFT: "DRAFT", SCHEDULED: "SCHEDULED", PUBLISHED: "PUBLISHED", FAILED: "FAILED" });
@@ -103,6 +107,7 @@ const ASSET_LABELS = Object.freeze({
 
 const NAV_ITEMS = [
   ["dashboard", "⌂", "Dashboard 今日工作台", "Dashboard", "今天该优先处理哪些海外 AI 热点，一眼看清。"],
+  ["research", "⌕", "Research 研究引擎", "Research", "用 Mock Topic Provider 追踪海外 AI 话题，沉淀可转化选题。"],
   ["hotRadar", "◎", "Hot Radar 热点雷达", "Hot Radar", "从外网抓取的热点候选池，本阶段使用 mock 数据。"],
   ["library", "▦", "Content Library 内容库", "Content Library", "所有 Content 对象的数据库视图。"],
   ["workspace", "✎", "Content Workspace 内容工作区", "Content Workspace", "围绕单条 Content 完成分析、生成和审核。"],
@@ -121,6 +126,7 @@ const appState = {
   page: "dashboard",
   selectedContentId: null,
   editContentId: null,
+  selectedTopicId: null,
   editPromptId: null,
   editKnowledgeId: null,
   editPublishJobId: null,
@@ -135,7 +141,11 @@ const appState = {
     libraryStatus: "",
     libraryPlatform: "",
     libraryTag: "",
-    libraryView: "card"
+    libraryView: "card",
+    researchSource: "",
+    researchCategory: "",
+    researchSort: "Trending",
+    researchDate: "7 Days"
   }
 };
 
@@ -196,6 +206,34 @@ function normalizeContent(item = {}) {
     reviewNotes: item.reviewNotes || "",
     copyrightStatus: item.copyrightStatus || "待检查",
     statusHistory: Array.isArray(item.statusHistory) ? item.statusHistory : [{ status: item.status || CONTENT_STATUS.DISCOVERED, at: createdAt, note: "初始化" }],
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+}
+
+function normalizeTopic(item = {}) {
+  const createdAt = item.createdAt || now();
+  return {
+    id: item.id || uid("topic"),
+    source: RESEARCH_SOURCES.includes(item.source) ? item.source : "Reddit",
+    title: item.title || "Untitled AI Topic",
+    author: item.author || "",
+    url: item.url || "",
+    publishedAt: item.publishedAt || now(),
+    score: clampScore(item.score ?? 70),
+    engagement: {
+      comments: Number(item.engagement?.comments ?? item.comments) || 0,
+      likes: Number(item.engagement?.likes ?? item.likes) || 0
+    },
+    category: RESEARCH_CATEGORIES.includes(item.category) ? item.category : "GPT",
+    tags: Array.isArray(item.tags) ? item.tags : splitTags(item.tags),
+    summary: item.summary || "",
+    commentSummary: item.commentSummary || "",
+    aiAnalysis: item.aiAnalysis || "",
+    whyTrending: item.whyTrending || "",
+    suggestedAngles: Array.isArray(item.suggestedAngles) ? item.suggestedAngles : splitTags(item.suggestedAngles),
+    recommendedPlatforms: safeTargetPlatforms(item.recommendedPlatforms).length ? safeTargetPlatforms(item.recommendedPlatforms) : ["小红书", "抖音", "B站"],
+    status: item.status || "NEW",
     createdAt,
     updatedAt: item.updatedAt || createdAt
   };
@@ -397,6 +435,7 @@ function migrateDatabase(raw) {
   const newDb = {
     schemaVersion: 2,
     contentItems: [],
+    topics: [],
     generatedAssets: [],
     archivedGeneratedAssets: [],
     videoProjects: [],
@@ -416,6 +455,7 @@ function migrateDatabase(raw) {
   newDb.settings.aiStatus = normalizeAiStatus(source.settings?.aiStatus);
 
   const existingAssets = Array.isArray(source.generatedAssets) ? source.generatedAssets : [];
+  const existingTopics = Array.isArray(source.topics) ? source.topics : createMockTopics();
   const existingArchived = Array.isArray(source.archivedGeneratedAssets) ? source.archivedGeneratedAssets : [];
   const existingVideoProjects = Array.isArray(source.videoProjects) ? source.videoProjects : [];
   const existingJobs = Array.isArray(source.publishJobs) ? source.publishJobs : [];
@@ -461,6 +501,7 @@ function migrateDatabase(raw) {
   existingJobs.forEach(item => newDb.publishJobs.push(normalizePublishJob(item)));
   existingAnalytics.forEach(item => newDb.analyticsRecords.push(normalizeAnalyticsRecord(item)));
   existingTasks.forEach(item => newDb.tasks.push(normalizeTask(item)));
+  newDb.topics = existingTopics.map(normalizeTopic);
 
   newDb.promptTemplates = (source.promptTemplates || createMockPrompts()).map(normalizePrompt);
   newDb.knowledgeItems = (source.knowledgeItems || createMockKnowledge()).map(normalizeKnowledge);
@@ -560,6 +601,97 @@ const ContentStore = {
       if (filters.score === "90" && item.finalScore < 90) return false;
       return true;
     });
+  }
+};
+
+const MockTopicProvider = {
+  fetchTopics() {
+    return createMockTopics();
+  }
+};
+
+const TopicStore = {
+  ...createCrudStore("topics", normalizeTopic),
+  getFiltered(filters = {}) {
+    const nowTime = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const dateLimit = filters.date === "Today" ? dayMs : filters.date === "30 Days" ? 30 * dayMs : 7 * dayMs;
+    const list = this.getAll().filter(topic => {
+      if (filters.source && topic.source !== filters.source) return false;
+      if (filters.category && topic.category !== filters.category) return false;
+      if (filters.date && filters.date !== "30 Days" && nowTime - new Date(topic.publishedAt).getTime() > dateLimit) return false;
+      return true;
+    });
+    const sort = filters.sort || "Trending";
+    return list.sort((a, b) => {
+      if (sort === "New") return new Date(b.publishedAt) - new Date(a.publishedAt);
+      if (sort === "Engagement") return (b.engagement.comments + b.engagement.likes) - (a.engagement.comments + a.engagement.likes);
+      return b.score - a.score;
+    });
+  },
+  analyzeAgain(id) {
+    const topic = this.getById(id);
+    if (!topic) return null;
+    return this.update(id, {
+      status: "ANALYZED",
+      aiAnalysis: `AI Summary：${topic.title} 的讨论正在从单点新闻变成可持续选题，中文内容可以突出“发生了什么、为什么现在火、普通用户该怎么判断”。`,
+      commentSummary: `Comment Summary：评论主要集中在真实可用性、成本、替代风险和是否值得马上尝试。`,
+      whyTrending: `Why Trending：${topic.category} 方向近期关注度高，且 ${topic.source} 上的互动数据明显高于普通话题。`,
+      suggestedAngles: topic.suggestedAngles.length ? topic.suggestedAngles : ["普通用户怎么用", "创作者如何借势", "开发者是否该马上试"]
+    });
+  },
+  createContentFromTopic(id) {
+    const topic = this.getById(id);
+    if (!topic) return null;
+    const existing = ContentStore.getAll().find(content => content.sourceUrl === topic.url || (content.sourceTitle === topic.title && content.sourcePlatform === topic.source));
+    if (existing) {
+      this.update(id, { status: "SAVED_TO_CONTENT" });
+      appState.selectedContentId = existing.id;
+      return existing;
+    }
+    const content = ContentStore.create({
+      title: topic.title,
+      status: CONTENT_STATUS.COLLECTED,
+      sourcePlatform: topic.source,
+      sourceUrl: topic.url,
+      sourceTitle: topic.title,
+      sourceAuthor: topic.author,
+      sourcePublishedAt: topic.publishedAt,
+      originalSummary: topic.summary,
+      topic: topic.category,
+      tags: topic.tags,
+      targetPlatforms: topic.recommendedPlatforms,
+      hotScore: topic.score,
+      trendScore: topic.score,
+      chinaFitScore: Math.min(100, Math.round(topic.score * 0.92 + 8)),
+      finalScore: topic.score,
+      selectedAngle: topic.suggestedAngles[0] || "",
+      aiAnalysis: topic.aiAnalysis,
+      commentSummary: topic.commentSummary,
+      copyrightStatus: "已重写"
+    });
+    this.update(id, { status: "SAVED_TO_CONTENT" });
+    appState.selectedContentId = content.id;
+    return content;
+  },
+  saveToKnowledge(id) {
+    const topic = this.getById(id);
+    if (!topic) return null;
+    const source = `${topic.source} / MockTopicProvider`;
+    const existing = KnowledgeStore.getAll().find(item => item.title === topic.title && item.source === source);
+    if (existing) {
+      this.update(id, { status: "SAVED_TO_KNOWLEDGE" });
+      return existing;
+    }
+    const knowledge = KnowledgeStore.create({
+      title: topic.title,
+      source,
+      topic: topic.category,
+      tags: topic.tags,
+      summary: `${topic.summary}\n\n${topic.aiAnalysis}\n\n${topic.commentSummary}`
+    });
+    this.update(id, { status: "SAVED_TO_KNOWLEDGE" });
+    return knowledge;
   }
 };
 
@@ -1283,6 +1415,8 @@ async function createAsset(content, platform, assetType, fixedContent = "") {
 }
 
 window.ContentStore = ContentStore;
+window.TopicStore = TopicStore;
+window.MockTopicProvider = MockTopicProvider;
 window.GeneratedAssetStore = GeneratedAssetStore;
 window.VideoProjectStore = VideoProjectStore;
 window.PublishJobStore = PublishJobStore;
@@ -1313,6 +1447,7 @@ function createInitialData() {
   return {
     schemaVersion: 2,
     contentItems: createMockContents(),
+    topics: createMockTopics(),
     generatedAssets: [],
     archivedGeneratedAssets: [],
     videoProjects: [],
@@ -1365,6 +1500,52 @@ function createMockContents() {
   }));
 }
 
+function createMockTopics() {
+  const hoursAgo = hours => new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  const rows = [
+    ["Reddit", "GPT-5.5 mini rumors spark debate about cheaper reasoning models", "u/modelwatcher", 3, 96, 842, 6200, "GPT", ["GPT", "OpenAI", "Reasoning"], "Reddit 用户在讨论下一代轻量推理模型是否会把复杂任务成本继续打下来。", "支持者关注成本下降，反对者认为传闻太多、真实能力仍需验证。", "AI Summary：轻量推理模型是中文内容的高转化话题，可拆成价格、能力和使用场景。", "Why Trending：模型能力传闻与成本焦虑同时出现，容易引发创作者和开发者讨论。", ["GPT-5.5 mini 到底会改变什么", "普通人什么时候该换模型", "AI 工具成本会不会继续下降"], ["小红书", "抖音"]],
+    ["X", "OpenAI tool calling workflows are becoming the default for indie hackers", "@buildwithai", 6, 88, 190, 4800, "GPT", ["OpenAI", "Tool Calling", "Indie Hacker"], "X 上不少独立开发者展示用工具调用串联自动化工作流。", "评论集中在稳定性、成本和能否替代 Zapier 类工具。", "AI Summary：这类话题适合做“AI 自动化工作流”案例拆解。", "Why Trending：低代码自动化和 AI Agent 的边界正在融合。", ["一个人如何搭 AI 小团队", "Tool calling 是什么", "独立开发者的新工具栈"], ["B站", "抖音"]],
+    ["YouTube", "I replaced my research workflow with Claude Projects for one week", "AI Workflow Lab", 18, 84, 312, 9800, "Claude", ["Claude", "Research", "Workflow"], "视频作者用 Claude Projects 做一周研究工作流实验。", "观众关心长上下文是否真的省时间，以及资料管理是否可靠。", "AI Summary：Claude 工作流适合转成教程类和效率工具测评。", "Why Trending：长上下文工具正在从演示走向日常工作流。", ["Claude Projects 怎么用", "研究工作流自动化", "长上下文适合谁"], ["小红书", "B站"]],
+    ["Reddit", "Claude Code users share their best prompt patterns", "u/terminalpoet", 29, 91, 418, 4100, "Claude", ["Claude Code", "Prompt", "AI Coding"], "开发者分享 Claude Code 的提示词结构和终端协作技巧。", "评论认为提示词模板有效，但仍需要理解代码结构。", "AI Summary：这是典型的开发者工具经验贴，适合沉淀为知识库。", "Why Trending：Claude Code 使用人群扩大，实战 prompt 有强收藏价值。", ["Claude Code 提示词模板", "程序员如何让 AI 少犯错", "AI Coding 工作流"], ["B站", "小红书"]],
+    ["X", "Gemini deep research users compare it with Perplexity and ChatGPT", "@searchnative", 14, 83, 220, 5300, "Gemini", ["Gemini", "Deep Research", "Search"], "用户比较 Gemini 深度研究、Perplexity 和 ChatGPT 的搜索体验。", "争议点集中在引用质量、速度和中文资料覆盖。", "AI Summary：适合做横评内容，中文用户对搜索型 AI 有明确需求。", "Why Trending：AI 搜索工具进入实用阶段，用户开始比较真实体验。", ["Gemini 深度研究值不值得用", "AI 搜索三强横评", "谁最适合中文用户"], ["小红书", "B站"]],
+    ["YouTube", "Google AI Studio new features for creators explained", "Creator Stack", 40, 79, 145, 7600, "Gemini", ["Google AI", "Gemini", "Creator"], "视频讲解 Google AI Studio 对创作者的新功能。", "评论关心是否免费、是否能接入自己的内容流程。", "AI Summary：Google AI Studio 适合做工具科普和创作者流程优化。", "Why Trending：创作者工具链正在被模型平台直接改写。", ["Google AI Studio 入门", "创作者如何用 Gemini", "免费 AI 工具清单"], ["小红书", "抖音"]],
+    ["Reddit", "Cursor makes junior developers faster but maybe less independent", "u/devmentor", 5, 94, 710, 8800, "AI Coding", ["Cursor", "AI Coding", "Career"], "Reddit 争论 Cursor 是否让初级开发者更快但更依赖工具。", "评论两极分化：有人认为是杠杆，有人担心基础能力退化。", "AI Summary：职业焦虑和效率提升的冲突很适合中文短视频。", "Why Trending：AI Coding 已经影响学习路径和岗位预期。", ["Cursor 会削弱编程能力吗", "新人程序员还该怎么学", "AI Coding 的真实边界"], ["抖音", "B站"]],
+    ["X", "Windsurf users show multi-file refactor demos that look agentic", "@codemode", 9, 86, 155, 3900, "AI Coding", ["Windsurf", "AI Coding", "Agent"], "Windsurf 用户展示多文件重构 demo，看起来更像 Agent 协作。", "评论在比较 Cursor、Claude Code 和 Windsurf 的差异。", "AI Summary：适合做 AI Coding 工具横向对比。", "Why Trending：开发工具正在从补全走向任务执行。", ["Windsurf 和 Cursor 怎么选", "AI Coding 工具进入 Agent 阶段", "多文件重构演示"], ["B站", "抖音"]],
+    ["YouTube", "Lovable app builder review after shipping three prototypes", "NoCode Field Notes", 22, 82, 264, 11200, "AI Coding", ["Lovable", "No Code", "Prototype"], "作者用 Lovable 做了三个原型后分享优缺点。", "观众关心能否上线真实产品，以及后续维护成本。", "AI Summary：Lovable 适合做非技术人构建应用的案例。", "Why Trending：AI App Builder 正在扩大非程序员的创作边界。", ["不会代码也能做 App 吗", "Lovable 三个真实案例", "AI 建站工具避坑"], ["小红书", "B站"]],
+    ["Reddit", "AI agents still fail at boring enterprise workflows", "u/opsrealist", 48, 87, 390, 2400, "AI Agent", ["AI Agent", "Enterprise", "Workflow"], "企业用户吐槽 Agent 在普通业务流程里仍不稳定。", "评论认为演示很酷，但落地需要权限、日志和人工兜底。", "AI Summary：这是反 hype 视角，适合做深度观点。", "Why Trending：Agent 热潮下，真实落地问题开始被集中讨论。", ["AI Agent 为什么难落地", "企业工作流不是 demo", "Agent 需要哪些基础设施"], ["B站", "抖音"]],
+    ["X", "Multi-agent content workflow diagrams are everywhere now", "@agentopsdaily", 11, 89, 120, 3500, "AI Agent", ["AI Agent", "Content Workflow", "Automation"], "X 上大量创作者分享多 Agent 内容生产流程图。", "评论关注哪些环节真的能自动化，哪些还必须人工判断。", "AI Summary：与 AI Content OS 自身定位高度相关，可做产品理念内容。", "Why Trending：内容工作台正在从工具集合升级为可执行工作流。", ["内容创作者的 AI 小团队", "多 Agent 内容工厂", "哪些步骤能自动化"], ["小红书", "抖音", "B站"]],
+    ["YouTube", "Building an AI agent that plans, writes, and reviews posts", "Agent Builder", 31, 85, 208, 8900, "AI Agent", ["Agent", "Content", "Review"], "视频演示一个能规划、写作、审核内容的 Agent。", "评论询问是否能用于真实账号，以及如何避免幻觉。", "AI Summary：适合做 AI 内容工作台的功能解释和竞品观察。", "Why Trending：从聊天到执行任务，是 AI 产品的明显趋势。", ["AI 不只聊天还能执行", "内容 Agent 怎么设计", "审核 Agent 有什么用"], ["B站", "小红书"]],
+    ["Reddit", "Open-source video model quality jumps again this week", "u/videogenfan", 8, 92, 560, 6700, "AI Video", ["AI Video", "Open Source", "Generation"], "开源视频模型效果再次提升，社区分享大量样例。", "评论讨论质量、显存需求和商用版权。", "AI Summary：AI Video 的效果展示很适合短视频平台，但要注意版权边界。", "Why Trending：视觉效果直观，且开源降低尝试门槛。", ["AI 视频生成又进化了", "普通电脑能不能跑", "商用版权要注意什么"], ["抖音", "B站"]],
+    ["X", "AI video creators are moving from prompt tricks to repeatable pipelines", "@videopipeline", 16, 90, 240, 7200, "AI Video", ["AI Video", "Pipeline", "Creator"], "创作者开始从提示词技巧转向稳定视频生产流程。", "评论关注角色一致性、镜头控制和后期成本。", "AI Summary：这是从工具猎奇到工作流生产的转折点。", "Why Trending：AI 视频开始进入可复制生产阶段。", ["AI 视频工作流怎么搭", "提示词不够了", "创作者如何批量生产"], ["小红书", "B站"]],
+    ["YouTube", "Runway vs open-source AI video tools: real creator test", "Video Maker Notes", 55, 80, 180, 15000, "AI Video", ["Runway", "Open Source", "AI Video"], "创作者横评 Runway 和开源视频工具的真实体验。", "观众关注画质、价格和可控性。", "AI Summary：适合做视频工具横评与选择建议。", "Why Trending：AI 视频工具数量多，用户需要决策指南。", ["Runway 还值不值得付费", "开源视频工具能替代吗", "AI 视频工具横评"], ["B站", "小红书"]],
+    ["Reddit", "DeepSeek users discuss why small models feel surprisingly capable", "u/localmodeler", 20, 86, 330, 3100, "Open Source", ["DeepSeek", "Small Model", "Open Source"], "用户讨论 DeepSeek 小模型为何在部分任务中表现超预期。", "评论聚焦本地部署、隐私和成本。", "AI Summary：DeepSeek 话题适合中文平台，尤其是低成本和本地化角度。", "Why Trending：小模型和开源路线持续挑战闭源大模型叙事。", ["小模型为什么突然变强", "DeepSeek 本地部署价值", "低成本 AI 工作流"], ["小红书", "B站"]],
+    ["X", "Open-source agents need better memory, not more demos", "@ossagent", 26, 78, 98, 2100, "Open Source", ["Open Source", "Agent Memory", "AI Agent"], "开源社区讨论 Agent 记忆系统比 demo 更关键。", "评论关注长期记忆、隐私和可解释性。", "AI Summary：适合做偏技术解释的 B站内容。", "Why Trending：Agent 落地难点从模型转向工程系统。", ["Agent 记忆为什么重要", "开源 Agent 缺什么", "AI 工程化新问题"], ["B站"]],
+    ["YouTube", "Self-hosted AI stack for creators: local LLM plus automation", "Local AI Desk", 64, 76, 110, 6800, "Open Source", ["Local LLM", "Automation", "Open Source"], "视频展示创作者自托管 AI 工具栈。", "观众关心门槛、成本和数据安全。", "AI Summary：本地 AI 工具栈适合做进阶教程。", "Why Trending：用户开始关注隐私和平台依赖问题。", ["本地 AI 工作台怎么搭", "创作者要不要自托管", "开源 AI 工具栈"], ["B站", "小红书"]],
+    ["Reddit", "Anthropic prompt caching changes how teams think about long context", "u/contextnerd", 36, 81, 260, 2900, "Claude", ["Anthropic", "Prompt Cache", "Long Context"], "团队讨论 prompt caching 对长上下文成本的影响。", "评论认为对企业知识库和代码库场景很有价值。", "AI Summary：适合做技术趋势解释，把成本概念讲清楚。", "Why Trending：长上下文成本下降会打开更多真实应用。", ["Prompt Cache 是什么", "长上下文为什么变便宜", "企业 AI 成本怎么降"], ["B站", "小红书"]],
+    ["X", "Google AI releases another creator-focused notebook workflow", "@googlenotes", 44, 77, 130, 4400, "Gemini", ["Google AI", "Notebook", "Creator"], "Google AI 的笔记工作流被创作者转发。", "评论集中在资料整理、播客化和学习效率。", "AI Summary：适合做学习/知识管理方向内容。", "Why Trending：AI 笔记与内容创作正在融合。", ["AI 笔记变成内容助手", "Google AI 学习工作流", "知识管理自动化"], ["小红书", "抖音"]],
+    ["YouTube", "Cursor, Claude Code, Windsurf: which AI coding app should you pick?", "Dev Tool Review", 72, 93, 520, 18400, "AI Coding", ["Cursor", "Claude Code", "Windsurf"], "视频横评三款热门 AI Coding 工具。", "观众强烈需要选择建议，评论区充满具体使用场景。", "AI Summary：高需求横评，非常适合做中文版本选题。", "Why Trending：开发者工具竞争激烈，选择成本上升。", ["三大 AI Coding 工具怎么选", "Cursor vs Claude Code vs Windsurf", "不同人群选择建议"], ["B站", "抖音", "小红书"]],
+    ["Reddit", "People are using AI agents to run personal knowledge bases", "u/pkmai", 4, 85, 300, 3600, "AI Agent", ["Personal Knowledge", "AI Agent", "PKM"], "用户分享用 Agent 管理个人知识库的实践。", "评论关心信息过载、检索准确性和隐私。", "AI Summary：适合小红书知识管理和 B站教程。", "Why Trending：个人知识库是 Agent 容易落地的轻量场景。", ["AI 个人知识库怎么搭", "知识管理的下一步", "Agent 帮你整理资料"], ["小红书", "B站"]]
+  ];
+  return rows.map(([source, title, author, hours, score, comments, likes, category, tags, summary, commentSummary, aiAnalysis, whyTrending, suggestedAngles, recommendedPlatforms], index) => normalizeTopic({
+    source,
+    title,
+    author,
+    url: `https://example.com/mock-research-topic-${index + 1}`,
+    publishedAt: hoursAgo(hours),
+    score,
+    engagement: { comments, likes },
+    category,
+    tags,
+    summary,
+    commentSummary,
+    aiAnalysis,
+    whyTrending,
+    suggestedAngles,
+    recommendedPlatforms,
+    status: index < 4 ? "TRENDING" : "NEW"
+  }));
+}
+
 function createMockPrompts() {
   return [
     ["海外热点分析", "分析", "通用", "请分析 {sourceTitle} 的海外热度、中文适配角度和争议点。", ["sourceTitle"], 86],
@@ -1409,6 +1590,7 @@ function render() {
   renderNav();
   const views = {
     dashboard: renderDashboardV2,
+    research: renderResearch,
     hotRadar: renderHotRadar,
     library: renderContentLibrary,
     workspace: renderWorkspace,
@@ -1498,6 +1680,94 @@ function compactContentRow(item) {
     <div class="toolbar">
       <button class="btn small ghost" data-open-workspace="${item.id}">进入工作区</button>
       <button class="btn small" data-generate-all="${item.id}">全部生成</button>
+    </div>
+  </div>`;
+}
+
+function renderResearch() {
+  const filters = appState.filters;
+  const topics = TopicStore.getFiltered({
+    source: filters.researchSource,
+    category: filters.researchCategory,
+    sort: filters.researchSort,
+    date: filters.researchDate
+  });
+  if (!appState.selectedTopicId || !TopicStore.getById(appState.selectedTopicId)) appState.selectedTopicId = topics[0]?.id || TopicStore.getAll()[0]?.id || null;
+  const selected = TopicStore.getById(appState.selectedTopicId) || topics[0] || null;
+  return `
+    <div class="research-layout">
+      <aside class="card research-filter">
+        <h3>Filter Panel</h3>
+        <div class="form-grid single">
+          <div><label>Source</label><select id="researchSource"><option value="">All Sources</option>${RESEARCH_SOURCES.map(item => `<option value="${item}" ${item === filters.researchSource ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+          <div><label>Category</label><select id="researchCategory"><option value="">All Categories</option>${RESEARCH_CATEGORIES.map(item => `<option value="${item}" ${item === filters.researchCategory ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+          <div><label>Sort</label><select id="researchSort">${RESEARCH_SORTS.map(item => `<option value="${item}" ${item === filters.researchSort ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+          <div><label>Date</label><select id="researchDate">${RESEARCH_DATES.map(item => `<option value="${item}" ${item === filters.researchDate ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+        </div>
+        <div class="divider"></div>
+        <div class="mini-stack">
+          ${statCard("Mock Topics", TopicStore.getAll().length, "来自 MockTopicProvider")}
+          ${statCard("Filtered", topics.length, "当前筛选结果")}
+        </div>
+      </aside>
+      <section class="research-list">
+        <div class="card">
+          <div class="item-head">
+            <h3>Topic List</h3>
+            <span class="chip">Provider: MockTopicProvider</span>
+          </div>
+          <div class="mini-stack">
+            ${topics.length ? topics.map(renderTopicCard).join("") : empty("当前筛选条件下没有 Topic。")}
+          </div>
+        </div>
+      </section>
+      <aside class="research-detail">
+        ${selected ? renderTopicDetail(selected) : empty("请选择一个 Topic。")}
+      </aside>
+    </div>
+  `;
+}
+
+function renderTopicCard(topic) {
+  const active = topic.id === appState.selectedTopicId ? "active" : "";
+  const aiIndex = Math.round(topic.score * .65 + Math.min(100, (topic.engagement.comments + topic.engagement.likes) / 90) * .35);
+  return `<button class="topic-card ${active}" data-select-topic="${topic.id}">
+    <div class="item-head">
+      <span class="score">Score ${topic.score}</span>
+      <span class="chip">AI 推荐 ${aiIndex}</span>
+    </div>
+    <h3 class="item-title">${escapeHtml(topic.title)}</h3>
+    <div class="meta">${topic.source} · ${escapeHtml(topic.author)} · ${new Date(topic.publishedAt).toLocaleString("zh-CN")}</div>
+    <div class="meta">评论 ${topic.engagement.comments} · 点赞 ${topic.engagement.likes}</div>
+    <div class="chips">
+      <span class="chip">${escapeHtml(topic.category)}</span>
+      ${(topic.tags || []).slice(0, 3).map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}
+    </div>
+  </button>`;
+}
+
+function renderTopicDetail(topic) {
+  return `<div class="card sticky">
+    <div class="item-head">
+      <h3>${escapeHtml(topic.title)}</h3>
+      <span class="score">${topic.score}</span>
+    </div>
+    <div class="meta">${topic.source} · ${escapeHtml(topic.author)} · ${new Date(topic.publishedAt).toLocaleString("zh-CN")} · ${escapeHtml(topic.status)}</div>
+    ${kv("原文摘要（Mock）", escapeHtml(topic.summary))}
+    ${kv("AI Summary", escapeHtml(topic.aiAnalysis))}
+    ${kv("Comment Summary", escapeHtml(topic.commentSummary))}
+    ${kv("Why Trending", escapeHtml(topic.whyTrending))}
+    <div class="divider"></div>
+    <strong>Suggested Angles</strong>
+    ${tagChips(topic.suggestedAngles)}
+    <div class="divider"></div>
+    <strong>Recommended Platforms</strong>
+    ${tagChips(topic.recommendedPlatforms)}
+    <div class="divider"></div>
+    <div class="toolbar">
+      <button class="btn small ghost" data-topic-analyze="${topic.id}">Analyze Again</button>
+      <button class="btn small" data-topic-create-content="${topic.id}">Create Content</button>
+      <button class="btn small ghost" data-topic-save-knowledge="${topic.id}">Save To Knowledge</button>
     </div>
   </div>`;
 }
@@ -1853,7 +2123,8 @@ function filteredGlobal() { return appState.filters.global ? ContentStore.search
 function bindScopedInputs() {
   const bindings = [
     ["radarQuery", "radarQuery"], ["radarPlatform", "radarPlatform"], ["radarScore", "radarScore"], ["radarSort", "radarSort"],
-    ["libraryQuery", "libraryQuery"], ["libraryStatus", "libraryStatus"], ["libraryPlatform", "libraryPlatform"], ["libraryTag", "libraryTag"]
+    ["libraryQuery", "libraryQuery"], ["libraryStatus", "libraryStatus"], ["libraryPlatform", "libraryPlatform"], ["libraryTag", "libraryTag"],
+    ["researchSource", "researchSource"], ["researchCategory", "researchCategory"], ["researchSort", "researchSort"], ["researchDate", "researchDate"]
   ];
   bindings.forEach(([id, key]) => {
     const el = document.getElementById(id);
@@ -1981,6 +2252,14 @@ document.addEventListener("click", async event => {
   if (target.dataset.retryTask) { await TaskQueue.retry(target.dataset.retryTask); return render(); }
   if (target.dataset.agentChain) return createAgentTaskChain(target.dataset.agentChain);
   if (target.dataset.openWorkspace) { appState.selectedContentId = target.dataset.openWorkspace; return setPage("workspace"); }
+  if (target.dataset.selectTopic) { appState.selectedTopicId = target.dataset.selectTopic; return render(); }
+  if (target.dataset.topicAnalyze) { TopicStore.analyzeAgain(target.dataset.topicAnalyze); appState.selectedTopicId = target.dataset.topicAnalyze; return render(); }
+  if (target.dataset.topicCreateContent) {
+    const content = TopicStore.createContentFromTopic(target.dataset.topicCreateContent);
+    if (content) return setPage("workspace");
+    return render();
+  }
+  if (target.dataset.topicSaveKnowledge) { TopicStore.saveToKnowledge(target.dataset.topicSaveKnowledge); appState.selectedTopicId = target.dataset.topicSaveKnowledge; return render(); }
   if (target.dataset.status) {
     const [id, status] = target.dataset.status.split(":");
     ContentStore.update(id, { status });

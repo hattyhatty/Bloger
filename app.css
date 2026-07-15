@@ -150,6 +150,7 @@ label { display: block; margin-bottom: 7px; color: #735461; font-size: 13px; fon
 .four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .workspace-grid { grid-template-columns: 1fr 1.12fr 1fr; }
 .form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: end; }
+.form-grid.single { grid-template-columns: 1fr; }
 .span-2 { grid-column: span 2; }
 .span-all { grid-column: 1 / -1; }
 
@@ -185,6 +186,37 @@ label { display: block; margin-bottom: 7px; color: #735461; font-size: 13px; fon
   display: grid;
   gap: 12px;
   min-width: 0;
+}
+.research-layout {
+  display: grid;
+  grid-template-columns: 240px minmax(320px, 1fr) minmax(300px, 390px);
+  gap: 16px;
+  align-items: start;
+}
+.research-filter,
+.research-detail {
+  min-width: 0;
+}
+.research-list {
+  min-width: 0;
+}
+.topic-card {
+  width: 100%;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255,255,255,.92);
+  color: var(--ink);
+  text-align: left;
+  box-shadow: 0 10px 26px rgba(214, 101, 145, .08);
+}
+.topic-card:hover,
+.topic-card.active {
+  border-color: #efabc7;
+  background: #fff3f8;
 }
 .item-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
 .item-title { margin: 0; font-size: 17px; line-height: 1.35; overflow-wrap: anywhere; }
@@ -238,6 +270,7 @@ td { font-size: 14px; }
 
 @media (max-width: 1180px) {
   .layout { grid-template-columns: 1fr; }
+  .research-layout { grid-template-columns: 1fr; }
   .copilot { order: -1; }
   .sticky { position: static; }
   .four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
