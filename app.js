@@ -44,6 +44,32 @@ const RESEARCH_SOURCES = Object.freeze(["Reddit", "X", "YouTube"]);
 const RESEARCH_CATEGORIES = Object.freeze(["GPT", "Claude", "Gemini", "AI Coding", "AI Agent", "AI Video", "Open Source"]);
 const RESEARCH_SORTS = Object.freeze(["Trending", "New", "Engagement"]);
 const RESEARCH_DATES = Object.freeze(["Today", "7 Days", "30 Days"]);
+const TOPIC_STATUS = Object.freeze({
+  DISCOVERED: "DISCOVERED",
+  NORMALIZED: "NORMALIZED",
+  DUPLICATE: "DUPLICATE",
+  SCORING: "SCORING",
+  SCORED: "SCORED",
+  ANALYZING: "ANALYZING",
+  ANALYZED: "ANALYZED",
+  SELECTED: "SELECTED",
+  CONVERTED: "CONVERTED",
+  ARCHIVED: "ARCHIVED",
+  FAILED: "FAILED"
+});
+const TOPIC_STATUS_LABELS = Object.freeze({
+  DISCOVERED: "已发现",
+  NORMALIZED: "已标准化",
+  DUPLICATE: "重复内容",
+  SCORING: "评分中",
+  SCORED: "已评分",
+  ANALYZING: "分析中",
+  ANALYZED: "已分析",
+  SELECTED: "已选中",
+  CONVERTED: "已转内容",
+  ARCHIVED: "已归档",
+  FAILED: "处理失败"
+});
 const TARGET_PLATFORMS = Object.freeze(["小红书", "抖音", "B站"]);
 const CONTENT_TYPES = Object.freeze(["图文", "短视频", "视频脚本", "口播"]);
 const PUBLISH_STATUS = Object.freeze({ DRAFT: "DRAFT", SCHEDULED: "SCHEDULED", PUBLISHED: "PUBLISHED", FAILED: "FAILED" });
@@ -59,7 +85,15 @@ const TASK_TYPES = Object.freeze({
   GENERATE_ALL: "GENERATE_ALL",
   PREPARE_VIDEO: "PREPARE_VIDEO",
   REVIEW_CONTENT: "REVIEW_CONTENT",
-  SCHEDULE_PUBLISH: "SCHEDULE_PUBLISH"
+  SCHEDULE_PUBLISH: "SCHEDULE_PUBLISH",
+  NORMALIZE_TOPIC: "NORMALIZE_TOPIC",
+  DEDUPLICATE_TOPIC: "DEDUPLICATE_TOPIC",
+  SCORE_TOPIC: "SCORE_TOPIC",
+  ANALYZE_TOPIC: "ANALYZE_TOPIC",
+  PROCESS_TOPIC: "PROCESS_TOPIC",
+  PROCESS_ALL_TOPICS: "PROCESS_ALL_TOPICS",
+  CONVERT_TOPIC_TO_CONTENT: "CONVERT_TOPIC_TO_CONTENT",
+  SAVE_TOPIC_TO_KNOWLEDGE: "SAVE_TOPIC_TO_KNOWLEDGE"
 });
 const TASK_TYPE_LABELS = Object.freeze({
   RECOMMEND_TODAY: "推荐今日内容",
@@ -70,7 +104,15 @@ const TASK_TYPE_LABELS = Object.freeze({
   GENERATE_ALL: "生成全部",
   PREPARE_VIDEO: "准备视频",
   REVIEW_CONTENT: "审核内容",
-  SCHEDULE_PUBLISH: "创建排期"
+  SCHEDULE_PUBLISH: "创建排期",
+  NORMALIZE_TOPIC: "标准化 Topic",
+  DEDUPLICATE_TOPIC: "Topic 去重",
+  SCORE_TOPIC: "Topic 评分",
+  ANALYZE_TOPIC: "分析 Topic",
+  PROCESS_TOPIC: "处理 Topic",
+  PROCESS_ALL_TOPICS: "批量处理 Topic",
+  CONVERT_TOPIC_TO_CONTENT: "Topic 转 Content",
+  SAVE_TOPIC_TO_KNOWLEDGE: "Topic 存知识"
 });
 const AI_PROVIDERS = Object.freeze(["mock", "openai", "zai", "deepseek", "claude", "gemini", "custom"]);
 const AI_PROVIDER_DEFAULT_BASE_URLS = Object.freeze({
@@ -158,10 +200,18 @@ const today = () => new Date().toISOString().slice(0, 10);
 const clampScore = value => Math.max(0, Math.min(100, Number(value) || 0));
 const splitTags = value => String(value || "").split(/[,，\s]+/).map(item => item.trim()).filter(Boolean);
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
+const stripUrlParams = value => String(value || "").split("?")[0].split("#")[0];
+const simpleHash = value => {
+  const text = String(value || "");
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  return Math.abs(hash).toString(36);
+};
 const isTargetPlatform = platform => TARGET_PLATFORMS.includes(platform);
 const safeTargetPlatforms = list => (Array.isArray(list) ? list : [list]).filter(isTargetPlatform);
 const statusClass = status => `status ${String(status || "").toLowerCase()}`;
 const statusPill = status => `<span class="${statusClass(status)}">${STATUS_LABELS[status] || status}</span>`;
+const topicStatusPill = status => `<span class="${statusClass(status)}">${TOPIC_STATUS_LABELS[status] || status}</span>`;
 const scoreBadge = score => `<span class="score">${clampScore(score)}分</span>`;
 const tagChips = tags => `<div class="chips">${(tags || []).map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}</div>`;
 const sourcePlatformOptions = selected => SOURCE_PLATFORMS.map(item => `<option ${item === selected ? "selected" : ""}>${item}</option>`).join("");
@@ -183,6 +233,7 @@ function normalizeContent(item = {}) {
     status: Object.values(CONTENT_STATUS).includes(item.status) ? item.status : CONTENT_STATUS.DISCOVERED,
     sourcePlatform: item.sourcePlatform || item.platform || "Reddit",
     sourceUrl: item.sourceUrl || item.link || "",
+    sourceTopicId: item.sourceTopicId || "",
     sourceTitle: item.sourceTitle || item.originalTitle || item.title || "",
     sourceAuthor: item.sourceAuthor || "",
     sourcePublishedAt: item.sourcePublishedAt || item.publishedAt || today(),
@@ -213,17 +264,39 @@ function normalizeContent(item = {}) {
 
 function normalizeTopic(item = {}) {
   const createdAt = item.createdAt || now();
+  const source = RESEARCH_SOURCES.includes(item.source) ? item.source : "Reddit";
+  const canonicalUrl = stripUrlParams(item.canonicalUrl || item.url || "");
+  const rawMetrics = {
+    likes: Number(item.rawMetrics?.likes ?? item.engagement?.likes ?? item.likes) || 0,
+    comments: Number(item.rawMetrics?.comments ?? item.engagement?.comments ?? item.comments) || 0,
+    shares: Number(item.rawMetrics?.shares ?? item.shares) || 0,
+    views: Number(item.rawMetrics?.views ?? item.views) || 0,
+    upvotes: Number(item.rawMetrics?.upvotes ?? item.upvotes) || 0
+  };
+  const normalizedMetrics = {
+    engagementRate: Number(item.normalizedMetrics?.engagementRate) || 0,
+    velocity: Number(item.normalizedMetrics?.velocity) || 0,
+    sourcePercentile: Number(item.normalizedMetrics?.sourcePercentile) || 0
+  };
+  const contentHash = item.contentHash || simpleHash(`${source}|${canonicalUrl}|${item.title || ""}|${item.rawText || item.summary || ""}`.toLowerCase());
+  const status = Object.values(TOPIC_STATUS).includes(item.status) ? item.status : (item.status === "TRENDING" || item.status === "NEW" ? TOPIC_STATUS.DISCOVERED : TOPIC_STATUS.DISCOVERED);
   return {
     id: item.id || uid("topic"),
-    source: RESEARCH_SOURCES.includes(item.source) ? item.source : "Reddit",
+    source,
+    sourceExternalId: item.sourceExternalId || `${source}_${contentHash}`,
     title: item.title || "Untitled AI Topic",
     author: item.author || "",
     url: item.url || "",
+    canonicalUrl,
     publishedAt: item.publishedAt || now(),
-    score: clampScore(item.score ?? 70),
+    language: item.language || "en",
+    rawText: item.rawText || item.summary || "",
+    rawMetrics,
+    normalizedMetrics,
+    score: clampScore(item.score ?? item.finalScore ?? 70),
     engagement: {
-      comments: Number(item.engagement?.comments ?? item.comments) || 0,
-      likes: Number(item.engagement?.likes ?? item.likes) || 0
+      comments: rawMetrics.comments,
+      likes: rawMetrics.likes
     },
     category: RESEARCH_CATEGORIES.includes(item.category) ? item.category : "GPT",
     tags: Array.isArray(item.tags) ? item.tags : splitTags(item.tags),
@@ -233,7 +306,24 @@ function normalizeTopic(item = {}) {
     whyTrending: item.whyTrending || "",
     suggestedAngles: Array.isArray(item.suggestedAngles) ? item.suggestedAngles : splitTags(item.suggestedAngles),
     recommendedPlatforms: safeTargetPlatforms(item.recommendedPlatforms).length ? safeTargetPlatforms(item.recommendedPlatforms) : ["小红书", "抖音", "B站"],
-    status: item.status || "NEW",
+    trendScore: clampScore(item.trendScore ?? item.score ?? 70),
+    freshnessScore: clampScore(item.freshnessScore ?? 70),
+    engagementScore: clampScore(item.engagementScore ?? 70),
+    chinaFitScore: clampScore(item.chinaFitScore ?? 70),
+    controversyScore: clampScore(item.controversyScore ?? 50),
+    commercialScore: clampScore(item.commercialScore ?? 50),
+    difficultyScore: clampScore(item.difficultyScore ?? 45),
+    finalScore: clampScore(item.finalScore ?? item.score ?? 70),
+    scoreReason: item.scoreReason || "",
+    contentHash,
+    duplicateOfTopicId: item.duplicateOfTopicId || "",
+    analysisVersion: Number(item.analysisVersion) || 0,
+    analysisStatus: item.analysisStatus || "pending",
+    analysisError: item.analysisError || "",
+    sourceTopicId: item.sourceTopicId || item.id || "",
+    createdContentId: item.createdContentId || "",
+    savedKnowledgeId: item.savedKnowledgeId || "",
+    status,
     createdAt,
     updatedAt: item.updatedAt || createdAt
   };
@@ -376,6 +466,7 @@ function normalizeKnowledge(item = {}) {
     tags: Array.isArray(item.tags) ? item.tags : splitTags(item.tags),
     summary: item.summary || "",
     linkedContentIds: Array.isArray(item.linkedContentIds) ? item.linkedContentIds : [],
+    linkedTopicId: item.linkedTopicId || "",
     createdAt: item.createdAt || now()
   };
 }
@@ -433,7 +524,7 @@ function saveDb() {
 function migrateDatabase(raw) {
   const source = raw && raw.contentItems ? raw : createInitialData();
   const newDb = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     contentItems: [],
     topics: [],
     generatedAssets: [],
@@ -630,68 +721,13 @@ const TopicStore = {
     });
   },
   analyzeAgain(id) {
-    const topic = this.getById(id);
-    if (!topic) return null;
-    return this.update(id, {
-      status: "ANALYZED",
-      aiAnalysis: `AI Summary：${topic.title} 的讨论正在从单点新闻变成可持续选题，中文内容可以突出“发生了什么、为什么现在火、普通用户该怎么判断”。`,
-      commentSummary: `Comment Summary：评论主要集中在真实可用性、成本、替代风险和是否值得马上尝试。`,
-      whyTrending: `Why Trending：${topic.category} 方向近期关注度高，且 ${topic.source} 上的互动数据明显高于普通话题。`,
-      suggestedAngles: topic.suggestedAngles.length ? topic.suggestedAngles : ["普通用户怎么用", "创作者如何借势", "开发者是否该马上试"]
-    });
+    return ResearchPipeline.analyzeTopic(id);
   },
   createContentFromTopic(id) {
-    const topic = this.getById(id);
-    if (!topic) return null;
-    const existing = ContentStore.getAll().find(content => content.sourceUrl === topic.url || (content.sourceTitle === topic.title && content.sourcePlatform === topic.source));
-    if (existing) {
-      this.update(id, { status: "SAVED_TO_CONTENT" });
-      appState.selectedContentId = existing.id;
-      return existing;
-    }
-    const content = ContentStore.create({
-      title: topic.title,
-      status: CONTENT_STATUS.COLLECTED,
-      sourcePlatform: topic.source,
-      sourceUrl: topic.url,
-      sourceTitle: topic.title,
-      sourceAuthor: topic.author,
-      sourcePublishedAt: topic.publishedAt,
-      originalSummary: topic.summary,
-      topic: topic.category,
-      tags: topic.tags,
-      targetPlatforms: topic.recommendedPlatforms,
-      hotScore: topic.score,
-      trendScore: topic.score,
-      chinaFitScore: Math.min(100, Math.round(topic.score * 0.92 + 8)),
-      finalScore: topic.score,
-      selectedAngle: topic.suggestedAngles[0] || "",
-      aiAnalysis: topic.aiAnalysis,
-      commentSummary: topic.commentSummary,
-      copyrightStatus: "已重写"
-    });
-    this.update(id, { status: "SAVED_TO_CONTENT" });
-    appState.selectedContentId = content.id;
-    return content;
+    return ResearchPipeline.convertToContent(id);
   },
   saveToKnowledge(id) {
-    const topic = this.getById(id);
-    if (!topic) return null;
-    const source = `${topic.source} / MockTopicProvider`;
-    const existing = KnowledgeStore.getAll().find(item => item.title === topic.title && item.source === source);
-    if (existing) {
-      this.update(id, { status: "SAVED_TO_KNOWLEDGE" });
-      return existing;
-    }
-    const knowledge = KnowledgeStore.create({
-      title: topic.title,
-      source,
-      topic: topic.category,
-      tags: topic.tags,
-      summary: `${topic.summary}\n\n${topic.aiAnalysis}\n\n${topic.commentSummary}`
-    });
-    this.update(id, { status: "SAVED_TO_KNOWLEDGE" });
-    return knowledge;
+    return ResearchPipeline.saveToKnowledge(id);
   }
 };
 
@@ -788,7 +824,8 @@ const TaskQueue = {
 
 function buildTaskTitle(type, payload = {}) {
   const content = payload.contentId ? ContentStore.getById(payload.contentId) : null;
-  const suffix = content ? ` · ${content.title}` : "";
+  const topic = payload.topicId ? TopicStore.getById(payload.topicId) : null;
+  const suffix = content ? ` · ${content.title}` : topic ? ` · ${topic.title}` : "";
   return `${TASK_TYPE_LABELS[type] || type}${suffix}`;
 }
 
@@ -1062,6 +1099,283 @@ function defaultPlatformAssetResult(content, platform) {
     cover_title: `B站封面：${content.title.slice(0, 18)}`
   };
 }
+
+// =========================
+// research/researchPipeline.js
+// =========================
+const TopicDeduplicator = {
+  normalizeTitle(title = "") {
+    return String(title)
+      .toLowerCase()
+      .replace(/https?:\/\/\S+/g, "")
+      .replace(/^(reddit|x|youtube|yt|video|thread|post)\s*[:：\-]\s*/i, "")
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  },
+  similarity(a = "", b = "") {
+    const left = new Set(this.normalizeTitle(a).split(" ").filter(Boolean));
+    const right = new Set(this.normalizeTitle(b).split(" ").filter(Boolean));
+    if (!left.size || !right.size) return 0;
+    const intersection = [...left].filter(item => right.has(item)).length;
+    const union = new Set([...left, ...right]).size;
+    return intersection / union;
+  },
+  generateContentHash(topic) {
+    return simpleHash(`${topic.source}|${stripUrlParams(topic.canonicalUrl || topic.url)}|${this.normalizeTitle(topic.title)}|${String(topic.rawText || topic.summary || "").slice(0, 240)}`);
+  },
+  findDuplicate(topic) {
+    const current = normalizeTopic(topic);
+    const currentHash = current.contentHash || this.generateContentHash(current);
+    return TopicStore.getAll().find(candidate => {
+      if (candidate.id === current.id) return false;
+      if (candidate.status === TOPIC_STATUS.DUPLICATE) return false;
+      if (current.sourceExternalId && candidate.source === current.source && candidate.sourceExternalId === current.sourceExternalId) return true;
+      if (current.canonicalUrl && candidate.canonicalUrl && current.canonicalUrl === candidate.canonicalUrl) return true;
+      if (currentHash && candidate.contentHash && currentHash === candidate.contentHash) return true;
+      return this.similarity(current.title, candidate.title) >= 0.82;
+    }) || null;
+  },
+  markDuplicate(topicId, duplicateOfTopicId) {
+    return TopicStore.update(topicId, {
+      status: TOPIC_STATUS.DUPLICATE,
+      duplicateOfTopicId,
+      analysisStatus: "duplicate",
+      updatedAt: now()
+    });
+  }
+};
+
+const TopicScoringService = {
+  calculate(topic) {
+    const item = normalizeTopic(topic);
+    const ageHours = Math.max(1, (Date.now() - new Date(item.publishedAt).getTime()) / 36e5);
+    const totalEngagement = item.rawMetrics.likes + item.rawMetrics.comments * 2 + item.rawMetrics.shares * 3 + item.rawMetrics.upvotes + item.rawMetrics.views * 0.02;
+    const freshnessScore = clampScore(100 - ageHours * 1.8);
+    const engagementScore = clampScore(Math.round(Math.log10(totalEngagement + 10) * 25));
+    const velocity = totalEngagement / ageHours;
+    const trendScore = clampScore(Math.round(item.score * 0.55 + Math.min(100, velocity * 1.8) * 0.45));
+    const chinaKeywords = ["GPT", "Claude", "Gemini", "Cursor", "Lovable", "Windsurf", "OpenAI", "DeepSeek", "AI Agent", "AI Video"];
+    const chinaFitScore = clampScore(Math.round((chinaKeywords.some(keyword => `${item.title} ${item.tags.join(" ")}`.toLowerCase().includes(keyword.toLowerCase())) ? 82 : 68) + (item.recommendedPlatforms.length * 4)));
+    const controversyScore = clampScore((/replace|fail|risk|debate|weaker|取代|失败|风险|争议/i.test(`${item.title} ${item.summary}`) ? 84 : 56) + (item.engagement.comments > 350 ? 8 : 0));
+    const commercialScore = clampScore((/workflow|tool|builder|studio|coding|agent|automation|creator/i.test(`${item.title} ${item.summary}`) ? 82 : 60) + (item.category === "AI Coding" ? 8 : 0));
+    const difficultyScore = clampScore(item.category === "Open Source" ? 66 : item.category === "AI Coding" ? 58 : item.category === "AI Video" ? 62 : 45);
+    const finalScore = clampScore(Math.round(
+      trendScore * 0.22 +
+      freshnessScore * 0.15 +
+      engagementScore * 0.18 +
+      chinaFitScore * 0.22 +
+      controversyScore * 0.08 +
+      commercialScore * 0.1 +
+      (100 - difficultyScore) * 0.05
+    ));
+    return {
+      trendScore,
+      freshnessScore,
+      engagementScore,
+      chinaFitScore,
+      controversyScore,
+      commercialScore,
+      difficultyScore,
+      finalScore,
+      scoreReason: `趋势 ${trendScore}、新鲜度 ${freshnessScore}、互动 ${engagementScore}、中文适配 ${chinaFitScore}，综合推荐分 ${finalScore}。`
+    };
+  }
+};
+
+function fallbackTopicAnalysis(topic) {
+  return {
+    summaryZh: topic.summary || `${topic.title} 正在海外 AI 圈被讨论。`,
+    commentSummaryZh: topic.commentSummary || "评论主要围绕真实可用性、成本、学习曲线和潜在风险展开。",
+    whyTrending: topic.whyTrending || `${topic.category} 方向近期关注度较高，且互动数据有明显增长。`,
+    suggestedAngles: topic.suggestedAngles?.length ? topic.suggestedAngles : ["普通用户如何理解", "创作者如何借势", "开发者是否值得尝试"],
+    recommendedPlatforms: topic.recommendedPlatforms?.length ? topic.recommendedPlatforms : ["小红书", "抖音", "B站"],
+    riskNotes: "Mock 风险提示：发布前确认来源与引用边界。",
+    chinaFitReason: "中文用户对效率、成本、职业影响和工具选择有明确兴趣。",
+    commercialReason: "可转化为工具测评、工作流教程或观点型内容。"
+  };
+}
+
+const ResearchPipeline = {
+  normalizeTopic(topicId) {
+    const topic = TopicStore.getById(topicId);
+    if (!topic) throw new Error("找不到 Topic");
+    const canonicalUrl = stripUrlParams(topic.canonicalUrl || topic.url);
+    const rawMetrics = {
+      likes: Number(topic.rawMetrics?.likes ?? topic.engagement?.likes) || 0,
+      comments: Number(topic.rawMetrics?.comments ?? topic.engagement?.comments) || 0,
+      shares: Number(topic.rawMetrics?.shares) || Math.round((Number(topic.engagement?.likes) || 0) * 0.04),
+      views: Number(topic.rawMetrics?.views) || Math.max(0, (Number(topic.engagement?.likes) || 0) * 12),
+      upvotes: Number(topic.rawMetrics?.upvotes) || Math.round((Number(topic.engagement?.likes) || 0) * 0.45)
+    };
+    const ageHours = Math.max(1, (Date.now() - new Date(topic.publishedAt).getTime()) / 36e5);
+    const totalEngagement = rawMetrics.likes + rawMetrics.comments + rawMetrics.shares + rawMetrics.upvotes;
+    const normalized = TopicStore.update(topicId, {
+      canonicalUrl,
+      sourceExternalId: topic.sourceExternalId || `${topic.source}_${simpleHash(canonicalUrl || topic.title)}`,
+      contentHash: TopicDeduplicator.generateContentHash({ ...topic, canonicalUrl, rawMetrics }),
+      language: topic.language || "en",
+      rawText: topic.rawText || topic.summary,
+      rawMetrics,
+      normalizedMetrics: {
+        engagementRate: rawMetrics.views ? Number((totalEngagement / rawMetrics.views).toFixed(4)) : 0,
+        velocity: Number((totalEngagement / ageHours).toFixed(2)),
+        sourcePercentile: clampScore(topic.score)
+      },
+      status: TOPIC_STATUS.NORMALIZED,
+      analysisError: ""
+    });
+    return normalized;
+  },
+  deduplicateTopic(topicId) {
+    const topic = TopicStore.getById(topicId);
+    if (!topic) throw new Error("找不到 Topic");
+    const duplicate = TopicDeduplicator.findDuplicate(topic);
+    if (duplicate) return TopicDeduplicator.markDuplicate(topicId, duplicate.id);
+    return TopicStore.update(topicId, { status: TOPIC_STATUS.NORMALIZED, duplicateOfTopicId: "", analysisError: "" });
+  },
+  scoreTopic(topicId) {
+    const topic = TopicStore.getById(topicId);
+    if (!topic) throw new Error("找不到 Topic");
+    if (topic.status === TOPIC_STATUS.DUPLICATE) return topic;
+    TopicStore.update(topicId, { status: TOPIC_STATUS.SCORING, analysisError: "" });
+    const scores = TopicScoringService.calculate(TopicStore.getById(topicId));
+    return TopicStore.update(topicId, { ...scores, status: TOPIC_STATUS.SCORED });
+  },
+  async analyzeTopic(topicId) {
+    const topic = TopicStore.getById(topicId);
+    if (!topic) throw new Error("找不到 Topic");
+    if (topic.status === TOPIC_STATUS.DUPLICATE) return topic;
+    TopicStore.update(topicId, { status: TOPIC_STATUS.ANALYZING, analysisStatus: "running", analysisError: "" });
+    const current = TopicStore.getById(topicId);
+    const fallback = fallbackTopicAnalysis(current);
+    const prompt = `请分析这个海外 AI Topic，并只返回 JSON：
+{
+  "summaryZh": "",
+  "commentSummaryZh": "",
+  "whyTrending": "",
+  "suggestedAngles": [],
+  "recommendedPlatforms": ["小红书", "抖音", "B站"],
+  "riskNotes": "",
+  "chinaFitReason": "",
+  "commercialReason": ""
+}
+
+Topic:
+source=${current.source}
+title=${current.title}
+category=${current.category}
+tags=${current.tags.join(", ")}
+summary=${current.summary}
+comments=${current.rawMetrics.comments}
+likes=${current.rawMetrics.likes}
+score=${current.finalScore}`;
+    const text = await aiRouter.generateText(prompt, {
+      task: "research.topic.analyze",
+      title: current.title,
+      format: "Research Topic JSON",
+      systemPrompt: "你是 AI Content OS 的 Research Analysis Agent。必须输出可解析 JSON。"
+    });
+    const result = safeParseJSON(text, fallback);
+    const platforms = safeTargetPlatforms(result.recommendedPlatforms).length ? safeTargetPlatforms(result.recommendedPlatforms) : fallback.recommendedPlatforms;
+    return TopicStore.update(topicId, {
+      summary: result.summaryZh || fallback.summaryZh,
+      aiAnalysis: result.summaryZh || fallback.summaryZh,
+      commentSummary: result.commentSummaryZh || fallback.commentSummaryZh,
+      whyTrending: result.whyTrending || fallback.whyTrending,
+      suggestedAngles: Array.isArray(result.suggestedAngles) && result.suggestedAngles.length ? result.suggestedAngles : fallback.suggestedAngles,
+      recommendedPlatforms: platforms,
+      reviewNotes: result.riskNotes || fallback.riskNotes,
+      chinaFitReason: result.chinaFitReason || fallback.chinaFitReason,
+      commercialReason: result.commercialReason || fallback.commercialReason,
+      status: TOPIC_STATUS.ANALYZED,
+      analysisStatus: "success",
+      analysisVersion: (current.analysisVersion || 0) + 1,
+      analysisError: ""
+    });
+  },
+  async processTopic(topicId) {
+    try {
+      this.normalizeTopic(topicId);
+      const deduped = this.deduplicateTopic(topicId);
+      if (deduped?.status === TOPIC_STATUS.DUPLICATE) return deduped;
+      this.scoreTopic(topicId);
+      return await this.analyzeTopic(topicId);
+    } catch (error) {
+      return TopicStore.update(topicId, { status: TOPIC_STATUS.FAILED, analysisStatus: "failed", analysisError: error.message || String(error) });
+    }
+  },
+  async processAllPending() {
+    const pending = TopicStore.getAll().filter(topic => ![TOPIC_STATUS.DUPLICATE, TOPIC_STATUS.CONVERTED, TOPIC_STATUS.ARCHIVED].includes(topic.status));
+    const results = [];
+    for (const topic of pending) results.push(await this.processTopic(topic.id));
+    return results;
+  },
+  convertToContent(topicId) {
+    const topic = TopicStore.getById(topicId);
+    if (!topic) throw new Error("找不到 Topic");
+    if (topic.status === TOPIC_STATUS.DUPLICATE) throw new Error("重复 Topic 不能转换为 Content");
+    if (topic.createdContentId && ContentStore.getById(topic.createdContentId)) {
+      appState.selectedContentId = topic.createdContentId;
+      return ContentStore.getById(topic.createdContentId);
+    }
+    const existing = ContentStore.getAll().find(content => content.sourceTopicId === topic.id || content.sourceUrl === topic.url || (content.sourceTitle === topic.title && content.sourcePlatform === topic.source));
+    if (existing) {
+      TopicStore.update(topicId, { status: TOPIC_STATUS.CONVERTED, createdContentId: existing.id });
+      appState.selectedContentId = existing.id;
+      return existing;
+    }
+    const content = ContentStore.create({
+      title: topic.title,
+      status: CONTENT_STATUS.COLLECTED,
+      sourceTopicId: topic.id,
+      sourcePlatform: topic.source,
+      sourceUrl: topic.url,
+      sourceTitle: topic.title,
+      sourceAuthor: topic.author,
+      sourcePublishedAt: topic.publishedAt,
+      originalSummary: topic.summary,
+      topic: topic.category,
+      tags: topic.tags,
+      targetPlatforms: topic.recommendedPlatforms,
+      hotScore: topic.finalScore,
+      trendScore: topic.trendScore,
+      chinaFitScore: topic.chinaFitScore,
+      finalScore: topic.finalScore,
+      selectedAngle: topic.suggestedAngles[0] || "",
+      aiAnalysis: topic.aiAnalysis,
+      commentSummary: topic.commentSummary,
+      copyrightStatus: "已重写"
+    });
+    TopicStore.update(topicId, { status: TOPIC_STATUS.CONVERTED, createdContentId: content.id });
+    appState.selectedContentId = content.id;
+    return content;
+  },
+  saveToKnowledge(topicId) {
+    const topic = TopicStore.getById(topicId);
+    if (!topic) throw new Error("找不到 Topic");
+    if (topic.savedKnowledgeId && KnowledgeStore.getById(topic.savedKnowledgeId)) return KnowledgeStore.getById(topic.savedKnowledgeId);
+    const source = `${topic.source} / MockTopicProvider`;
+    const existing = KnowledgeStore.getAll().find(item => item.linkedTopicId === topic.id || (item.title === topic.title && item.source === source));
+    if (existing) {
+      TopicStore.update(topicId, { savedKnowledgeId: existing.id });
+      return existing;
+    }
+    const knowledge = KnowledgeStore.create({
+      title: topic.title,
+      source,
+      topic: topic.category,
+      tags: topic.tags,
+      linkedTopicId: topic.id,
+      summary: `${topic.summary}\n\n${topic.aiAnalysis}\n\n${topic.commentSummary}\n\n${topic.whyTrending}`
+    });
+    TopicStore.update(topicId, { savedKnowledgeId: knowledge.id });
+    return knowledge;
+  },
+  archiveTopic(topicId) {
+    return TopicStore.update(topicId, { status: TOPIC_STATUS.ARCHIVED });
+  }
+};
 
 // =========================
 // workflow/workflowPipeline.js
@@ -1369,6 +1683,9 @@ const TaskExecutor = {
     const requireContent = () => {
       if (!payload.contentId || !ContentStore.getById(payload.contentId)) throw new Error("找不到任务对应的 Content");
     };
+    const requireTopic = () => {
+      if (!payload.topicId || !TopicStore.getById(payload.topicId)) throw new Error("找不到任务对应的 Topic");
+    };
     switch (task.type) {
       case TASK_TYPES.RECOMMEND_TODAY:
         return PlannerAgent.recommendToday(payload.limit || 5);
@@ -1396,6 +1713,29 @@ const TaskExecutor = {
       case TASK_TYPES.SCHEDULE_PUBLISH:
         requireContent();
         return PublisherAgent.schedule(payload.contentId, payload.platform || "抖音", payload.scheduledAt || defaultScheduleTime());
+      case TASK_TYPES.NORMALIZE_TOPIC:
+        requireTopic();
+        return ResearchPipeline.normalizeTopic(payload.topicId);
+      case TASK_TYPES.DEDUPLICATE_TOPIC:
+        requireTopic();
+        return ResearchPipeline.deduplicateTopic(payload.topicId);
+      case TASK_TYPES.SCORE_TOPIC:
+        requireTopic();
+        return ResearchPipeline.scoreTopic(payload.topicId);
+      case TASK_TYPES.ANALYZE_TOPIC:
+        requireTopic();
+        return ResearchPipeline.analyzeTopic(payload.topicId);
+      case TASK_TYPES.PROCESS_TOPIC:
+        requireTopic();
+        return ResearchPipeline.processTopic(payload.topicId);
+      case TASK_TYPES.PROCESS_ALL_TOPICS:
+        return ResearchPipeline.processAllPending();
+      case TASK_TYPES.CONVERT_TOPIC_TO_CONTENT:
+        requireTopic();
+        return ResearchPipeline.convertToContent(payload.topicId);
+      case TASK_TYPES.SAVE_TOPIC_TO_KNOWLEDGE:
+        requireTopic();
+        return ResearchPipeline.saveToKnowledge(payload.topicId);
       default:
         throw new Error(`未知任务类型：${task.type}`);
     }
@@ -1417,6 +1757,9 @@ async function createAsset(content, platform, assetType, fixedContent = "") {
 window.ContentStore = ContentStore;
 window.TopicStore = TopicStore;
 window.MockTopicProvider = MockTopicProvider;
+window.TopicDeduplicator = TopicDeduplicator;
+window.TopicScoringService = TopicScoringService;
+window.ResearchPipeline = ResearchPipeline;
 window.GeneratedAssetStore = GeneratedAssetStore;
 window.VideoProjectStore = VideoProjectStore;
 window.PublishJobStore = PublishJobStore;
@@ -1445,7 +1788,7 @@ window.TaskExecutor = TaskExecutor;
 // =========================
 function createInitialData() {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     contentItems: createMockContents(),
     topics: createMockTopics(),
     generatedAssets: [],
@@ -1716,6 +2059,9 @@ function renderResearch() {
             <h3>Topic List</h3>
             <span class="chip">Provider: MockTopicProvider</span>
           </div>
+          <div class="toolbar" style="margin-bottom:12px">
+            <button class="btn small" data-topic-process-all>Process All Pending</button>
+          </div>
           <div class="mini-stack">
             ${topics.length ? topics.map(renderTopicCard).join("") : empty("当前筛选条件下没有 Topic。")}
           </div>
@@ -1730,33 +2076,59 @@ function renderResearch() {
 
 function renderTopicCard(topic) {
   const active = topic.id === appState.selectedTopicId ? "active" : "";
-  const aiIndex = Math.round(topic.score * .65 + Math.min(100, (topic.engagement.comments + topic.engagement.likes) / 90) * .35);
   return `<button class="topic-card ${active}" data-select-topic="${topic.id}">
     <div class="item-head">
-      <span class="score">Score ${topic.score}</span>
-      <span class="chip">AI 推荐 ${aiIndex}</span>
+      <span class="score">Final ${topic.finalScore}</span>
+      ${topicStatusPill(topic.status)}
     </div>
     <h3 class="item-title">${escapeHtml(topic.title)}</h3>
     <div class="meta">${topic.source} · ${escapeHtml(topic.author)} · ${new Date(topic.publishedAt).toLocaleString("zh-CN")}</div>
     <div class="meta">评论 ${topic.engagement.comments} · 点赞 ${topic.engagement.likes}</div>
     <div class="chips">
       <span class="chip">${escapeHtml(topic.category)}</span>
+      <span class="chip">Trend ${topic.trendScore}</span>
+      <span class="chip">ChinaFit ${topic.chinaFitScore}</span>
+      <span class="chip">Analysis ${escapeHtml(topic.analysisStatus)}</span>
+      ${topic.duplicateOfTopicId ? `<span class="chip">Duplicate</span>` : ""}
       ${(topic.tags || []).slice(0, 3).map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}
     </div>
   </button>`;
 }
 
 function renderTopicDetail(topic) {
+  const isDuplicate = topic.status === TOPIC_STATUS.DUPLICATE;
+  const isConverted = topic.status === TOPIC_STATUS.CONVERTED && topic.createdContentId;
+  const hasKnowledge = Boolean(topic.savedKnowledgeId);
+  const createLabel = isConverted ? "打开已创建 Content" : "Create Content";
+  const knowledgeLabel = hasKnowledge ? "打开知识条目" : "Save To Knowledge";
+  const retryButton = topic.status === TOPIC_STATUS.FAILED ? `<button class="btn small" data-topic-process="${topic.id}">Retry</button>` : "";
   return `<div class="card sticky">
     <div class="item-head">
       <h3>${escapeHtml(topic.title)}</h3>
-      <span class="score">${topic.score}</span>
+      <span class="score">${topic.finalScore}</span>
     </div>
-    <div class="meta">${topic.source} · ${escapeHtml(topic.author)} · ${new Date(topic.publishedAt).toLocaleString("zh-CN")} · ${escapeHtml(topic.status)}</div>
+    <div class="meta">${topic.source} · ${escapeHtml(topic.author)} · ${new Date(topic.publishedAt).toLocaleString("zh-CN")} · ${topicStatusPill(topic.status)}</div>
     ${kv("原文摘要（Mock）", escapeHtml(topic.summary))}
     ${kv("AI Summary", escapeHtml(topic.aiAnalysis))}
     ${kv("Comment Summary", escapeHtml(topic.commentSummary))}
     ${kv("Why Trending", escapeHtml(topic.whyTrending))}
+    <div class="divider"></div>
+    <strong>Score Breakdown</strong>
+    <div class="chips">
+      <span class="chip">Trend ${topic.trendScore}</span>
+      <span class="chip">Fresh ${topic.freshnessScore}</span>
+      <span class="chip">Engage ${topic.engagementScore}</span>
+      <span class="chip">China ${topic.chinaFitScore}</span>
+      <span class="chip">Controversy ${topic.controversyScore}</span>
+      <span class="chip">Commercial ${topic.commercialScore}</span>
+      <span class="chip">Difficulty ${topic.difficultyScore}</span>
+    </div>
+    ${kv("scoreReason", escapeHtml(topic.scoreReason))}
+    ${kv("analysisVersion", topic.analysisVersion)}
+    ${kv("duplicateOfTopicId", escapeHtml(topic.duplicateOfTopicId))}
+    ${kv("createdContentId", escapeHtml(topic.createdContentId))}
+    ${kv("savedKnowledgeId", escapeHtml(topic.savedKnowledgeId))}
+    ${topic.analysisError ? kv("processing error", escapeHtml(topic.analysisError)) : ""}
     <div class="divider"></div>
     <strong>Suggested Angles</strong>
     ${tagChips(topic.suggestedAngles)}
@@ -1765,10 +2137,14 @@ function renderTopicDetail(topic) {
     ${tagChips(topic.recommendedPlatforms)}
     <div class="divider"></div>
     <div class="toolbar">
+      ${retryButton}
+      <button class="btn small ghost" data-topic-process="${topic.id}">Process Topic</button>
       <button class="btn small ghost" data-topic-analyze="${topic.id}">Analyze Again</button>
-      <button class="btn small" data-topic-create-content="${topic.id}">Create Content</button>
-      <button class="btn small ghost" data-topic-save-knowledge="${topic.id}">Save To Knowledge</button>
+      <button class="btn small" data-topic-create-content="${topic.id}" ${isDuplicate ? "disabled" : ""}>${createLabel}</button>
+      <button class="btn small ghost" data-topic-save-knowledge="${topic.id}">${knowledgeLabel}</button>
+      <button class="btn small danger" data-topic-archive="${topic.id}">Archive</button>
     </div>
+    ${isDuplicate ? `<div class="meta">重复于 Topic：${escapeHtml(topic.duplicateOfTopicId)}</div>` : ""}
   </div>`;
 }
 
@@ -2059,7 +2435,7 @@ function renderKnowledgeBase() {
     </div>
     <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-knowledge>${item ? "保存知识" : "新增知识"}</button>${item ? `<button class="btn ghost" data-cancel-knowledge>取消</button>` : ""}</div>
   </div>
-  <div class="grid two">${KnowledgeStore.getAll().map(k => `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(k.title)}</h3><span class="chip">${escapeHtml(k.topic)}</span></div><div class="meta">来源：${escapeHtml(k.source)} · 关联内容：${k.linkedContentIds.length}</div>${tagChips(k.tags)}<p>${escapeHtml(k.summary)}</p><div class="toolbar"><button class="btn small ghost" data-edit-knowledge="${k.id}">编辑</button><button class="btn small danger" data-remove-knowledge="${k.id}">删除</button></div></div>`).join("")}</div>`;
+  <div class="grid two">${KnowledgeStore.getAll().map(k => `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(k.title)}</h3><span class="chip">${escapeHtml(k.topic)}</span></div><div class="meta">来源：${escapeHtml(k.source)} · 关联内容：${k.linkedContentIds.length} · linkedTopicId：${escapeHtml(k.linkedTopicId || "—")}</div>${tagChips(k.tags)}<p>${escapeHtml(k.summary)}</p><div class="toolbar"><button class="btn small ghost" data-edit-knowledge="${k.id}">编辑</button><button class="btn small danger" data-remove-knowledge="${k.id}">删除</button></div></div>`).join("")}</div>`;
 }
 
 function renderSettings() {
@@ -2253,13 +2629,44 @@ document.addEventListener("click", async event => {
   if (target.dataset.agentChain) return createAgentTaskChain(target.dataset.agentChain);
   if (target.dataset.openWorkspace) { appState.selectedContentId = target.dataset.openWorkspace; return setPage("workspace"); }
   if (target.dataset.selectTopic) { appState.selectedTopicId = target.dataset.selectTopic; return render(); }
-  if (target.dataset.topicAnalyze) { TopicStore.analyzeAgain(target.dataset.topicAnalyze); appState.selectedTopicId = target.dataset.topicAnalyze; return render(); }
-  if (target.dataset.topicCreateContent) {
-    const content = TopicStore.createContentFromTopic(target.dataset.topicCreateContent);
-    if (content) return setPage("workspace");
+  if (target.dataset.topicProcessAll !== undefined) {
+    const task = TaskQueue.add(TASK_TYPES.PROCESS_ALL_TOPICS, {});
+    await TaskQueue.retry(task.id);
     return render();
   }
-  if (target.dataset.topicSaveKnowledge) { TopicStore.saveToKnowledge(target.dataset.topicSaveKnowledge); appState.selectedTopicId = target.dataset.topicSaveKnowledge; return render(); }
+  if (target.dataset.topicProcess) {
+    const task = TaskQueue.add(TASK_TYPES.PROCESS_TOPIC, { topicId: target.dataset.topicProcess });
+    await TaskQueue.retry(task.id);
+    appState.selectedTopicId = target.dataset.topicProcess;
+    return render();
+  }
+  if (target.dataset.topicAnalyze) {
+    const task = TaskQueue.add(TASK_TYPES.ANALYZE_TOPIC, { topicId: target.dataset.topicAnalyze });
+    await TaskQueue.retry(task.id);
+    appState.selectedTopicId = target.dataset.topicAnalyze;
+    return render();
+  }
+  if (target.dataset.topicCreateContent) {
+    try {
+      const content = ResearchPipeline.convertToContent(target.dataset.topicCreateContent);
+      if (content) return setPage("workspace");
+    } catch (error) {
+      const topic = TopicStore.getById(target.dataset.topicCreateContent);
+      if (topic) TopicStore.update(topic.id, { analysisError: error.message || String(error) });
+    }
+    return render();
+  }
+  if (target.dataset.topicSaveKnowledge) {
+    const before = TopicStore.getById(target.dataset.topicSaveKnowledge);
+    const knowledge = ResearchPipeline.saveToKnowledge(target.dataset.topicSaveKnowledge);
+    appState.selectedTopicId = target.dataset.topicSaveKnowledge;
+    if (before?.savedKnowledgeId && knowledge) {
+      appState.editKnowledgeId = knowledge.id;
+      return setPage("knowledge");
+    }
+    return render();
+  }
+  if (target.dataset.topicArchive) { ResearchPipeline.archiveTopic(target.dataset.topicArchive); appState.selectedTopicId = target.dataset.topicArchive; return render(); }
   if (target.dataset.status) {
     const [id, status] = target.dataset.status.split(":");
     ContentStore.update(id, { status });
