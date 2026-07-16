@@ -40,7 +40,8 @@ const STATUS_LABELS = Object.freeze({
 });
 
 const SOURCE_PLATFORMS = Object.freeze(["Reddit", "X", "YouTube", "GitHub", "Hacker News", "Product Hunt", "Official Blog"]);
-const RESEARCH_SOURCES = Object.freeze(["Reddit", "X", "YouTube"]);
+const RESEARCH_SOURCES = Object.freeze(["Reddit", "X", "YouTube", "GitHub"]);
+const RESEARCH_SOURCE_TYPES = Object.freeze(["mock", "github"]);
 const RESEARCH_CATEGORIES = Object.freeze(["GPT", "Claude", "Gemini", "AI Coding", "AI Agent", "AI Video", "Open Source"]);
 const RESEARCH_SORTS = Object.freeze(["Trending", "New", "Engagement"]);
 const RESEARCH_DATES = Object.freeze(["Today", "7 Days", "30 Days"]);
@@ -93,7 +94,10 @@ const TASK_TYPES = Object.freeze({
   PROCESS_TOPIC: "PROCESS_TOPIC",
   PROCESS_ALL_TOPICS: "PROCESS_ALL_TOPICS",
   CONVERT_TOPIC_TO_CONTENT: "CONVERT_TOPIC_TO_CONTENT",
-  SAVE_TOPIC_TO_KNOWLEDGE: "SAVE_TOPIC_TO_KNOWLEDGE"
+  SAVE_TOPIC_TO_KNOWLEDGE: "SAVE_TOPIC_TO_KNOWLEDGE",
+  FETCH_GITHUB_TOPICS: "FETCH_GITHUB_TOPICS",
+  REFRESH_SOURCE: "REFRESH_SOURCE",
+  PROCESS_IMPORTED_TOPICS: "PROCESS_IMPORTED_TOPICS"
 });
 const TASK_TYPE_LABELS = Object.freeze({
   RECOMMEND_TODAY: "推荐今日内容",
@@ -112,8 +116,24 @@ const TASK_TYPE_LABELS = Object.freeze({
   PROCESS_TOPIC: "处理 Topic",
   PROCESS_ALL_TOPICS: "批量处理 Topic",
   CONVERT_TOPIC_TO_CONTENT: "Topic 转 Content",
-  SAVE_TOPIC_TO_KNOWLEDGE: "Topic 存知识"
+  SAVE_TOPIC_TO_KNOWLEDGE: "Topic 存知识",
+  FETCH_GITHUB_TOPICS: "抓取 GitHub Topics",
+  REFRESH_SOURCE: "刷新 Source",
+  PROCESS_IMPORTED_TOPICS: "处理导入 Topic"
 });
+const GITHUB_DEFAULT_KEYWORDS = Object.freeze([
+  "artificial intelligence",
+  "large language model",
+  "llm",
+  "ai agent",
+  "generative ai",
+  "ai video",
+  "text to image",
+  "speech synthesis",
+  "rag",
+  "mcp",
+  "ai coding"
+]);
 const AI_PROVIDERS = Object.freeze(["mock", "openai", "zai", "deepseek", "claude", "gemini", "custom"]);
 const AI_PROVIDER_DEFAULT_BASE_URLS = Object.freeze({
   openai: "https://api.openai.com/v1",
@@ -185,6 +205,7 @@ const appState = {
     libraryTag: "",
     libraryView: "card",
     researchSource: "",
+    researchSourceType: "",
     researchCategory: "",
     researchSort: "Trending",
     researchDate: "7 Days"
@@ -283,6 +304,7 @@ function normalizeTopic(item = {}) {
   return {
     id: item.id || uid("topic"),
     source,
+    sourceType: RESEARCH_SOURCE_TYPES.includes(item.sourceType) ? item.sourceType : (source === "GitHub" ? "github" : "mock"),
     sourceExternalId: item.sourceExternalId || `${source}_${contentHash}`,
     title: item.title || "Untitled AI Topic",
     author: item.author || "",
@@ -291,6 +313,7 @@ function normalizeTopic(item = {}) {
     publishedAt: item.publishedAt || now(),
     language: item.language || "en",
     rawText: item.rawText || item.summary || "",
+    github: item.github || null,
     rawMetrics,
     normalizedMetrics,
     score: clampScore(item.score ?? item.finalScore ?? 70),
@@ -441,6 +464,50 @@ function normalizeAiStatus(item = {}) {
   };
 }
 
+function normalizeGithubSourceConfig(item = {}) {
+  return {
+    enabled: Boolean(item.enabled),
+    token: item.token || "",
+    keywords: Array.isArray(item.keywords) && item.keywords.length ? item.keywords : [...GITHUB_DEFAULT_KEYWORDS],
+    perPage: Math.max(1, Math.min(10, Number(item.perPage) || 10)),
+    maxQueriesPerRefresh: Math.max(1, Math.min(3, Number(item.maxQueriesPerRefresh) || 3)),
+    cacheMinutes: Math.max(1, Number(item.cacheMinutes) || 60),
+    minimumStars: Math.max(0, Number(item.minimumStars) || 20),
+    createdWithinDays: Math.max(1, Number(item.createdWithinDays) || 30),
+    sort: ["stars", "forks", "updated"].includes(item.sort) ? item.sort : "stars",
+    order: item.order === "asc" ? "asc" : "desc",
+    updatedAt: item.updatedAt || ""
+  };
+}
+
+function normalizeSourceStatus(item = {}) {
+  return {
+    sourceId: item.sourceId || "",
+    lastRefreshAt: item.lastRefreshAt || "",
+    lastRequestCount: Number(item.lastRequestCount) || 0,
+    rateLimitLimit: item.rateLimitLimit || "",
+    rateLimitRemaining: item.rateLimitRemaining || "",
+    rateLimitReset: item.rateLimitReset || "",
+    lastError: item.lastError || "",
+    lastCacheHit: Boolean(item.lastCacheHit),
+    updatedAt: item.updatedAt || ""
+  };
+}
+
+function normalizeSourceCache(item = {}) {
+  const createdAt = item.createdAt || now();
+  return {
+    id: item.id || uid("cache"),
+    sourceId: item.sourceId || "",
+    queryKey: item.queryKey || "",
+    data: Array.isArray(item.data) ? item.data : [],
+    fetchedAt: item.fetchedAt || createdAt,
+    expiresAt: item.expiresAt || createdAt,
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+}
+
 function normalizePrompt(item = {}) {
   const createdAt = item.createdAt || now();
   return {
@@ -533,6 +600,7 @@ function migrateDatabase(raw) {
     publishJobs: [],
     analyticsRecords: [],
     tasks: [],
+    sourceCache: [],
     promptTemplates: [],
     knowledgeItems: [],
     settings: {
@@ -544,6 +612,10 @@ function migrateDatabase(raw) {
 
   newDb.settings.aiApiConfig = normalizeAiApiConfig(source.settings?.aiApiConfig);
   newDb.settings.aiStatus = normalizeAiStatus(source.settings?.aiStatus);
+  newDb.settings.githubSourceConfig = normalizeGithubSourceConfig(source.settings?.githubSourceConfig);
+  newDb.settings.sourceStatus = {
+    github: normalizeSourceStatus(source.settings?.sourceStatus?.github || { sourceId: "github" })
+  };
 
   const existingAssets = Array.isArray(source.generatedAssets) ? source.generatedAssets : [];
   const existingTopics = Array.isArray(source.topics) ? source.topics : createMockTopics();
@@ -552,6 +624,7 @@ function migrateDatabase(raw) {
   const existingJobs = Array.isArray(source.publishJobs) ? source.publishJobs : [];
   const existingAnalytics = Array.isArray(source.analyticsRecords) ? source.analyticsRecords : [];
   const existingTasks = Array.isArray(source.tasks) ? source.tasks : [];
+  const existingSourceCache = Array.isArray(source.sourceCache) ? source.sourceCache : [];
 
   (source.contentItems || []).forEach(oldItem => {
     const content = normalizeContent(oldItem);
@@ -592,6 +665,7 @@ function migrateDatabase(raw) {
   existingJobs.forEach(item => newDb.publishJobs.push(normalizePublishJob(item)));
   existingAnalytics.forEach(item => newDb.analyticsRecords.push(normalizeAnalyticsRecord(item)));
   existingTasks.forEach(item => newDb.tasks.push(normalizeTask(item)));
+  existingSourceCache.forEach(item => newDb.sourceCache.push(normalizeSourceCache(item)));
   newDb.topics = existingTopics.map(normalizeTopic);
 
   newDb.promptTemplates = (source.promptTemplates || createMockPrompts()).map(normalizePrompt);
@@ -708,6 +782,7 @@ const TopicStore = {
     const dayMs = 24 * 60 * 60 * 1000;
     const dateLimit = filters.date === "Today" ? dayMs : filters.date === "30 Days" ? 30 * dayMs : 7 * dayMs;
     const list = this.getAll().filter(topic => {
+      if (filters.sourceType && topic.sourceType !== filters.sourceType) return false;
       if (filters.source && topic.source !== filters.source) return false;
       if (filters.category && topic.category !== filters.category) return false;
       if (filters.date && filters.date !== "30 Days" && nowTime - new Date(topic.publishedAt).getTime() > dateLimit) return false;
@@ -728,6 +803,266 @@ const TopicStore = {
   },
   saveToKnowledge(id) {
     return ResearchPipeline.saveToKnowledge(id);
+  }
+};
+
+const SourceCacheStore = {
+  getAll() { return (db.sourceCache || []).map(normalizeSourceCache); },
+  get(sourceId, queryKey) {
+    const item = (db.sourceCache || []).find(cache => cache.sourceId === sourceId && cache.queryKey === queryKey);
+    if (!item) return null;
+    const cache = normalizeSourceCache(item);
+    return new Date(cache.expiresAt).getTime() > Date.now() ? cache : null;
+  },
+  set(sourceId, queryKey, data, cacheMinutes) {
+    db.sourceCache = db.sourceCache || [];
+    const existingIndex = db.sourceCache.findIndex(cache => cache.sourceId === sourceId && cache.queryKey === queryKey);
+    const fetchedAt = now();
+    const expiresAt = new Date(Date.now() + Math.max(1, Number(cacheMinutes) || 60) * 60 * 1000).toISOString();
+    const record = normalizeSourceCache({ sourceId, queryKey, data, fetchedAt, expiresAt, updatedAt: fetchedAt });
+    if (existingIndex >= 0) db.sourceCache[existingIndex] = { ...db.sourceCache[existingIndex], ...record, id: db.sourceCache[existingIndex].id };
+    else db.sourceCache.unshift(record);
+    saveDb();
+    return existingIndex >= 0 ? db.sourceCache[existingIndex] : db.sourceCache[0];
+  },
+  getRemainingMs(sourceId) {
+    const caches = this.getAll().filter(cache => cache.sourceId === sourceId);
+    if (!caches.length) return 0;
+    return Math.max(0, Math.max(...caches.map(cache => new Date(cache.expiresAt).getTime())) - Date.now());
+  }
+};
+
+const SourceProvider = {
+  id: "",
+  name: "",
+  sourceType: "",
+  isEnabled() { return false; },
+  validateConfig() { return { ok: true, errors: [] }; },
+  async fetchTopics() { return []; },
+  normalizeItem(rawItem) { return rawItem; },
+  async testConnection() { return { ok: true }; }
+};
+
+const GitHubSourceConnector = {
+  ...SourceProvider,
+  id: "github",
+  name: "GitHub Repository Search",
+  sourceType: "github",
+  getConfig() { return normalizeGithubSourceConfig(db.settings?.githubSourceConfig); },
+  isEnabled() { return this.getConfig().enabled; },
+  validateConfig() {
+    const config = this.getConfig();
+    return { ok: config.perPage <= 10 && config.maxQueriesPerRefresh <= 3, errors: [] };
+  },
+  getKeywords(options = {}) {
+    const config = this.getConfig();
+    return (options.keywords || config.keywords || GITHUB_DEFAULT_KEYWORDS).filter(Boolean).slice(0, config.maxQueriesPerRefresh);
+  },
+  buildQuery(keyword, options = {}) {
+    const config = this.getConfig();
+    const createdWithinDays = Number(options.createdWithinDays || config.createdWithinDays) || 30;
+    const minStars = Number(options.minimumStars ?? config.minimumStars) || 20;
+    const since = new Date(Date.now() - createdWithinDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    return `"${keyword}" in:name,description,readme stars:>=${minStars} created:>=${since}`;
+  },
+  async fetchTopics(options = {}) {
+    const config = this.getConfig();
+    if (!config.enabled && !options.force) return [];
+    const topics = [];
+    const keywords = this.getKeywords(options);
+    let requestCount = 0;
+    let cacheHit = false;
+    this.updateStatus({ lastError: "", lastRequestCount: 0, lastCacheHit: false });
+    for (const keyword of keywords) {
+      const query = this.buildQuery(keyword, options);
+      const params = new URLSearchParams({
+        q: query,
+        sort: options.sort || config.sort,
+        order: options.order || config.order,
+        per_page: String(Math.min(10, Number(options.perPage || config.perPage) || 10)),
+        page: String(options.page || 1)
+      });
+      const queryKey = params.toString();
+      const cached = SourceCacheStore.get(this.id, queryKey);
+      if (cached) {
+        cacheHit = true;
+        topics.push(...cached.data.map(item => this.normalizeItem(item)));
+        continue;
+      }
+      const response = await this.requestSearch(params);
+      requestCount += 1;
+      this.captureRateLimit(response);
+      if (response.status === 403 || response.status === 429) {
+        const reset = response.headers.get("x-ratelimit-reset") || "";
+        const message = response.status === 403 ? "GitHub API 403：可能是 Token 无效或 Rate Limit 用尽。" : "GitHub API 429：请求过多。";
+        this.updateStatus({ lastError: message, rateLimitReset: reset, lastRequestCount: requestCount, lastCacheHit: cacheHit });
+        break;
+      }
+      if (response.status === 422) {
+        this.updateStatus({ lastError: "GitHub API 422：查询语句无效。", lastRequestCount: requestCount, lastCacheHit: cacheHit });
+        continue;
+      }
+      if (!response.ok) {
+        this.updateStatus({ lastError: `GitHub API HTTP ${response.status}`, lastRequestCount: requestCount, lastCacheHit: cacheHit });
+        continue;
+      }
+      let json;
+      try {
+        json = await response.json();
+      } catch {
+        this.updateStatus({ lastError: "GitHub API JSON 解析失败。", lastRequestCount: requestCount, lastCacheHit: cacheHit });
+        continue;
+      }
+      const items = Array.isArray(json.items) ? json.items : [];
+      SourceCacheStore.set(this.id, queryKey, items, config.cacheMinutes);
+      topics.push(...items.map(item => this.normalizeItem(item, keyword)));
+      const remaining = Number(response.headers.get("x-ratelimit-remaining"));
+      if (Number.isFinite(remaining) && remaining <= 1) {
+        this.updateStatus({ lastError: "GitHub Rate Limit 即将用尽，已停止继续查询。", lastRequestCount: requestCount, lastCacheHit: cacheHit });
+        break;
+      }
+    }
+    this.updateStatus({ lastRefreshAt: now(), lastRequestCount: requestCount, lastCacheHit: cacheHit, updatedAt: now() });
+    return topics;
+  },
+  async requestSearch(params) {
+    const config = this.getConfig();
+    const headers = {
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28"
+    };
+    if (config.token) headers.Authorization = `Bearer ${config.token}`;
+    return fetch(`https://api.github.com/search/repositories?${params.toString()}`, { headers });
+  },
+  captureRateLimit(response) {
+    this.updateStatus({
+      rateLimitLimit: response.headers.get("x-ratelimit-limit") || "",
+      rateLimitRemaining: response.headers.get("x-ratelimit-remaining") || "",
+      rateLimitReset: response.headers.get("x-ratelimit-reset") || ""
+    });
+  },
+  updateStatus(patch) {
+    db.settings.sourceStatus = db.settings.sourceStatus || {};
+    db.settings.sourceStatus.github = normalizeSourceStatus({ ...(db.settings.sourceStatus.github || { sourceId: "github" }), sourceId: "github", ...patch, updatedAt: now() });
+    saveDb();
+    return db.settings.sourceStatus.github;
+  },
+  normalizeItem(repository, keyword = "") {
+    const text = `${repository.full_name || ""} ${repository.description || ""} ${(repository.topics || []).join(" ")} ${keyword}`.toLowerCase();
+    const category = text.includes("cursor") || text.includes("coding") || text.includes("code") ? "AI Coding"
+      : text.includes("agent") || text.includes("mcp") ? "AI Agent"
+      : text.includes("video") || text.includes("image") || text.includes("diffusion") ? "AI Video"
+      : text.includes("claude") || text.includes("anthropic") ? "Claude"
+      : text.includes("gemini") || text.includes("google") ? "Gemini"
+      : text.includes("gpt") || text.includes("llm") || text.includes("language model") ? "GPT"
+      : "Open Source";
+    const tags = [...new Set([...(repository.topics || []), repository.language, "GitHub", "Open Source"].filter(Boolean))];
+    return normalizeTopic({
+      id: `github_repo_${repository.id}`,
+      source: "GitHub",
+      sourceType: "github",
+      sourceExternalId: String(repository.id),
+      canonicalUrl: repository.html_url,
+      url: repository.html_url,
+      title: repository.full_name,
+      author: repository.owner?.login || "",
+      publishedAt: repository.created_at,
+      updatedAt: repository.updated_at,
+      rawText: `${repository.description || ""}\nREADME：本阶段暂不抓 README，使用仓库描述占位。`,
+      summary: repository.description || "",
+      rawMetrics: {
+        likes: repository.stargazers_count,
+        comments: repository.open_issues_count,
+        shares: repository.forks_count,
+        views: 0,
+        upvotes: repository.stargazers_count
+      },
+      engagement: { comments: repository.open_issues_count, likes: repository.stargazers_count },
+      tags,
+      category,
+      status: TOPIC_STATUS.DISCOVERED,
+      github: {
+        stars: repository.stargazers_count,
+        forks: repository.forks_count,
+        openIssues: repository.open_issues_count,
+        language: repository.language || "",
+        updatedAt: repository.updated_at
+      }
+    });
+  },
+  async testConnection() {
+    try {
+      const topics = await this.fetchTopics({ force: true, keywords: [this.getConfig().keywords[0] || GITHUB_DEFAULT_KEYWORDS[0]], perPage: 1 });
+      return { ok: true, count: topics.length };
+    } catch (error) {
+      this.updateStatus({ lastError: error.message || String(error) });
+      return { ok: false, error: error.message || String(error) };
+    }
+  }
+};
+
+const SourceConnectors = { github: GitHubSourceConnector };
+
+const SourceIngestionService = {
+  async fetchFromSource(sourceId, options = {}) {
+    const connector = SourceConnectors[sourceId];
+    if (!connector) throw new Error(`未知 Source：${sourceId}`);
+    return connector.fetchTopics(options);
+  },
+  ingestTopics(topics = []) {
+    const results = [];
+    topics.map(normalizeTopic).forEach(topic => {
+      const existingIndex = db.topics.findIndex(item => (item.source === topic.source && String(item.sourceExternalId) === String(topic.sourceExternalId)) || (item.canonicalUrl && item.canonicalUrl === topic.canonicalUrl));
+      if (existingIndex >= 0) {
+        const existing = normalizeTopic(db.topics[existingIndex]);
+        db.topics[existingIndex] = normalizeTopic({
+          ...existing,
+          source: topic.source,
+          sourceType: topic.sourceType,
+          sourceExternalId: topic.sourceExternalId,
+          canonicalUrl: topic.canonicalUrl,
+          url: topic.url,
+          author: topic.author,
+          publishedAt: topic.publishedAt,
+          updatedAt: now(),
+          rawText: topic.rawText,
+          rawMetrics: topic.rawMetrics,
+          normalizedMetrics: topic.normalizedMetrics,
+          engagement: topic.engagement,
+          tags: [...new Set([...(existing.tags || []), ...(topic.tags || [])])],
+          category: existing.category || topic.category,
+          summary: topic.summary || existing.summary,
+          github: topic.github,
+          aiAnalysis: existing.aiAnalysis,
+          commentSummary: existing.commentSummary,
+          whyTrending: existing.whyTrending,
+          suggestedAngles: existing.suggestedAngles,
+          recommendedPlatforms: existing.recommendedPlatforms,
+          analysisVersion: existing.analysisVersion,
+          analysisStatus: existing.analysisStatus,
+          createdContentId: existing.createdContentId,
+          savedKnowledgeId: existing.savedKnowledgeId,
+          status: existing.status === TOPIC_STATUS.CONVERTED ? TOPIC_STATUS.CONVERTED : existing.status
+        });
+        results.push(db.topics[existingIndex]);
+      } else {
+        db.topics.unshift(topic);
+        results.push(topic);
+      }
+    });
+    saveDb();
+    return results;
+  },
+  async refreshSource(sourceId, options = {}) {
+    const topics = await this.fetchFromSource(sourceId, options);
+    return this.ingestTopics(topics);
+  },
+  async refreshAllEnabledSources() {
+    const results = [];
+    for (const connector of Object.values(SourceConnectors)) {
+      if (connector.isEnabled()) results.push(...await this.refreshSource(connector.id));
+    }
+    return results;
   }
 };
 
@@ -1736,6 +2071,12 @@ const TaskExecutor = {
       case TASK_TYPES.SAVE_TOPIC_TO_KNOWLEDGE:
         requireTopic();
         return ResearchPipeline.saveToKnowledge(payload.topicId);
+      case TASK_TYPES.FETCH_GITHUB_TOPICS:
+        return SourceIngestionService.refreshSource("github");
+      case TASK_TYPES.REFRESH_SOURCE:
+        return SourceIngestionService.refreshSource(payload.sourceId || "github");
+      case TASK_TYPES.PROCESS_IMPORTED_TOPICS:
+        return ResearchPipeline.processAllPending();
       default:
         throw new Error(`未知任务类型：${task.type}`);
     }
@@ -1760,6 +2101,10 @@ window.MockTopicProvider = MockTopicProvider;
 window.TopicDeduplicator = TopicDeduplicator;
 window.TopicScoringService = TopicScoringService;
 window.ResearchPipeline = ResearchPipeline;
+window.SourceCacheStore = SourceCacheStore;
+window.SourceProvider = SourceProvider;
+window.GitHubSourceConnector = GitHubSourceConnector;
+window.SourceIngestionService = SourceIngestionService;
 window.GeneratedAssetStore = GeneratedAssetStore;
 window.VideoProjectStore = VideoProjectStore;
 window.PublishJobStore = PublishJobStore;
@@ -1797,6 +2142,7 @@ function createInitialData() {
     publishJobs: [],
     analyticsRecords: [],
     tasks: [],
+    sourceCache: [],
     promptTemplates: createMockPrompts(),
     knowledgeItems: createMockKnowledge(),
     settings: { provider: "LocalStorageProvider" }
@@ -2030,6 +2376,7 @@ function compactContentRow(item) {
 function renderResearch() {
   const filters = appState.filters;
   const topics = TopicStore.getFiltered({
+    sourceType: filters.researchSourceType,
     source: filters.researchSource,
     category: filters.researchCategory,
     sort: filters.researchSort,
@@ -2038,11 +2385,13 @@ function renderResearch() {
   if (!appState.selectedTopicId || !TopicStore.getById(appState.selectedTopicId)) appState.selectedTopicId = topics[0]?.id || TopicStore.getAll()[0]?.id || null;
   const selected = TopicStore.getById(appState.selectedTopicId) || topics[0] || null;
   return `
+    ${renderSourceToolbar()}
     <div class="research-layout">
       <aside class="card research-filter">
         <h3>Filter Panel</h3>
         <div class="form-grid single">
           <div><label>Source</label><select id="researchSource"><option value="">All Sources</option>${RESEARCH_SOURCES.map(item => `<option value="${item}" ${item === filters.researchSource ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+          <div><label>Source Type</label><select id="researchSourceType"><option value="">Mock + GitHub</option>${RESEARCH_SOURCE_TYPES.map(item => `<option value="${item}" ${item === filters.researchSourceType ? "selected" : ""}>${item}</option>`).join("")}</select></div>
           <div><label>Category</label><select id="researchCategory"><option value="">All Categories</option>${RESEARCH_CATEGORIES.map(item => `<option value="${item}" ${item === filters.researchCategory ? "selected" : ""}>${item}</option>`).join("")}</select></div>
           <div><label>Sort</label><select id="researchSort">${RESEARCH_SORTS.map(item => `<option value="${item}" ${item === filters.researchSort ? "selected" : ""}>${item}</option>`).join("")}</select></div>
           <div><label>Date</label><select id="researchDate">${RESEARCH_DATES.map(item => `<option value="${item}" ${item === filters.researchDate ? "selected" : ""}>${item}</option>`).join("")}</select></div>
@@ -2074,6 +2423,23 @@ function renderResearch() {
   `;
 }
 
+function renderSourceToolbar() {
+  const status = normalizeSourceStatus(db.settings?.sourceStatus?.github || { sourceId: "github" });
+  const config = normalizeGithubSourceConfig(db.settings?.githubSourceConfig);
+  const remainingMs = SourceCacheStore.getRemainingMs("github");
+  const cacheText = remainingMs ? `${Math.ceil(remainingMs / 60000)} 分钟` : "无有效缓存";
+  return `<div class="card toolbar">
+    <span class="chip">Source 状态：Mock ${TopicStore.getAll().filter(topic => topic.sourceType === "mock").length}</span>
+    <span class="chip">GitHub ${config.enabled ? "Enabled" : "Disabled"} · ${TopicStore.getAll().filter(topic => topic.sourceType === "github").length}</span>
+    <button class="btn small" data-refresh-github>Refresh GitHub</button>
+    <button class="btn small ghost" data-process-imported-topics>Process Imported Topics</button>
+    <span class="chip">Last Refresh: ${status.lastRefreshAt ? new Date(status.lastRefreshAt).toLocaleString("zh-CN") : "—"}</span>
+    <span class="chip">Cache: ${cacheText}</span>
+    <span class="chip">Rate Limit Remaining: ${escapeHtml(status.rateLimitRemaining || "—")}</span>
+    ${status.lastError ? `<span class="chip">Error: ${escapeHtml(status.lastError)}</span>` : ""}
+  </div>`;
+}
+
 function renderTopicCard(topic) {
   const active = topic.id === appState.selectedTopicId ? "active" : "";
   return `<button class="topic-card ${active}" data-select-topic="${topic.id}">
@@ -2084,6 +2450,7 @@ function renderTopicCard(topic) {
     <h3 class="item-title">${escapeHtml(topic.title)}</h3>
     <div class="meta">${topic.source} · ${escapeHtml(topic.author)} · ${new Date(topic.publishedAt).toLocaleString("zh-CN")}</div>
     <div class="meta">评论 ${topic.engagement.comments} · 点赞 ${topic.engagement.likes}</div>
+    ${topic.sourceType === "github" ? `<div class="meta">Star ${topic.rawMetrics.likes} · Fork ${topic.rawMetrics.shares} · Open Issues ${topic.rawMetrics.comments} · ${escapeHtml(topic.github?.language || "Unknown")} · 更新 ${topic.github?.updatedAt ? new Date(topic.github.updatedAt).toLocaleDateString("zh-CN") : "—"}</div>` : ""}
     <div class="chips">
       <span class="chip">${escapeHtml(topic.category)}</span>
       <span class="chip">Trend ${topic.trendScore}</span>
@@ -2451,6 +2818,9 @@ function renderSettingsV2() {
   const config = getAiApiConfig();
   const rawConfig = normalizeAiApiConfig(db.settings?.aiApiConfig);
   const status = normalizeAiStatus(db.settings?.aiStatus);
+  const githubConfig = normalizeGithubSourceConfig(db.settings?.githubSourceConfig);
+  const githubStatus = normalizeSourceStatus(db.settings?.sourceStatus?.github || { sourceId: "github" });
+  const githubCacheMs = SourceCacheStore.getRemainingMs("github");
   const keyState = rawConfig.apiKey ? "已配置" : "未配置";
   return `<div class="grid two">
     <div class="card">
@@ -2487,6 +2857,35 @@ function renderSettingsV2() {
         ${["planner.recommend", "research.analyze", "writer.xhs", "writer.douyin", "writer.bilibili", "review.content", "video.prepare"].map(route => `<span class="chip">${route} → ${config.provider}</span>`).join("")}
       </div>
     </div>
+    <div class="card">
+      <h3>GitHub Source 设置</h3>
+      <div class="form-grid">
+        <div><label>启用 GitHub Source</label><select id="githubSourceEnabled"><option value="false" ${!githubConfig.enabled ? "selected" : ""}>关闭</option><option value="true" ${githubConfig.enabled ? "selected" : ""}>启用</option></select></div>
+        <div><label>GitHub Token（可选）</label><input id="githubToken" type="password" value="" autocomplete="off" placeholder="${githubConfig.token ? "已配置；留空保留原 Token" : "未配置"}" /></div>
+        <div><label>Sort</label><select id="githubSort">${["stars", "forks", "updated"].map(item => `<option value="${item}" ${item === githubConfig.sort ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+        <div class="span-all"><label>搜索关键词（每行一个）</label><textarea id="githubKeywords">${escapeHtml(githubConfig.keywords.join("\n"))}</textarea></div>
+        <div><label>每次查询数量</label><input id="githubPerPage" type="number" min="1" max="10" value="${githubConfig.perPage}" /></div>
+        <div><label>最多查询关键词数</label><input id="githubMaxQueries" type="number" min="1" max="3" value="${githubConfig.maxQueriesPerRefresh}" /></div>
+        <div><label>最低 Star 数</label><input id="githubMinimumStars" type="number" min="0" value="${githubConfig.minimumStars}" /></div>
+        <div><label>最近创建天数</label><input id="githubCreatedWithinDays" type="number" min="1" value="${githubConfig.createdWithinDays}" /></div>
+        <div><label>缓存分钟数</label><input id="githubCacheMinutes" type="number" min="1" value="${githubConfig.cacheMinutes}" /></div>
+      </div>
+      <div class="toolbar" style="margin-top:12px">
+        <button class="btn" data-save-github-source>保存配置</button>
+        <button class="btn ghost" data-test-github-source>测试连接</button>
+      </div>
+      <div class="meta">安全提示：浏览器保存 Token 只适合个人本地使用。正式多用户产品应改为后端代理，不应在前端保存长期凭证。</div>
+    </div>
+    <div class="card">
+      <h3>GitHub Source 状态</h3>
+      ${kv("Token", githubConfig.token ? "已配置" : "未配置")}
+      ${kv("最近刷新时间", githubStatus.lastRefreshAt ? new Date(githubStatus.lastRefreshAt).toLocaleString("zh-CN") : "—")}
+      ${kv("缓存剩余时间", githubCacheMs ? `${Math.ceil(githubCacheMs / 60000)} 分钟` : "无有效缓存")}
+      ${kv("最近请求数", githubStatus.lastRequestCount)}
+      ${kv("Rate Limit Remaining", githubStatus.rateLimitRemaining || "—")}
+      ${kv("Rate Limit Reset", githubStatus.rateLimitReset ? new Date(Number(githubStatus.rateLimitReset) * 1000).toLocaleString("zh-CN") : "—")}
+      ${kv("最近错误", githubStatus.lastError || "—")}
+    </div>
     <div class="card"><h3>Storage Providers</h3><p>当前启用：<strong>${db.settings.provider}</strong></p><div class="mini-stack"><span class="chip">StorageProvider</span><span class="chip">LocalStorageProvider 已实现</span><span class="chip">SupabaseProvider placeholder</span></div></div>
     <div class="card"><h3>AI Capabilities</h3><p>所有生成行为通过统一 aiRouter；真实调用仅预留给 openai / zai / deepseek / custom。</p><div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>
     <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
@@ -2496,11 +2895,27 @@ function renderSettingsV2() {
 
 function filteredGlobal() { return appState.filters.global ? ContentStore.search(appState.filters.global) : ContentStore.getAll(); }
 
+function collectGithubSourceConfig() {
+  const current = normalizeGithubSourceConfig(db.settings?.githubSourceConfig);
+  return normalizeGithubSourceConfig({
+    enabled: document.getElementById("githubSourceEnabled").value === "true",
+    token: document.getElementById("githubToken").value || current.token,
+    keywords: document.getElementById("githubKeywords").value.split(/\n+/).map(item => item.trim()).filter(Boolean),
+    perPage: document.getElementById("githubPerPage").value,
+    maxQueriesPerRefresh: document.getElementById("githubMaxQueries").value,
+    minimumStars: document.getElementById("githubMinimumStars").value,
+    createdWithinDays: document.getElementById("githubCreatedWithinDays").value,
+    cacheMinutes: document.getElementById("githubCacheMinutes").value,
+    sort: document.getElementById("githubSort").value,
+    updatedAt: now()
+  });
+}
+
 function bindScopedInputs() {
   const bindings = [
     ["radarQuery", "radarQuery"], ["radarPlatform", "radarPlatform"], ["radarScore", "radarScore"], ["radarSort", "radarSort"],
     ["libraryQuery", "libraryQuery"], ["libraryStatus", "libraryStatus"], ["libraryPlatform", "libraryPlatform"], ["libraryTag", "libraryTag"],
-    ["researchSource", "researchSource"], ["researchCategory", "researchCategory"], ["researchSort", "researchSort"], ["researchDate", "researchDate"]
+    ["researchSource", "researchSource"], ["researchSourceType", "researchSourceType"], ["researchCategory", "researchCategory"], ["researchSort", "researchSort"], ["researchDate", "researchDate"]
   ];
   bindings.forEach(([id, key]) => {
     const el = document.getElementById(id);
@@ -2628,6 +3043,17 @@ document.addEventListener("click", async event => {
   if (target.dataset.retryTask) { await TaskQueue.retry(target.dataset.retryTask); return render(); }
   if (target.dataset.agentChain) return createAgentTaskChain(target.dataset.agentChain);
   if (target.dataset.openWorkspace) { appState.selectedContentId = target.dataset.openWorkspace; return setPage("workspace"); }
+  if (target.dataset.refreshGithub !== undefined) {
+    const task = TaskQueue.add(TASK_TYPES.FETCH_GITHUB_TOPICS, {});
+    await TaskQueue.retry(task.id);
+    appState.filters.researchSourceType = "github";
+    return render();
+  }
+  if (target.dataset.processImportedTopics !== undefined) {
+    const task = TaskQueue.add(TASK_TYPES.PROCESS_IMPORTED_TOPICS, {});
+    await TaskQueue.retry(task.id);
+    return render();
+  }
   if (target.dataset.selectTopic) { appState.selectedTopicId = target.dataset.selectTopic; return render(); }
   if (target.dataset.topicProcessAll !== undefined) {
     const task = TaskQueue.add(TASK_TYPES.PROCESS_ALL_TOPICS, {});
@@ -2797,6 +3223,17 @@ document.addEventListener("click", async event => {
     }
     await testAiConnection();
     return;
+  }
+  if (target.dataset.saveGithubSource !== undefined) {
+    db.settings.githubSourceConfig = collectGithubSourceConfig();
+    saveDb();
+    return render();
+  }
+  if (target.dataset.testGithubSource !== undefined) {
+    db.settings.githubSourceConfig = collectGithubSourceConfig();
+    saveDb();
+    await GitHubSourceConnector.testConnection();
+    return render();
   }
   if (target.dataset.saveSettings !== undefined) {
     db.settings.adminNotes = document.getElementById("settingsNotes").value.trim();
