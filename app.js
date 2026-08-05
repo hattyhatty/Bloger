@@ -71,6 +71,26 @@ const TOPIC_STATUS_LABELS = Object.freeze({
   ARCHIVED: "已归档",
   FAILED: "处理失败"
 });
+const CLUSTER_STATUS = Object.freeze({
+  FORMING: "FORMING",
+  READY: "READY",
+  ANALYZING: "ANALYZING",
+  ANALYZED: "ANALYZED",
+  SELECTED: "SELECTED",
+  CONVERTED: "CONVERTED",
+  ARCHIVED: "ARCHIVED",
+  FAILED: "FAILED"
+});
+const CLUSTER_STATUS_LABELS = Object.freeze({
+  FORMING: "聚合中",
+  READY: "待分析",
+  ANALYZING: "分析中",
+  ANALYZED: "已分析",
+  SELECTED: "已选中",
+  CONVERTED: "已转内容",
+  ARCHIVED: "已归档",
+  FAILED: "处理失败"
+});
 const TARGET_PLATFORMS = Object.freeze(["小红书", "抖音", "B站"]);
 const CONTENT_TYPES = Object.freeze(["图文", "短视频", "视频脚本", "口播"]);
 const PUBLISH_STATUS = Object.freeze({ DRAFT: "DRAFT", SCHEDULED: "SCHEDULED", PUBLISHED: "PUBLISHED", FAILED: "FAILED" });
@@ -101,7 +121,16 @@ const TASK_TYPES = Object.freeze({
   FETCH_FEED_SOURCE: "FETCH_FEED_SOURCE",
   REFRESH_ALL_FEEDS: "REFRESH_ALL_FEEDS",
   PROCESS_FEED_TOPICS: "PROCESS_FEED_TOPICS",
-  TEST_FEED_CONNECTION: "TEST_FEED_CONNECTION"
+  TEST_FEED_CONNECTION: "TEST_FEED_CONNECTION",
+  CLUSTER_TOPIC: "CLUSTER_TOPIC",
+  CLUSTER_ALL_TOPICS: "CLUSTER_ALL_TOPICS",
+  REBUILD_CLUSTERS: "REBUILD_CLUSTERS",
+  RECALCULATE_CLUSTER: "RECALCULATE_CLUSTER",
+  ANALYZE_CLUSTER: "ANALYZE_CLUSTER",
+  ANALYZE_ALL_READY_CLUSTERS: "ANALYZE_ALL_READY_CLUSTERS",
+  MERGE_CLUSTERS: "MERGE_CLUSTERS",
+  CONVERT_CLUSTER_TO_CONTENT: "CONVERT_CLUSTER_TO_CONTENT",
+  SAVE_CLUSTER_TO_KNOWLEDGE: "SAVE_CLUSTER_TO_KNOWLEDGE"
 });
 const TASK_TYPE_LABELS = Object.freeze({
   RECOMMEND_TODAY: "推荐今日内容",
@@ -127,7 +156,16 @@ const TASK_TYPE_LABELS = Object.freeze({
   FETCH_FEED_SOURCE: "抓取 Feed",
   REFRESH_ALL_FEEDS: "刷新官方 Feeds",
   PROCESS_FEED_TOPICS: "处理 Feed Topics",
-  TEST_FEED_CONNECTION: "测试 Feed"
+  TEST_FEED_CONNECTION: "测试 Feed",
+  CLUSTER_TOPIC: "聚类 Topic",
+  CLUSTER_ALL_TOPICS: "聚类全部 Topic",
+  REBUILD_CLUSTERS: "重建 Clusters",
+  RECALCULATE_CLUSTER: "重算 Cluster",
+  ANALYZE_CLUSTER: "分析 Cluster",
+  ANALYZE_ALL_READY_CLUSTERS: "分析待处理 Clusters",
+  MERGE_CLUSTERS: "合并 Cluster",
+  CONVERT_CLUSTER_TO_CONTENT: "Cluster 转 Content",
+  SAVE_CLUSTER_TO_KNOWLEDGE: "Cluster 存知识"
 });
 const GITHUB_DEFAULT_KEYWORDS = Object.freeze([
   "artificial intelligence",
@@ -200,7 +238,9 @@ const appState = {
   editPromptId: null,
   editKnowledgeId: null,
   editFeedSourceId: null,
+  selectedClusterId: null,
   editPublishJobId: null,
+  researchView: "topics",
   radarViewMode: "card",
   filters: {
     global: "",
@@ -217,7 +257,13 @@ const appState = {
     researchSourceType: "",
     researchCategory: "",
     researchSort: "Trending",
-    researchDate: "7 Days"
+    researchDate: "7 Days",
+    clusterSourceCount: "",
+    clusterCategory: "",
+    clusterStatus: "",
+    clusterOfficial: "",
+    clusterDate: "30 Days",
+    clusterSort: "finalScore"
   }
 };
 
@@ -231,6 +277,10 @@ const clampScore = value => Math.max(0, Math.min(100, Number(value) || 0));
 const splitTags = value => String(value || "").split(/[,，\s]+/).map(item => item.trim()).filter(Boolean);
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
 const stripUrlParams = value => String(value || "").split("?")[0].split("#")[0];
+const getHostname = value => {
+  try { return value ? new URL(value).hostname.replace(/^www\./, "") : ""; }
+  catch { return ""; }
+};
 const simpleHash = value => {
   const text = String(value || "");
   let hash = 0;
@@ -242,6 +292,7 @@ const safeTargetPlatforms = list => (Array.isArray(list) ? list : [list]).filter
 const statusClass = status => `status ${String(status || "").toLowerCase()}`;
 const statusPill = status => `<span class="${statusClass(status)}">${STATUS_LABELS[status] || status}</span>`;
 const topicStatusPill = status => `<span class="${statusClass(status)}">${TOPIC_STATUS_LABELS[status] || status}</span>`;
+const clusterStatusPill = status => `<span class="${statusClass(status)}">${CLUSTER_STATUS_LABELS[status] || status}</span>`;
 const scoreBadge = score => `<span class="score">${clampScore(score)}分</span>`;
 const tagChips = tags => `<div class="chips">${(tags || []).map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}</div>`;
 const sourcePlatformOptions = selected => SOURCE_PLATFORMS.map(item => `<option ${item === selected ? "selected" : ""}>${item}</option>`).join("");
@@ -264,6 +315,15 @@ function normalizeContent(item = {}) {
     sourcePlatform: item.sourcePlatform || item.platform || "Reddit",
     sourceUrl: item.sourceUrl || item.link || "",
     sourceTopicId: item.sourceTopicId || "",
+    sourceClusterId: item.sourceClusterId || "",
+    sourceTopicIds: Array.isArray(item.sourceTopicIds) ? item.sourceTopicIds : [],
+    primarySourceTopicId: item.primarySourceTopicId || "",
+    sourceCount: Number(item.sourceCount) || 0,
+    sourcePlatforms: Array.isArray(item.sourcePlatforms) ? item.sourcePlatforms : [],
+    confirmedFacts: Array.isArray(item.confirmedFacts) ? item.confirmedFacts : [],
+    uncertainClaims: Array.isArray(item.uncertainClaims) ? item.uncertainClaims : [],
+    clusterSummary: item.clusterSummary || "",
+    clusterFinalScore: clampScore(item.clusterFinalScore || 0),
     sourceTitle: item.sourceTitle || item.originalTitle || item.title || "",
     sourceAuthor: item.sourceAuthor || "",
     sourcePublishedAt: item.sourcePublishedAt || item.publishedAt || today(),
@@ -360,7 +420,57 @@ function normalizeTopic(item = {}) {
     sourceTopicId: item.sourceTopicId || item.id || "",
     createdContentId: item.createdContentId || "",
     savedKnowledgeId: item.savedKnowledgeId || "",
+    clusterId: item.clusterId || null,
+    clusterConfidence: clampScore(item.clusterConfidence || 0),
+    clusteredAt: item.clusteredAt || null,
     status,
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+}
+
+function normalizeTopicCluster(item = {}) {
+  const createdAt = item.createdAt || now();
+  const topicIds = Array.isArray(item.topicIds) ? [...new Set(item.topicIds.filter(Boolean))] : [];
+  return {
+    id: item.id || uid("cluster"),
+    title: item.title || "Untitled Cluster",
+    canonicalTitle: item.canonicalTitle || "",
+    summary: item.summary || "",
+    category: RESEARCH_CATEGORIES.includes(item.category) ? item.category : "AI Product",
+    tags: Array.isArray(item.tags) ? item.tags : splitTags(item.tags),
+    topicIds,
+    primaryTopicId: item.primaryTopicId || topicIds[0] || "",
+    sourceCount: Number(item.sourceCount) || 0,
+    sources: Array.isArray(item.sources) ? item.sources : [],
+    officialSourceCount: Number(item.officialSourceCount) || 0,
+    earliestPublishedAt: item.earliestPublishedAt || "",
+    latestPublishedAt: item.latestPublishedAt || "",
+    trendScore: clampScore(item.trendScore || 0),
+    freshnessScore: clampScore(item.freshnessScore || 0),
+    engagementScore: clampScore(item.engagementScore || 0),
+    chinaFitScore: clampScore(item.chinaFitScore || 0),
+    controversyScore: clampScore(item.controversyScore || 0),
+    commercialScore: clampScore(item.commercialScore || 0),
+    finalScore: clampScore(item.finalScore || 0),
+    confidence: clampScore(item.confidence || 0),
+    clusterReason: item.clusterReason || "",
+    scoreReason: item.scoreReason || "",
+    suggestedAngles: Array.isArray(item.suggestedAngles) ? item.suggestedAngles : splitTags(item.suggestedAngles),
+    recommendedPlatforms: safeTargetPlatforms(item.recommendedPlatforms).length ? safeTargetPlatforms(item.recommendedPlatforms) : ["小红书", "抖音", "B站"],
+    status: Object.values(CLUSTER_STATUS).includes(item.status) ? item.status : CLUSTER_STATUS.FORMING,
+    eventSummary: item.eventSummary || item.eventSummaryZh || "",
+    whatHappened: item.whatHappened || "",
+    whyItMatters: item.whyItMatters || "",
+    sourceComparison: item.sourceComparison || "",
+    confirmedFacts: Array.isArray(item.confirmedFacts) ? item.confirmedFacts : [],
+    uncertainClaims: Array.isArray(item.uncertainClaims) ? item.uncertainClaims : [],
+    riskNotes: item.riskNotes || "",
+    contentRecommendation: item.contentRecommendation || "",
+    createdContentId: item.createdContentId || "",
+    savedKnowledgeId: item.savedKnowledgeId || "",
+    manualOverride: Boolean(item.manualOverride),
+    analysisError: item.analysisError || "",
     createdAt,
     updatedAt: item.updatedAt || createdAt
   };
@@ -560,6 +670,22 @@ function normalizeFeedCache(item = {}) {
   };
 }
 
+function normalizeClusteringConfig(item = {}) {
+  return {
+    clusteringEnabled: item.clusteringEnabled !== false,
+    autoClusterThreshold: clampScore(item.autoClusterThreshold || 78),
+    reviewThreshold: clampScore(item.reviewThreshold || 60),
+    maxPublishTimeGapDays: Math.max(1, Number(item.maxPublishTimeGapDays) || 14),
+    categoryWeight: Number(item.categoryWeight) || 10,
+    titleWeight: Number(item.titleWeight) || 30,
+    entityWeight: Number(item.entityWeight) || 25,
+    keywordWeight: Number(item.keywordWeight) || 15,
+    tagWeight: Number(item.tagWeight) || 10,
+    timeWeight: Number(item.timeWeight) || 10,
+    minimumClusterSizeForReady: Math.max(1, Number(item.minimumClusterSizeForReady) || 2)
+  };
+}
+
 function normalizePrompt(item = {}) {
   const createdAt = item.createdAt || now();
   return {
@@ -586,6 +712,14 @@ function normalizeKnowledge(item = {}) {
     summary: item.summary || "",
     linkedContentIds: Array.isArray(item.linkedContentIds) ? item.linkedContentIds : [],
     linkedTopicId: item.linkedTopicId || "",
+    linkedClusterId: item.linkedClusterId || "",
+    linkedTopicIds: Array.isArray(item.linkedTopicIds) ? item.linkedTopicIds : [],
+    primaryTopicId: item.primaryTopicId || "",
+    sources: Array.isArray(item.sources) ? item.sources : [],
+    confirmedFacts: Array.isArray(item.confirmedFacts) ? item.confirmedFacts : [],
+    uncertainClaims: Array.isArray(item.uncertainClaims) ? item.uncertainClaims : [],
+    eventSummary: item.eventSummary || "",
+    timeline: Array.isArray(item.timeline) ? item.timeline : [],
     createdAt: item.createdAt || now()
   };
 }
@@ -643,9 +777,10 @@ function saveDb() {
 function migrateDatabase(raw) {
   const source = raw && raw.contentItems ? raw : createInitialData();
   const newDb = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     contentItems: [],
     topics: [],
+    topicClusters: [],
     generatedAssets: [],
     archivedGeneratedAssets: [],
     videoProjects: [],
@@ -668,6 +803,7 @@ function migrateDatabase(raw) {
   newDb.settings.githubSourceConfig = normalizeGithubSourceConfig(source.settings?.githubSourceConfig);
   newDb.settings.feedSources = (Array.isArray(source.settings?.feedSources) && source.settings.feedSources.length ? source.settings.feedSources : createPresetFeedSources()).map(normalizeFeedSource);
   newDb.settings.feedCorsProxyUrl = source.settings?.feedCorsProxyUrl || "";
+  newDb.settings.clusteringConfig = normalizeClusteringConfig(source.settings?.clusteringConfig);
   newDb.settings.sourceStatus = {
     github: normalizeSourceStatus(source.settings?.sourceStatus?.github || { sourceId: "github" }),
     feeds: normalizeSourceStatus(source.settings?.sourceStatus?.feeds || { sourceId: "feeds" })
@@ -682,6 +818,7 @@ function migrateDatabase(raw) {
   const existingTasks = Array.isArray(source.tasks) ? source.tasks : [];
   const existingSourceCache = Array.isArray(source.sourceCache) ? source.sourceCache : [];
   const existingFeedCache = Array.isArray(source.feedCache) ? source.feedCache : [];
+  const existingClusters = Array.isArray(source.topicClusters) ? source.topicClusters : [];
 
   (source.contentItems || []).forEach(oldItem => {
     const content = normalizeContent(oldItem);
@@ -724,6 +861,7 @@ function migrateDatabase(raw) {
   existingTasks.forEach(item => newDb.tasks.push(normalizeTask(item)));
   existingSourceCache.forEach(item => newDb.sourceCache.push(normalizeSourceCache(item)));
   existingFeedCache.forEach(item => newDb.feedCache.push(normalizeFeedCache(item)));
+  existingClusters.forEach(item => newDb.topicClusters.push(normalizeTopicCluster(item)));
   newDb.topics = existingTopics.map(normalizeTopic);
 
   newDb.promptTemplates = (source.promptTemplates || createMockPrompts()).map(normalizePrompt);
@@ -861,6 +999,413 @@ const TopicStore = {
   },
   saveToKnowledge(id) {
     return ResearchPipeline.saveToKnowledge(id);
+  }
+};
+
+const ENTITY_DICTIONARY = Object.freeze({
+  companies: ["OpenAI", "Anthropic", "Google DeepMind", "Google", "Microsoft", "Meta", "NVIDIA", "DeepSeek", "GitHub", "Hugging Face"],
+  products: ["GPT", "Claude", "Gemini", "Copilot", "Cursor", "Windsurf", "Lovable", "MCP", "RAG", "LLM", "AI Agent", "AI Video"]
+});
+
+const EntityExtractor = {
+  extract(topic = {}) {
+    const text = `${topic.title || ""} ${topic.summary || ""} ${(topic.tags || []).join(" ")}`;
+    const lower = text.toLowerCase();
+    const companies = ENTITY_DICTIONARY.companies.filter(item => lower.includes(item.toLowerCase()));
+    const products = ENTITY_DICTIONARY.products.filter(item => lower.includes(item.toLowerCase()));
+    const versions = [...text.matchAll(/\b(?:GPT|Claude|Gemini)?[\s–-]*\d+(?:\.\d+)?\b/gi)].map(match => match[0].replace(/\s+/g, "-"));
+    const keywords = [...new Set(TopicClusteringService.normalizeTitle(text).split(" ").filter(word => word.length > 2).slice(0, 18))];
+    return { companies, products, versions, keywords };
+  }
+};
+
+const TopicClusterStore = {
+  ...createCrudStore("topicClusters", normalizeTopicCluster),
+  addTopic(clusterId, topicId, confidence = 100) {
+    const cluster = this.getById(clusterId);
+    const topic = TopicStore.getById(topicId);
+    if (!cluster || !topic) return null;
+    const topicIds = [...new Set([...(cluster.topicIds || []), topicId])];
+    this.update(clusterId, { topicIds });
+    TopicStore.update(topicId, { clusterId, clusterConfidence: confidence, clusteredAt: now() });
+    return this.recalculate(clusterId);
+  },
+  removeTopic(clusterId, topicId) {
+    const cluster = this.getById(clusterId);
+    if (!cluster) return null;
+    TopicStore.update(topicId, { clusterId: null, clusterConfidence: 0, clusteredAt: null });
+    return this.update(clusterId, { topicIds: cluster.topicIds.filter(id => id !== topicId), manualOverride: true });
+  },
+  mergeClusters(targetClusterId, sourceClusterId) {
+    const target = this.getById(targetClusterId);
+    const source = this.getById(sourceClusterId);
+    if (!target || !source || target.id === source.id) return null;
+    const topicIds = [...new Set([...target.topicIds, ...source.topicIds])];
+    this.update(targetClusterId, { topicIds, manualOverride: true });
+    topicIds.forEach(topicId => TopicStore.update(topicId, { clusterId: targetClusterId, clusteredAt: now() }));
+    this.remove(sourceClusterId);
+    return this.recalculate(targetClusterId);
+  },
+  recalculate(clusterId) {
+    const cluster = this.getById(clusterId);
+    if (!cluster) return null;
+    const topics = cluster.topicIds.map(id => TopicStore.getById(id)).filter(Boolean).filter(topic => topic.status !== TOPIC_STATUS.DUPLICATE);
+    if (!topics.length) return this.update(clusterId, { topicIds: [], status: CLUSTER_STATUS.ARCHIVED });
+    const primaryTopicId = cluster.manualOverride && cluster.primaryTopicId && topics.some(topic => topic.id === cluster.primaryTopicId) ? cluster.primaryTopicId : TopicClusteringService.selectPrimaryTopic(clusterId, topics);
+    const dates = topics.map(topic => new Date(topic.publishedAt).getTime()).filter(Number.isFinite);
+    const sources = [...new Set(topics.map(topic => topic.source))];
+    const scores = ClusterScoringService.calculate({ ...cluster, topicIds: topics.map(topic => topic.id), primaryTopicId });
+    const patch = {
+      ...(cluster.manualOverride ? {} : { title: topics.find(topic => topic.id === primaryTopicId)?.title || cluster.title, category: topics.find(topic => topic.id === primaryTopicId)?.category || cluster.category }),
+      topicIds: topics.map(topic => topic.id),
+      primaryTopicId,
+      sourceCount: sources.length,
+      sources,
+      officialSourceCount: topics.filter(topic => topic.isOfficialSource).length,
+      earliestPublishedAt: dates.length ? new Date(Math.min(...dates)).toISOString() : "",
+      latestPublishedAt: dates.length ? new Date(Math.max(...dates)).toISOString() : "",
+      tags: cluster.manualOverride && cluster.tags?.length ? cluster.tags : [...new Set(topics.flatMap(topic => topic.tags || []))].slice(0, 12),
+      summary: cluster.summary || topics.find(topic => topic.id === primaryTopicId)?.summary || "",
+      status: topics.length >= normalizeClusteringConfig(db.settings?.clusteringConfig).minimumClusterSizeForReady && cluster.status === CLUSTER_STATUS.FORMING ? CLUSTER_STATUS.READY : cluster.status,
+      ...scores
+    };
+    return this.update(clusterId, patch);
+  },
+  archive(clusterId) {
+    return this.update(clusterId, { status: CLUSTER_STATUS.ARCHIVED });
+  }
+};
+
+const TopicClusteringService = {
+  normalizeTitle(title = "") {
+    return String(title)
+      .toLowerCase()
+      .replace(/https?:\/\/\S+/g, " ")
+      .replace(/^(breaking|news|update|release|announcing|introducing|official|launch)\s*[:：\-]?\s*/i, "")
+      .replace(/gpt[\s–-]*(\d+(?:\.\d+)?)/gi, "gpt-$1")
+      .replace(/claude[\s–-]*(\d+(?:\.\d+)?)/gi, "claude-$1")
+      .replace(/gemini[\s–-]*(\d+(?:\.\d+)?)/gi, "gemini-$1")
+      .replace(/\b(release|announcing|introducing|official|launches|launch|new|the|a|an|and|or|for|with|from)\b/g, " ")
+      .replace(/[^\p{L}\p{N}\.\-\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  },
+  extractKeywords(topic) {
+    return EntityExtractor.extract(topic).keywords;
+  },
+  setSimilarity(left = [], right = []) {
+    const a = new Set(left.filter(Boolean));
+    const b = new Set(right.filter(Boolean));
+    if (!a.size || !b.size) return 0;
+    return Math.round([...a].filter(item => b.has(item)).length / new Set([...a, ...b]).size * 100);
+  },
+  calculateSimilarity(topicA, topicB) {
+    const a = normalizeTopic(topicA);
+    const b = normalizeTopic(topicB);
+    const titleSimilarity = Math.round(TopicDeduplicator.similarity(this.normalizeTitle(a.title), this.normalizeTitle(b.title)) * 100);
+    const ea = EntityExtractor.extract(a);
+    const eb = EntityExtractor.extract(b);
+    const keywordSimilarity = this.setSimilarity(ea.keywords, eb.keywords);
+    const tagSimilarity = this.setSimilarity((a.tags || []).map(x => x.toLowerCase()), (b.tags || []).map(x => x.toLowerCase()));
+    const categorySimilarity = a.category === b.category ? 100 : 0;
+    const days = Math.abs(new Date(a.publishedAt) - new Date(b.publishedAt)) / 86400000;
+    const maxGap = normalizeClusteringConfig(db.settings?.clusteringConfig).maxPublishTimeGapDays;
+    const timeSimilarity = clampScore(Math.round(100 - (days / maxGap) * 100));
+    const entitySimilarity = Math.max(this.setSimilarity(ea.companies, eb.companies), this.setSimilarity(ea.products, eb.products), this.setSimilarity(ea.versions, eb.versions));
+    const domainA = getHostname(a.canonicalUrl || a.url);
+    const domainB = getHostname(b.canonicalUrl || b.url);
+    const sourceDiversityBonus = a.source !== b.source || (domainA && domainB && domainA !== domainB) ? 8 : 0;
+    const config = normalizeClusteringConfig(db.settings?.clusteringConfig);
+    const weightTotal = config.titleWeight + config.entityWeight + config.keywordWeight + config.tagWeight + config.categoryWeight + config.timeWeight;
+    const finalSimilarity = clampScore(Math.round((titleSimilarity * config.titleWeight + entitySimilarity * config.entityWeight + keywordSimilarity * config.keywordWeight + tagSimilarity * config.tagWeight + categorySimilarity * config.categoryWeight + timeSimilarity * config.timeWeight) / weightTotal + sourceDiversityBonus));
+    return { titleSimilarity, keywordSimilarity, tagSimilarity, categorySimilarity, timeSimilarity, entitySimilarity, sourceDiversityBonus, finalSimilarity, reason: `标题 ${titleSimilarity} / 实体 ${entitySimilarity} / 关键词 ${keywordSimilarity} / 标签 ${tagSimilarity} / 时间 ${timeSimilarity}` };
+  },
+  findBestCluster(topic) {
+    let best = null;
+    TopicClusterStore.getAll().filter(cluster => cluster.status !== CLUSTER_STATUS.ARCHIVED).forEach(cluster => {
+      const primary = TopicStore.getById(cluster.primaryTopicId) || cluster.topicIds.map(id => TopicStore.getById(id)).find(Boolean);
+      if (!primary) return;
+      const similarity = this.calculateSimilarity(topic, primary);
+      if (!best || similarity.finalSimilarity > best.similarity.finalSimilarity) best = { cluster, similarity };
+    });
+    return best;
+  },
+  createClusterFromTopic(topic) {
+    const item = normalizeTopic(topic);
+    const scores = ClusterScoringService.calculate({ topicIds: [item.id], primaryTopicId: item.id });
+    const cluster = TopicClusterStore.create({
+      title: item.title,
+      canonicalTitle: this.normalizeTitle(item.title),
+      summary: item.summary,
+      category: item.category,
+      tags: item.tags,
+      topicIds: [item.id],
+      primaryTopicId: item.id,
+      sourceCount: 1,
+      sources: [item.source],
+      officialSourceCount: item.isOfficialSource ? 1 : 0,
+      earliestPublishedAt: item.publishedAt,
+      latestPublishedAt: item.publishedAt,
+      status: CLUSTER_STATUS.FORMING,
+      confidence: 100,
+      clusterReason: "由首个 Topic 自动创建 Cluster。",
+      suggestedAngles: item.suggestedAngles,
+      recommendedPlatforms: item.recommendedPlatforms,
+      ...scores
+    });
+    TopicStore.update(item.id, { clusterId: cluster.id, clusterConfidence: 100, clusteredAt: now() });
+    return cluster;
+  },
+  addTopicToCluster(topicId, clusterId, confidence = 100, reason = "") {
+    const cluster = TopicClusterStore.addTopic(clusterId, topicId, confidence);
+    return TopicClusterStore.update(clusterId, { confidence, clusterReason: reason || cluster?.clusterReason || "" });
+  },
+  clusterTopic(topicId) {
+    const topic = TopicStore.getById(topicId);
+    if (!topic || topic.status === TOPIC_STATUS.DUPLICATE || topic.status === TOPIC_STATUS.ARCHIVED) return null;
+    if (topic.clusterId && TopicClusterStore.getById(topic.clusterId)) return TopicClusterStore.recalculate(topic.clusterId);
+    const config = normalizeClusteringConfig(db.settings?.clusteringConfig);
+    const best = this.findBestCluster(topic);
+    if (best && best.similarity.finalSimilarity >= config.autoClusterThreshold) return this.addTopicToCluster(topic.id, best.cluster.id, best.similarity.finalSimilarity, best.similarity.reason);
+    if (best && best.similarity.finalSimilarity >= config.reviewThreshold) {
+      const cluster = this.createClusterFromTopic(topic);
+      return TopicClusterStore.update(cluster.id, { confidence: best.similarity.finalSimilarity, clusterReason: `可能相关，需人工确认：${best.similarity.reason}` });
+    }
+    return this.createClusterFromTopic(topic);
+  },
+  clusterAllEligibleTopics() {
+    if (!normalizeClusteringConfig(db.settings?.clusteringConfig).clusteringEnabled) return { processed: 0, created: 0, joined: 0, review: 0, failed: 0, skipped: "clustering disabled" };
+    const stats = { processed: 0, created: 0, joined: 0, review: 0, failed: 0 };
+    TopicStore.getAll().filter(topic => !topic.clusterId && topic.status !== TOPIC_STATUS.DUPLICATE && topic.status !== TOPIC_STATUS.ARCHIVED).forEach(topic => {
+      const before = TopicClusterStore.getAll().length;
+      try {
+        const cluster = this.clusterTopic(topic.id);
+        stats.processed += 1;
+        if (TopicClusterStore.getAll().length > before) stats.created += 1;
+        else if (cluster) stats.joined += 1;
+        if (cluster?.confidence >= normalizeClusteringConfig(db.settings?.clusteringConfig).reviewThreshold && cluster.confidence < normalizeClusteringConfig(db.settings?.clusteringConfig).autoClusterThreshold) stats.review += 1;
+      } catch {
+        stats.failed += 1;
+      }
+    });
+    return stats;
+  },
+  rebuildClusters() {
+    db.topicClusters = db.topicClusters.filter(cluster => normalizeTopicCluster(cluster).manualOverride);
+    TopicStore.getAll().forEach(topic => {
+      const cluster = topic.clusterId ? TopicClusterStore.getById(topic.clusterId) : null;
+      if (!cluster || !cluster.manualOverride) TopicStore.update(topic.id, { clusterId: null, clusterConfidence: 0, clusteredAt: null });
+    });
+    return this.clusterAllEligibleTopics();
+  },
+  mergeClusters(clusterAId, clusterBId) {
+    return TopicClusterStore.mergeClusters(clusterAId, clusterBId);
+  },
+  splitTopicFromCluster(topicId) {
+    const topic = TopicStore.getById(topicId);
+    if (!topic?.clusterId) return null;
+    const oldClusterId = topic.clusterId;
+    TopicClusterStore.removeTopic(oldClusterId, topicId);
+    TopicClusterStore.recalculate(oldClusterId);
+    return this.createClusterFromTopic(TopicStore.getById(topicId));
+  },
+  selectPrimaryTopic(clusterId, providedTopics = null) {
+    const cluster = TopicClusterStore.getById(clusterId);
+    const topics = providedTopics || (cluster?.topicIds || []).map(id => TopicStore.getById(id)).filter(Boolean);
+    const eligible = topics.filter(topic => topic.status !== TOPIC_STATUS.DUPLICATE);
+    if (!eligible.length) return "";
+    return [...eligible].sort((a, b) =>
+      Number(b.isOfficialSource) - Number(a.isOfficialSource) ||
+      (b.sourceTrustLevel === "high") - (a.sourceTrustLevel === "high") ||
+      String(b.rawText || "").length - String(a.rawText || "").length ||
+      new Date(a.publishedAt) - new Date(b.publishedAt) ||
+      b.finalScore - a.finalScore ||
+      Number(Boolean(b.canonicalUrl)) - Number(Boolean(a.canonicalUrl))
+    )[0].id;
+  }
+};
+
+const ClusterScoringService = {
+  calculate(cluster) {
+    const topics = (cluster.topicIds || []).map(id => TopicStore.getById(id)).filter(Boolean);
+    if (!topics.length) return { trendScore: 0, freshnessScore: 0, engagementScore: 0, chinaFitScore: 0, controversyScore: 0, commercialScore: 0, finalScore: 0, scoreReason: "暂无 Topic。" };
+    const primary = TopicStore.getById(cluster.primaryTopicId) || topics[0];
+    const maxScore = Math.max(...topics.map(topic => topic.finalScore));
+    const sourceCount = new Set(topics.map(topic => topic.source)).size;
+    const officialCount = topics.filter(topic => topic.isOfficialSource).length;
+    const diversityBoost = Math.min(8, (sourceCount - 1) * 3 + officialCount * 2);
+    const dates = topics.map(topic => new Date(topic.publishedAt).getTime()).filter(Number.isFinite);
+    const spanDays = dates.length ? (Math.max(...dates) - Math.min(...dates)) / 86400000 : 0;
+    const concentration = clampScore(100 - spanDays * 8);
+    const trendScore = clampScore(Math.round(primary.trendScore * .55 + maxScore * .25 + diversityBoost + topics.length * 2));
+    const freshnessScore = clampScore(Math.max(...topics.map(topic => topic.freshnessScore || 0)));
+    const engagementScore = clampScore(Math.round(Math.max(...topics.map(topic => topic.engagementScore || 0)) * .75 + diversityBoost));
+    const chinaFitScore = clampScore(Math.round(topics.reduce((sum, topic) => sum + topic.chinaFitScore, 0) / topics.length));
+    const controversyScore = clampScore(Math.max(...topics.map(topic => topic.controversyScore || 0)));
+    const commercialScore = clampScore(Math.max(...topics.map(topic => topic.commercialScore || 0)));
+    const finalScore = clampScore(Math.round(primary.finalScore * .42 + maxScore * .25 + trendScore * .16 + concentration * .08 + diversityBoost));
+    return { trendScore, freshnessScore, engagementScore, chinaFitScore, controversyScore, commercialScore, finalScore, scoreReason: `Primary ${primary.finalScore}，最高 Topic ${maxScore}，来源 ${sourceCount} 个，官方 ${officialCount} 个，多来源验证 +${diversityBoost}，时间集中度 ${concentration}。` };
+  }
+};
+
+function fallbackClusterAnalysis(cluster, topics) {
+  return {
+    eventSummaryZh: cluster.summary || topics[0]?.summary || cluster.title,
+    whatHappened: `多个来源正在讨论「${cluster.title}」。`,
+    whyItMatters: "该事件可能影响中文用户对 AI 产品、模型能力或工作流的判断。",
+    sourceComparison: `来源包括：${cluster.sources.join("、")}`,
+    confirmedFacts: topics.filter(topic => topic.isOfficialSource).map(topic => topic.title).slice(0, 3),
+    uncertainClaims: topics.filter(topic => !topic.isOfficialSource).map(topic => topic.title).slice(0, 3),
+    chinaAudienceValue: "适合转译成中文平台的实用解读、观点或工具选择内容。",
+    suggestedAngles: cluster.suggestedAngles?.length ? cluster.suggestedAngles : ["发生了什么", "为什么值得关注", "普通用户怎么判断"],
+    recommendedPlatforms: cluster.recommendedPlatforms?.length ? cluster.recommendedPlatforms : ["小红书", "抖音", "B站"],
+    riskNotes: "注意区分官方确认信息和社区猜测。",
+    contentRecommendation: "建议先做短视频解释事件，再扩展为图文复盘。"
+  };
+}
+
+const ClusterAnalysisService = {
+  async analyzeCluster(clusterId) {
+    const cluster = TopicClusterStore.getById(clusterId);
+    if (!cluster) throw new Error("找不到 Cluster");
+    TopicClusterStore.update(clusterId, { status: CLUSTER_STATUS.ANALYZING, analysisError: "" });
+    const current = TopicClusterStore.getById(clusterId);
+    const topics = current.topicIds.map(id => TopicStore.getById(id)).filter(Boolean);
+    const primary = TopicStore.getById(current.primaryTopicId) || topics[0];
+    const fallback = fallbackClusterAnalysis(current, topics);
+    const prompt = `请分析这个多来源 AI 热点 Cluster，只返回 JSON：
+{
+  "eventSummaryZh": "",
+  "whatHappened": "",
+  "whyItMatters": "",
+  "sourceComparison": "",
+  "confirmedFacts": [],
+  "uncertainClaims": [],
+  "chinaAudienceValue": "",
+  "suggestedAngles": [],
+  "recommendedPlatforms": ["小红书", "抖音", "B站"],
+  "riskNotes": "",
+  "contentRecommendation": ""
+}
+Cluster: ${current.title}
+Primary Topic: ${primary?.title || ""}
+Sources: ${current.sources.join(", ")}
+Topics:
+${topics.map(topic => `- ${topic.isOfficialSource ? "[官方]" : "[社区]"} ${topic.source}: ${topic.title} / ${topic.summary}`).join("\n")}`;
+    const text = await aiRouter.generateText(prompt, { task: "cluster.analyze", title: current.title, format: "Cluster JSON", systemPrompt: "你是 AI Content OS 的热点聚合分析 Agent。必须区分 confirmedFacts 与 uncertainClaims，只输出 JSON。" });
+    const result = safeParseJSON(text, fallback);
+    return TopicClusterStore.update(clusterId, {
+      eventSummary: result.eventSummaryZh || fallback.eventSummaryZh,
+      summary: result.eventSummaryZh || fallback.eventSummaryZh,
+      whatHappened: result.whatHappened || fallback.whatHappened,
+      whyItMatters: result.whyItMatters || fallback.whyItMatters,
+      sourceComparison: result.sourceComparison || fallback.sourceComparison,
+      confirmedFacts: Array.isArray(result.confirmedFacts) ? result.confirmedFacts : fallback.confirmedFacts,
+      uncertainClaims: Array.isArray(result.uncertainClaims) ? result.uncertainClaims : fallback.uncertainClaims,
+      suggestedAngles: Array.isArray(result.suggestedAngles) ? result.suggestedAngles : fallback.suggestedAngles,
+      recommendedPlatforms: safeTargetPlatforms(result.recommendedPlatforms).length ? safeTargetPlatforms(result.recommendedPlatforms) : fallback.recommendedPlatforms,
+      riskNotes: result.riskNotes || fallback.riskNotes,
+      contentRecommendation: result.contentRecommendation || fallback.contentRecommendation,
+      status: CLUSTER_STATUS.ANALYZED,
+      analysisError: ""
+    });
+  },
+  reanalyzeCluster(clusterId) {
+    return this.analyzeCluster(clusterId);
+  }
+};
+
+const ClusterContentService = {
+  convertToContent(clusterId) {
+    const cluster = TopicClusterStore.getById(clusterId);
+    if (!cluster) throw new Error("找不到 Cluster");
+    if (cluster.createdContentId && ContentStore.getById(cluster.createdContentId)) {
+      appState.selectedContentId = cluster.createdContentId;
+      return ContentStore.getById(cluster.createdContentId);
+    }
+    const topics = cluster.topicIds.map(id => TopicStore.getById(id)).filter(Boolean);
+    const primary = TopicStore.getById(cluster.primaryTopicId) || topics[0];
+    const existing = ContentStore.getAll().find(content => content.sourceClusterId === cluster.id);
+    if (existing) {
+      TopicClusterStore.update(clusterId, { status: CLUSTER_STATUS.CONVERTED, createdContentId: existing.id });
+      appState.selectedContentId = existing.id;
+      return existing;
+    }
+    const content = ContentStore.create({
+      title: cluster.title,
+      status: CONTENT_STATUS.COLLECTED,
+      sourceClusterId: cluster.id,
+      sourceTopicIds: cluster.topicIds,
+      primarySourceTopicId: primary?.id || "",
+      sourceTopicId: primary?.id || "",
+      sourceCount: cluster.sourceCount,
+      sourcePlatforms: cluster.sources,
+      sourcePlatform: primary?.source || "Official Blog",
+      sourceUrl: primary?.url || "",
+      sourceTitle: primary?.title || cluster.title,
+      originalSummary: cluster.eventSummary || cluster.summary,
+      aiAnalysis: cluster.whatHappened || cluster.summary,
+      selectedAngle: cluster.suggestedAngles[0] || "",
+      targetPlatforms: cluster.recommendedPlatforms,
+      finalScore: cluster.finalScore,
+      clusterFinalScore: cluster.finalScore,
+      confirmedFacts: cluster.confirmedFacts,
+      uncertainClaims: cluster.uncertainClaims,
+      clusterSummary: cluster.eventSummary || cluster.summary,
+      tags: cluster.tags,
+      topic: cluster.category
+    });
+    TopicClusterStore.update(clusterId, { status: CLUSTER_STATUS.CONVERTED, createdContentId: content.id });
+    if (primary) TopicStore.update(primary.id, { createdContentId: primary.createdContentId || content.id });
+    appState.selectedContentId = content.id;
+    return content;
+  }
+};
+
+const ClusterKnowledgeService = {
+  saveToKnowledge(clusterId) {
+    const cluster = TopicClusterStore.getById(clusterId);
+    if (!cluster) throw new Error("找不到 Cluster");
+    if (cluster.savedKnowledgeId && KnowledgeStore.getById(cluster.savedKnowledgeId)) return KnowledgeStore.getById(cluster.savedKnowledgeId);
+    const existing = KnowledgeStore.getAll().find(item => item.linkedClusterId === cluster.id);
+    if (existing) {
+      TopicClusterStore.update(clusterId, { savedKnowledgeId: existing.id });
+      return existing;
+    }
+    const topics = cluster.topicIds.map(id => TopicStore.getById(id)).filter(Boolean);
+    const timeline = topics.sort((a, b) => new Date(a.publishedAt) - new Date(b.publishedAt)).map(topic => `${new Date(topic.publishedAt).toLocaleDateString("zh-CN")} ${topic.source}: ${topic.title}`);
+    const knowledge = KnowledgeStore.create({
+      title: cluster.title,
+      source: "TopicCluster",
+      topic: cluster.category,
+      tags: cluster.tags,
+      linkedClusterId: cluster.id,
+      linkedTopicIds: cluster.topicIds,
+      primaryTopicId: cluster.primaryTopicId,
+      sources: cluster.sources,
+      confirmedFacts: cluster.confirmedFacts,
+      uncertainClaims: cluster.uncertainClaims,
+      eventSummary: cluster.eventSummary || cluster.summary,
+      timeline,
+      summary: `${cluster.eventSummary || cluster.summary}\n\nConfirmed Facts:\n${cluster.confirmedFacts.join("\n")}\n\nUncertain Claims:\n${cluster.uncertainClaims.join("\n")}\n\nTimeline:\n${timeline.join("\n")}`
+    });
+    TopicClusterStore.update(clusterId, { savedKnowledgeId: knowledge.id });
+    return knowledge;
+  }
+};
+
+const ClusterPipeline = {
+  clusterPendingTopics() { return TopicClusteringService.clusterAllEligibleTopics(); },
+  recalculateAllClusters() { return TopicClusterStore.getAll().map(cluster => TopicClusterStore.recalculate(cluster.id)); },
+  async analyzeReadyClusters() {
+    const results = [];
+    for (const cluster of TopicClusterStore.getAll().filter(item => [CLUSTER_STATUS.READY, CLUSTER_STATUS.ANALYZED].includes(item.status))) results.push(await ClusterAnalysisService.analyzeCluster(cluster.id));
+    return results;
+  },
+  async processAll() {
+    const clustering = this.clusterPendingTopics();
+    const recalculated = this.recalculateAllClusters();
+    return { clustering, recalculated: recalculated.length };
   }
 };
 
@@ -1587,8 +2132,11 @@ const TaskQueue = {
 function buildTaskTitle(type, payload = {}) {
   const content = payload.contentId ? ContentStore.getById(payload.contentId) : null;
   const topic = payload.topicId ? TopicStore.getById(payload.topicId) : null;
+  const cluster = payload.clusterId ? TopicClusterStore.getById(payload.clusterId) : null;
+  const mergeTarget = payload.targetClusterId ? TopicClusterStore.getById(payload.targetClusterId) : null;
+  const mergeSource = payload.sourceClusterId ? TopicClusterStore.getById(payload.sourceClusterId) : null;
   const feed = payload.feedSourceId ? FeedSourceStore.getById(payload.feedSourceId) : null;
-  const suffix = content ? ` · ${content.title}` : topic ? ` · ${topic.title}` : feed ? ` · ${feed.name}` : "";
+  const suffix = content ? ` · ${content.title}` : topic ? ` · ${topic.title}` : cluster ? ` · ${cluster.title}` : mergeTarget && mergeSource ? ` · ${mergeSource.title} → ${mergeTarget.title}` : feed ? ` · ${feed.name}` : "";
   return `${TASK_TYPE_LABELS[type] || type}${suffix}`;
 }
 
@@ -2451,6 +2999,9 @@ const TaskExecutor = {
     const requireTopic = () => {
       if (!payload.topicId || !TopicStore.getById(payload.topicId)) throw new Error("找不到任务对应的 Topic");
     };
+    const requireCluster = () => {
+      if (!payload.clusterId || !TopicClusterStore.getById(payload.clusterId)) throw new Error("找不到任务对应的 Cluster");
+    };
     switch (task.type) {
       case TASK_TYPES.RECOMMEND_TODAY:
         return PlannerAgent.recommendToday(payload.limit || 5);
@@ -2515,6 +3066,30 @@ const TaskExecutor = {
         return ResearchPipeline.processAllPending();
       case TASK_TYPES.TEST_FEED_CONNECTION:
         return FeedSourceConnector.testConnection(payload.feedSourceId);
+      case TASK_TYPES.CLUSTER_TOPIC:
+        requireTopic();
+        return TopicClusteringService.clusterTopic(payload.topicId);
+      case TASK_TYPES.CLUSTER_ALL_TOPICS:
+        return ClusterPipeline.clusterPendingTopics();
+      case TASK_TYPES.REBUILD_CLUSTERS:
+        return TopicClusteringService.rebuildClusters();
+      case TASK_TYPES.RECALCULATE_CLUSTER:
+        requireCluster();
+        return TopicClusterStore.recalculate(payload.clusterId);
+      case TASK_TYPES.ANALYZE_CLUSTER:
+        requireCluster();
+        return ClusterAnalysisService.analyzeCluster(payload.clusterId);
+      case TASK_TYPES.ANALYZE_ALL_READY_CLUSTERS:
+        return ClusterPipeline.analyzeReadyClusters();
+      case TASK_TYPES.MERGE_CLUSTERS:
+        if (!payload.targetClusterId || !payload.sourceClusterId) throw new Error("缺少待合并 Cluster");
+        return TopicClusteringService.mergeClusters(payload.targetClusterId, payload.sourceClusterId);
+      case TASK_TYPES.CONVERT_CLUSTER_TO_CONTENT:
+        requireCluster();
+        return ClusterContentService.convertToContent(payload.clusterId);
+      case TASK_TYPES.SAVE_CLUSTER_TO_KNOWLEDGE:
+        requireCluster();
+        return ClusterKnowledgeService.saveToKnowledge(payload.clusterId);
       default:
         throw new Error(`未知任务类型：${task.type}`);
     }
@@ -2535,10 +3110,18 @@ async function createAsset(content, platform, assetType, fixedContent = "") {
 
 window.ContentStore = ContentStore;
 window.TopicStore = TopicStore;
+window.TopicClusterStore = TopicClusterStore;
 window.MockTopicProvider = MockTopicProvider;
 window.TopicDeduplicator = TopicDeduplicator;
 window.TopicScoringService = TopicScoringService;
 window.ResearchPipeline = ResearchPipeline;
+window.EntityExtractor = EntityExtractor;
+window.TopicClusteringService = TopicClusteringService;
+window.ClusterScoringService = ClusterScoringService;
+window.ClusterAnalysisService = ClusterAnalysisService;
+window.ClusterContentService = ClusterContentService;
+window.ClusterKnowledgeService = ClusterKnowledgeService;
+window.ClusterPipeline = ClusterPipeline;
 window.SourceCacheStore = SourceCacheStore;
 window.FeedCacheStore = FeedCacheStore;
 window.FeedSourceStore = FeedSourceStore;
@@ -2576,9 +3159,10 @@ window.TaskExecutor = TaskExecutor;
 // =========================
 function createInitialData() {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     contentItems: createMockContents(),
     topics: createMockTopics(),
+    topicClusters: [],
     generatedAssets: [],
     archivedGeneratedAssets: [],
     videoProjects: [],
@@ -2844,6 +3428,7 @@ function compactContentRow(item) {
 }
 
 function renderResearch() {
+  if (appState.researchView === "clusters") return renderResearchClusters();
   const filters = appState.filters;
   const topics = TopicStore.getFiltered({
     sourceType: filters.researchSourceType,
@@ -2856,6 +3441,7 @@ function renderResearch() {
   const selected = TopicStore.getById(appState.selectedTopicId) || topics[0] || null;
   return `
     ${renderSourceToolbar()}
+    ${renderResearchViewToggle()}
     <div class="research-layout">
       <aside class="card research-filter">
         <h3>Filter Panel</h3>
@@ -2893,6 +3479,16 @@ function renderResearch() {
   `;
 }
 
+function renderResearchViewToggle() {
+  return `<div class="card toolbar">
+    <button class="btn small ghost ${appState.researchView === "topics" ? "active" : ""}" data-research-view="topics">Topics</button>
+    <button class="btn small ghost ${appState.researchView === "clusters" ? "active" : ""}" data-research-view="clusters">Clusters</button>
+    <span class="chip">Topic ${TopicStore.getAll().length}</span>
+    <span class="chip">Cluster ${TopicClusterStore.getAll().length}</span>
+    <span class="chip">Unclustered ${TopicStore.getAll().filter(topic => !topic.clusterId && topic.status !== TOPIC_STATUS.DUPLICATE && topic.status !== TOPIC_STATUS.ARCHIVED).length}</span>
+  </div>`;
+}
+
 function renderSourceToolbar() {
   const status = normalizeSourceStatus(db.settings?.sourceStatus?.github || { sourceId: "github" });
   const feedStatus = normalizeSourceStatus(db.settings?.sourceStatus?.feeds || { sourceId: "feeds" });
@@ -2918,6 +3514,167 @@ function renderSourceToolbar() {
   </div>`;
 }
 
+function getFilteredClusters() {
+  const filters = appState.filters;
+  const nowMs = Date.now();
+  const dateDays = filters.clusterDate === "Today" ? 1 : filters.clusterDate === "7 Days" ? 7 : filters.clusterDate === "30 Days" ? 30 : 9999;
+  return TopicClusterStore.getAll().filter(cluster => {
+    if (cluster.status === CLUSTER_STATUS.ARCHIVED && filters.clusterStatus !== CLUSTER_STATUS.ARCHIVED) return false;
+    if (filters.clusterCategory && cluster.category !== filters.clusterCategory) return false;
+    if (filters.clusterStatus && cluster.status !== filters.clusterStatus) return false;
+    if (filters.clusterSourceCount && cluster.sourceCount < Number(filters.clusterSourceCount)) return false;
+    if (filters.clusterOfficial === "yes" && cluster.officialSourceCount < 1) return false;
+    if (filters.clusterOfficial === "no" && cluster.officialSourceCount > 0) return false;
+    const latest = new Date(cluster.latestPublishedAt || cluster.updatedAt || cluster.createdAt).getTime();
+    if (Number.isFinite(latest) && (nowMs - latest) / 86400000 > dateDays) return false;
+    return true;
+  }).sort((a, b) => {
+    if (filters.clusterSort === "sourceCount") return b.sourceCount - a.sourceCount || b.finalScore - a.finalScore;
+    if (filters.clusterSort === "freshness") return new Date(b.latestPublishedAt || b.updatedAt) - new Date(a.latestPublishedAt || a.updatedAt);
+    return b.finalScore - a.finalScore || b.sourceCount - a.sourceCount;
+  });
+}
+
+function renderResearchClusters() {
+  const filters = appState.filters;
+  const clusters = getFilteredClusters();
+  if (!appState.selectedClusterId || !TopicClusterStore.getById(appState.selectedClusterId)) appState.selectedClusterId = clusters[0]?.id || TopicClusterStore.getAll()[0]?.id || null;
+  const selected = TopicClusterStore.getById(appState.selectedClusterId) || clusters[0] || null;
+  return `
+    ${renderSourceToolbar()}
+    ${renderResearchViewToggle()}
+    <div class="research-layout">
+      <aside class="card research-filter">
+        <h3>Cluster Filters</h3>
+        <div class="form-grid single">
+          <div><label>Source Count</label><select id="clusterSourceCount"><option value="">All</option>${[2, 3, 4].map(n => `<option value="${n}" ${String(n) === String(filters.clusterSourceCount) ? "selected" : ""}>${n}+</option>`).join("")}</select></div>
+          <div><label>Category</label><select id="clusterCategory"><option value="">All Categories</option>${RESEARCH_CATEGORIES.map(item => `<option value="${item}" ${item === filters.clusterCategory ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+          <div><label>Status</label><select id="clusterStatus"><option value="">All Status</option>${Object.values(CLUSTER_STATUS).map(item => `<option value="${item}" ${item === filters.clusterStatus ? "selected" : ""}>${CLUSTER_STATUS_LABELS[item]}</option>`).join("")}</select></div>
+          <div><label>Official Source</label><select id="clusterOfficial"><option value="">All</option><option value="yes" ${filters.clusterOfficial === "yes" ? "selected" : ""}>Has official</option><option value="no" ${filters.clusterOfficial === "no" ? "selected" : ""}>No official</option></select></div>
+          <div><label>Date</label><select id="clusterDate">${["Today", "7 Days", "30 Days"].map(item => `<option value="${item}" ${item === filters.clusterDate ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+          <div><label>Sort</label><select id="clusterSort"><option value="finalScore" ${filters.clusterSort === "finalScore" ? "selected" : ""}>Final Score</option><option value="sourceCount" ${filters.clusterSort === "sourceCount" ? "selected" : ""}>Source Count</option><option value="freshness" ${filters.clusterSort === "freshness" ? "selected" : ""}>Freshness</option></select></div>
+        </div>
+        <div class="divider"></div>
+        <div class="mini-stack">
+          ${statCard("Clusters", TopicClusterStore.getAll().length, "已形成的多来源热点")}
+          ${statCard("Filtered", clusters.length, "当前筛选结果")}
+        </div>
+      </aside>
+      <section class="research-list">
+        <div class="card">
+          <div class="item-head">
+            <h3>Cluster List</h3>
+            <span class="chip">Multi-Source Clustering</span>
+          </div>
+          <div class="toolbar" style="margin-bottom:12px">
+            <button class="btn small" data-cluster-all>Cluster All</button>
+            <button class="btn small ghost" data-analyze-ready-clusters>Analyze Ready</button>
+            <button class="btn small ghost" data-rebuild-clusters>Rebuild Clusters</button>
+          </div>
+          <div class="mini-stack">
+            ${clusters.length ? clusters.map(renderClusterCard).join("") : empty("当前没有 Cluster。可以先点击 Cluster All。")}
+          </div>
+        </div>
+      </section>
+      <aside class="research-detail">
+        ${selected ? renderClusterDetail(selected) : empty("请选择一个 Cluster。")}
+      </aside>
+    </div>
+  `;
+}
+
+function renderClusterCard(cluster) {
+  const active = cluster.id === appState.selectedClusterId ? "active" : "";
+  const primary = TopicStore.getById(cluster.primaryTopicId);
+  return `<button class="topic-card cluster-card ${active}" data-select-cluster="${cluster.id}">
+    <div class="item-head">
+      <span class="score">Cluster ${cluster.finalScore}</span>
+      ${clusterStatusPill(cluster.status)}
+    </div>
+    <h3 class="item-title">${escapeHtml(cluster.title)}</h3>
+    <div class="meta">${cluster.sourceCount} 个来源 · ${cluster.sources.join("、") || "—"} · Primary ${escapeHtml(primary?.source || "—")} · ${cluster.earliestPublishedAt ? new Date(cluster.earliestPublishedAt).toLocaleDateString("zh-CN") : "—"} → ${cluster.latestPublishedAt ? new Date(cluster.latestPublishedAt).toLocaleDateString("zh-CN") : "—"}</div>
+    <div class="chips">
+      <span class="chip">${escapeHtml(cluster.category)}</span>
+      <span class="chip">Topics ${cluster.topicIds.length}</span>
+      <span class="chip">官方 ${cluster.officialSourceCount}</span>
+      <span class="chip">Confidence ${cluster.confidence}</span>
+      ${(cluster.tags || []).slice(0, 3).map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}
+    </div>
+  </button>`;
+}
+
+function renderClusterDetail(cluster) {
+  const topics = cluster.topicIds.map(id => TopicStore.getById(id)).filter(Boolean);
+  const otherClusters = TopicClusterStore.getAll().filter(item => item.id !== cluster.id && item.status !== CLUSTER_STATUS.ARCHIVED);
+  const unclusteredTopics = TopicStore.getAll().filter(topic => !topic.clusterId && topic.status !== TOPIC_STATUS.DUPLICATE && topic.status !== TOPIC_STATUS.ARCHIVED).slice(0, 60);
+  return `<div class="card sticky">
+    <div class="item-head">
+      <h3>${escapeHtml(cluster.title)}</h3>
+      <span class="score">${cluster.finalScore}</span>
+    </div>
+    <div class="meta">${cluster.sources.join("、") || "—"} · ${clusterStatusPill(cluster.status)} · ${cluster.sourceCount} sources / ${topics.length} topics</div>
+    ${kv("Primary Topic", escapeHtml(TopicStore.getById(cluster.primaryTopicId)?.title || "—"))}
+    ${kv("发布时间范围", `${cluster.earliestPublishedAt ? new Date(cluster.earliestPublishedAt).toLocaleString("zh-CN") : "—"} → ${cluster.latestPublishedAt ? new Date(cluster.latestPublishedAt).toLocaleString("zh-CN") : "—"}`)}
+    ${kv("创建时间", cluster.createdAt ? new Date(cluster.createdAt).toLocaleString("zh-CN") : "—")}
+    ${kv("更新时间", cluster.updatedAt ? new Date(cluster.updatedAt).toLocaleString("zh-CN") : "—")}
+    ${kv("Event Summary", escapeHtml(cluster.eventSummary || cluster.summary))}
+    ${kv("What Happened", escapeHtml(cluster.whatHappened))}
+    ${kv("Why It Matters", escapeHtml(cluster.whyItMatters))}
+    ${kv("Source Comparison", escapeHtml(cluster.sourceComparison))}
+    ${kv("Risk Notes", escapeHtml(cluster.riskNotes || cluster.analysisError || "—"))}
+    ${kv("Score Reason", escapeHtml(cluster.scoreReason))}
+    <div class="chips">
+      <span class="chip">Trend ${cluster.trendScore}</span>
+      <span class="chip">Fresh ${cluster.freshnessScore}</span>
+      <span class="chip">Engage ${cluster.engagementScore}</span>
+      <span class="chip">China ${cluster.chinaFitScore}</span>
+      <span class="chip">Controversy ${cluster.controversyScore}</span>
+      <span class="chip">Commercial ${cluster.commercialScore}</span>
+      <span class="chip">Confidence ${cluster.confidence}</span>
+    </div>
+    <div class="divider"></div>
+    <strong>Confirmed Facts</strong>
+    ${tagChips(cluster.confirmedFacts)}
+    <strong>Uncertain Claims</strong>
+    ${tagChips(cluster.uncertainClaims)}
+    <strong>Suggested Angles</strong>
+    ${tagChips(cluster.suggestedAngles)}
+    <strong>Recommended Platforms</strong>
+    ${tagChips(cluster.recommendedPlatforms)}
+    <div class="divider"></div>
+    <strong>Topics in Cluster</strong>
+    <div class="mini-stack">
+      ${topics.map(topic => `<div class="cluster-topic-row">
+        <span>${topic.id === cluster.primaryTopicId ? "★ " : ""}${escapeHtml(topic.source)} · ${escapeHtml(topic.title)}</span>
+        <div class="toolbar">
+          <button class="btn small ghost" data-set-primary-topic="${cluster.id}:${topic.id}">设主源</button>
+          <button class="btn small ghost" data-split-topic="${topic.id}">拆出</button>
+          <button class="btn small danger" data-remove-topic-from-cluster="${cluster.id}:${topic.id}">移除</button>
+        </div>
+      </div>`).join("") || empty("暂无 Topic。")}
+    </div>
+    <div class="divider"></div>
+    <div class="form-grid single">
+      <div><label>Cluster 标题</label><input id="clusterTitleInput" value="${escapeHtml(cluster.title)}" /></div>
+      <div><label>Cluster 分类</label><select id="clusterCategoryInput">${RESEARCH_CATEGORIES.map(item => `<option value="${item}" ${item === cluster.category ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+      <div><label>Cluster 标签</label><input id="clusterTagsInput" value="${escapeHtml((cluster.tags || []).join("，"))}" /></div>
+      <div><label>手动加入 Topic</label><select id="addTopicToCluster"><option value="">选择未聚类 Topic</option>${unclusteredTopics.map(topic => `<option value="${topic.id}">${escapeHtml(topic.source)} · ${escapeHtml(topic.title)}</option>`).join("")}</select></div>
+      <div><label>合并另一个 Cluster</label><select id="mergeClusterSelect"><option value="">选择 Cluster</option>${otherClusters.map(item => `<option value="${item.id}">${escapeHtml(item.title)}</option>`).join("")}</select></div>
+    </div>
+    <div class="toolbar">
+      <button class="btn small ghost" data-save-cluster-meta="${cluster.id}">保存 Cluster 信息</button>
+      <button class="btn small ghost" data-add-topic-to-cluster="${cluster.id}">加入 Topic</button>
+      <button class="btn small ghost" data-merge-cluster="${cluster.id}">合并 Cluster</button>
+      <button class="btn small ghost" data-recalculate-cluster="${cluster.id}">重算</button>
+      <button class="btn small" data-analyze-cluster="${cluster.id}">Analyze Cluster</button>
+      <button class="btn small ghost" data-analyze-cluster="${cluster.id}">Analyze Again</button>
+      <button class="btn small" data-convert-cluster="${cluster.id}">${cluster.createdContentId ? "打开 Content" : "转成 Content"}</button>
+      <button class="btn small ghost" data-save-cluster-knowledge="${cluster.id}">${cluster.savedKnowledgeId ? "打开知识条目" : "Save To Knowledge"}</button>
+      <button class="btn small danger" data-archive-cluster="${cluster.id}">Archive</button>
+    </div>
+  </div>`;
+}
+
 function renderTopicCard(topic) {
   const active = topic.id === appState.selectedTopicId ? "active" : "";
   return `<button class="topic-card ${active}" data-select-topic="${topic.id}">
@@ -2935,6 +3692,7 @@ function renderTopicCard(topic) {
       <span class="chip">Trend ${topic.trendScore}</span>
       <span class="chip">ChinaFit ${topic.chinaFitScore}</span>
       <span class="chip">Analysis ${escapeHtml(topic.analysisStatus)}</span>
+      ${topic.clusterId ? `<span class="chip">Clustered ${topic.clusterConfidence}</span>` : ""}
       ${topic.duplicateOfTopicId ? `<span class="chip">Duplicate</span>` : ""}
       ${(topic.tags || []).slice(0, 3).map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}
     </div>
@@ -2973,6 +3731,7 @@ function renderTopicDetail(topic) {
     ${kv("scoreReason", escapeHtml(topic.scoreReason))}
     ${kv("analysisVersion", topic.analysisVersion)}
     ${kv("duplicateOfTopicId", escapeHtml(topic.duplicateOfTopicId))}
+    ${kv("clusterId", escapeHtml(topic.clusterId || "—"))}
     ${kv("createdContentId", escapeHtml(topic.createdContentId))}
     ${kv("savedKnowledgeId", escapeHtml(topic.savedKnowledgeId))}
     ${topic.analysisError ? kv("processing error", escapeHtml(topic.analysisError)) : ""}
@@ -2986,6 +3745,8 @@ function renderTopicDetail(topic) {
     <div class="toolbar">
       ${retryButton}
       <button class="btn small ghost" data-topic-process="${topic.id}">Process Topic</button>
+      <button class="btn small ghost" data-cluster-topic="${topic.id}" ${isDuplicate ? "disabled" : ""}>Cluster Topic</button>
+      ${topic.clusterId ? `<button class="btn small ghost" data-open-cluster="${topic.clusterId}">打开 Cluster</button><button class="btn small ghost" data-split-topic="${topic.id}">拆出 Cluster</button>` : ""}
       <button class="btn small ghost" data-topic-analyze="${topic.id}">Analyze Again</button>
       <button class="btn small" data-topic-create-content="${topic.id}" ${isDuplicate ? "disabled" : ""}>${createLabel}</button>
       <button class="btn small ghost" data-topic-save-knowledge="${topic.id}">${knowledgeLabel}</button>
@@ -3282,7 +4043,7 @@ function renderKnowledgeBase() {
     </div>
     <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-knowledge>${item ? "保存知识" : "新增知识"}</button>${item ? `<button class="btn ghost" data-cancel-knowledge>取消</button>` : ""}</div>
   </div>
-  <div class="grid two">${KnowledgeStore.getAll().map(k => `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(k.title)}</h3><span class="chip">${escapeHtml(k.topic)}</span></div><div class="meta">来源：${escapeHtml(k.source)} · 关联内容：${k.linkedContentIds.length} · linkedTopicId：${escapeHtml(k.linkedTopicId || "—")}</div>${tagChips(k.tags)}<p>${escapeHtml(k.summary)}</p><div class="toolbar"><button class="btn small ghost" data-edit-knowledge="${k.id}">编辑</button><button class="btn small danger" data-remove-knowledge="${k.id}">删除</button></div></div>`).join("")}</div>`;
+  <div class="grid two">${KnowledgeStore.getAll().map(k => `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(k.title)}</h3><span class="chip">${escapeHtml(k.topic)}</span></div><div class="meta">来源：${escapeHtml(k.source)} · 关联内容：${k.linkedContentIds.length} · linkedTopicId：${escapeHtml(k.linkedTopicId || "—")} · linkedClusterId：${escapeHtml(k.linkedClusterId || "—")} · Sources：${k.sources?.length || 0}</div>${tagChips(k.tags)}<p>${escapeHtml(k.summary)}</p><div class="toolbar"><button class="btn small ghost" data-edit-knowledge="${k.id}">编辑</button><button class="btn small danger" data-remove-knowledge="${k.id}">删除</button></div></div>`).join("")}</div>`;
 }
 
 function renderSettings() {
@@ -3301,6 +4062,7 @@ function renderSettingsV2() {
   const githubConfig = normalizeGithubSourceConfig(db.settings?.githubSourceConfig);
   const githubStatus = normalizeSourceStatus(db.settings?.sourceStatus?.github || { sourceId: "github" });
   const githubCacheMs = SourceCacheStore.getRemainingMs("github");
+  const clusteringConfig = normalizeClusteringConfig(db.settings?.clusteringConfig);
   const keyState = rawConfig.apiKey ? "已配置" : "未配置";
   return `<div class="grid two">
     <div class="card">
@@ -3367,14 +4129,59 @@ function renderSettingsV2() {
       ${kv("最近错误", githubStatus.lastError || "—")}
     </div>
     ${renderFeedManager()}
+    ${renderClusteringSettings(clusteringConfig)}
     <div class="card"><h3>Storage Providers</h3><p>当前启用：<strong>${db.settings.provider}</strong></p><div class="mini-stack"><span class="chip">StorageProvider</span><span class="chip">LocalStorageProvider 已实现</span><span class="chip">SupabaseProvider placeholder</span></div></div>
     <div class="card"><h3>AI Capabilities</h3><p>所有生成行为通过统一 aiRouter；真实调用仅预留给 openai / zai / deepseek / custom。</p><div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>
-    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
+    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">Topic ${db.topics.length}</span><span class="chip">TopicCluster ${db.topicClusters.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
     <div class="card"><h3>后台配置</h3><textarea id="settingsNotes">${escapeHtml(db.settings.adminNotes)}</textarea><div class="toolbar" style="margin-top:12px"><button class="btn" data-save-settings>保存设置</button></div></div>
   </div>`;
 }
 
+function renderClusteringSettings(config) {
+  const numberInput = (id, label, value, min = 0, max = 100, step = 1) => `<div><label>${label}</label><input id="${id}" type="number" min="${min}" max="${max}" step="${step}" value="${escapeHtml(value)}" /></div>`;
+  return `<div class="card span-all">
+    <h3>Research Clustering 设置</h3>
+    <p>Phase 2.5 使用本地规则做多来源 Topic 聚类；真实 Source 接入后只需替换 Provider，不需要改 Research 页面。</p>
+    <div class="form-grid">
+      <div><label>启用自动聚类</label><select id="clusterEnabled"><option value="true" ${config.clusteringEnabled ? "selected" : ""}>启用</option><option value="false" ${!config.clusteringEnabled ? "selected" : ""}>关闭</option></select></div>
+      ${numberInput("clusterAutoThreshold", "自动归并阈值", config.autoClusterThreshold)}
+      ${numberInput("clusterReviewThreshold", "人工确认阈值", config.reviewThreshold)}
+      ${numberInput("clusterMaxGapDays", "最大发布时间间隔（天）", config.maxPublishTimeGapDays, 1, 30)}
+      ${numberInput("clusterMinReadySize", "Ready 最小 Topic 数", config.minimumClusterSizeForReady, 1, 10)}
+      ${numberInput("clusterTitleWeight", "Title Weight", config.titleWeight, 0, 10, .1)}
+      ${numberInput("clusterEntityWeight", "Entity Weight", config.entityWeight, 0, 10, .1)}
+      ${numberInput("clusterKeywordWeight", "Keyword Weight", config.keywordWeight, 0, 10, .1)}
+      ${numberInput("clusterTagWeight", "Tag Weight", config.tagWeight, 0, 10, .1)}
+      ${numberInput("clusterCategoryWeight", "Category Weight", config.categoryWeight, 0, 10, .1)}
+      ${numberInput("clusterTimeWeight", "Time Weight", config.timeWeight, 0, 10, .1)}
+    </div>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="btn" data-save-clustering-settings>保存聚类配置</button>
+      <button class="btn ghost" data-reset-clustering-settings>恢复默认</button>
+      <button class="btn ghost" data-settings-rebuild-clusters>重建 Clusters</button>
+    </div>
+    <div class="meta">当前：${TopicClusterStore.getAll().length} 个 Cluster，${TopicStore.getAll().filter(topic => topic.clusterId).length} 条 Topic 已聚类。</div>
+  </div>`;
+}
+
 function filteredGlobal() { return appState.filters.global ? ContentStore.search(appState.filters.global) : ContentStore.getAll(); }
+
+function collectClusteringConfig() {
+  return normalizeClusteringConfig({
+    clusteringEnabled: document.getElementById("clusterEnabled").value === "true",
+    autoClusterThreshold: document.getElementById("clusterAutoThreshold").value,
+    reviewThreshold: document.getElementById("clusterReviewThreshold").value,
+    maxPublishTimeGapDays: document.getElementById("clusterMaxGapDays").value,
+    minimumClusterSizeForReady: document.getElementById("clusterMinReadySize").value,
+    titleWeight: document.getElementById("clusterTitleWeight").value,
+    entityWeight: document.getElementById("clusterEntityWeight").value,
+    keywordWeight: document.getElementById("clusterKeywordWeight").value,
+    tagWeight: document.getElementById("clusterTagWeight").value,
+    categoryWeight: document.getElementById("clusterCategoryWeight").value,
+    timeWeight: document.getElementById("clusterTimeWeight").value,
+    updatedAt: now()
+  });
+}
 
 function collectGithubSourceConfig() {
   const current = normalizeGithubSourceConfig(db.settings?.githubSourceConfig);
@@ -3452,7 +4259,8 @@ function bindScopedInputs() {
   const bindings = [
     ["radarQuery", "radarQuery"], ["radarPlatform", "radarPlatform"], ["radarScore", "radarScore"], ["radarSort", "radarSort"],
     ["libraryQuery", "libraryQuery"], ["libraryStatus", "libraryStatus"], ["libraryPlatform", "libraryPlatform"], ["libraryTag", "libraryTag"],
-    ["researchSource", "researchSource"], ["researchSourceType", "researchSourceType"], ["researchCategory", "researchCategory"], ["researchSort", "researchSort"], ["researchDate", "researchDate"]
+    ["researchSource", "researchSource"], ["researchSourceType", "researchSourceType"], ["researchCategory", "researchCategory"], ["researchSort", "researchSort"], ["researchDate", "researchDate"],
+    ["clusterSourceCount", "clusterSourceCount"], ["clusterCategory", "clusterCategory"], ["clusterStatus", "clusterStatus"], ["clusterOfficial", "clusterOfficial"], ["clusterDate", "clusterDate"], ["clusterSort", "clusterSort"]
   ];
   bindings.forEach(([id, key]) => {
     const el = document.getElementById(id);
@@ -3597,7 +4405,111 @@ document.addEventListener("click", async event => {
     await TaskQueue.retry(task.id);
     return render();
   }
+  if (target.dataset.researchView) { appState.researchView = target.dataset.researchView; return render(); }
   if (target.dataset.selectTopic) { appState.selectedTopicId = target.dataset.selectTopic; return render(); }
+  if (target.dataset.openCluster) { appState.selectedClusterId = target.dataset.openCluster; appState.researchView = "clusters"; return render(); }
+  if (target.dataset.selectCluster) { appState.selectedClusterId = target.dataset.selectCluster; return render(); }
+  if (target.dataset.clusterTopic) {
+    const task = TaskQueue.add(TASK_TYPES.CLUSTER_TOPIC, { topicId: target.dataset.clusterTopic });
+    await TaskQueue.retry(task.id);
+    appState.selectedTopicId = target.dataset.clusterTopic;
+    return render();
+  }
+  if (target.dataset.clusterAll !== undefined) {
+    const task = TaskQueue.add(TASK_TYPES.CLUSTER_ALL_TOPICS, {});
+    await TaskQueue.retry(task.id);
+    return render();
+  }
+  if (target.dataset.rebuildClusters !== undefined) {
+    const task = TaskQueue.add(TASK_TYPES.REBUILD_CLUSTERS, {});
+    await TaskQueue.retry(task.id);
+    appState.selectedClusterId = null;
+    return render();
+  }
+  if (target.dataset.analyzeReadyClusters !== undefined) {
+    const task = TaskQueue.add(TASK_TYPES.ANALYZE_ALL_READY_CLUSTERS, {});
+    await TaskQueue.retry(task.id);
+    return render();
+  }
+  if (target.dataset.recalculateCluster) {
+    const task = TaskQueue.add(TASK_TYPES.RECALCULATE_CLUSTER, { clusterId: target.dataset.recalculateCluster });
+    await TaskQueue.retry(task.id);
+    appState.selectedClusterId = target.dataset.recalculateCluster;
+    return render();
+  }
+  if (target.dataset.analyzeCluster) {
+    const task = TaskQueue.add(TASK_TYPES.ANALYZE_CLUSTER, { clusterId: target.dataset.analyzeCluster });
+    await TaskQueue.retry(task.id);
+    appState.selectedClusterId = target.dataset.analyzeCluster;
+    return render();
+  }
+  if (target.dataset.convertCluster) {
+    const task = TaskQueue.add(TASK_TYPES.CONVERT_CLUSTER_TO_CONTENT, { clusterId: target.dataset.convertCluster });
+    await TaskQueue.retry(task.id);
+    appState.selectedClusterId = target.dataset.convertCluster;
+    const cluster = TopicClusterStore.getById(target.dataset.convertCluster);
+    if (cluster?.createdContentId) return setPage("workspace");
+    return render();
+  }
+  if (target.dataset.saveClusterKnowledge) {
+    const cluster = TopicClusterStore.getById(target.dataset.saveClusterKnowledge);
+    const task = TaskQueue.add(TASK_TYPES.SAVE_CLUSTER_TO_KNOWLEDGE, { clusterId: target.dataset.saveClusterKnowledge });
+    await TaskQueue.retry(task.id);
+    appState.selectedClusterId = target.dataset.saveClusterKnowledge;
+    const updated = TopicClusterStore.getById(target.dataset.saveClusterKnowledge);
+    if (cluster?.savedKnowledgeId && updated?.savedKnowledgeId) {
+      appState.editKnowledgeId = updated.savedKnowledgeId;
+      return setPage("knowledge");
+    }
+    return render();
+  }
+  if (target.dataset.archiveCluster) { TopicClusterStore.archive(target.dataset.archiveCluster); return render(); }
+  if (target.dataset.saveClusterMeta) {
+    TopicClusterStore.update(target.dataset.saveClusterMeta, {
+      title: document.getElementById("clusterTitleInput")?.value.trim() || "Untitled Cluster",
+      category: document.getElementById("clusterCategoryInput")?.value || "AI Product",
+      tags: splitTags(document.getElementById("clusterTagsInput")?.value || ""),
+      manualOverride: true
+    });
+    TopicClusterStore.recalculate(target.dataset.saveClusterMeta);
+    appState.selectedClusterId = target.dataset.saveClusterMeta;
+    return render();
+  }
+  if (target.dataset.setPrimaryTopic) {
+    const [clusterId, topicId] = target.dataset.setPrimaryTopic.split(":");
+    TopicClusterStore.update(clusterId, { primaryTopicId: topicId, manualOverride: true });
+    TopicClusterStore.recalculate(clusterId);
+    appState.selectedClusterId = clusterId;
+    return render();
+  }
+  if (target.dataset.removeTopicFromCluster) {
+    const [clusterId, topicId] = target.dataset.removeTopicFromCluster.split(":");
+    TopicClusterStore.removeTopic(clusterId, topicId);
+    TopicClusterStore.recalculate(clusterId);
+    appState.selectedClusterId = clusterId;
+    return render();
+  }
+  if (target.dataset.splitTopic) {
+    const cluster = TopicClusteringService.splitTopicFromCluster(target.dataset.splitTopic);
+    appState.selectedClusterId = cluster?.id || appState.selectedClusterId;
+    appState.researchView = "clusters";
+    return render();
+  }
+  if (target.dataset.addTopicToCluster) {
+    const topicId = document.getElementById("addTopicToCluster")?.value;
+    if (topicId) TopicClusteringService.addTopicToCluster(topicId, target.dataset.addTopicToCluster, 100, "人工加入 Cluster");
+    appState.selectedClusterId = target.dataset.addTopicToCluster;
+    return render();
+  }
+  if (target.dataset.mergeCluster) {
+    const sourceClusterId = document.getElementById("mergeClusterSelect")?.value;
+    if (sourceClusterId) {
+      const task = TaskQueue.add(TASK_TYPES.MERGE_CLUSTERS, { targetClusterId: target.dataset.mergeCluster, sourceClusterId });
+      await TaskQueue.retry(task.id);
+    }
+    appState.selectedClusterId = target.dataset.mergeCluster;
+    return render();
+  }
   if (target.dataset.topicProcessAll !== undefined) {
     const task = TaskQueue.add(TASK_TYPES.PROCESS_ALL_TOPICS, {});
     await TaskQueue.retry(task.id);
@@ -3790,6 +4702,24 @@ document.addEventListener("click", async event => {
     }
     await testAiConnection();
     return;
+  }
+  if (target.dataset.saveClusteringSettings !== undefined) {
+    db.settings.clusteringConfig = collectClusteringConfig();
+    saveDb();
+    return render();
+  }
+  if (target.dataset.resetClusteringSettings !== undefined) {
+    db.settings.clusteringConfig = normalizeClusteringConfig({});
+    saveDb();
+    return render();
+  }
+  if (target.dataset.settingsRebuildClusters !== undefined) {
+    db.settings.clusteringConfig = collectClusteringConfig();
+    saveDb();
+    const task = TaskQueue.add(TASK_TYPES.REBUILD_CLUSTERS, {});
+    await TaskQueue.retry(task.id);
+    appState.researchView = "clusters";
+    return render();
   }
   if (target.dataset.saveGithubSource !== undefined) {
     db.settings.githubSourceConfig = collectGithubSourceConfig();

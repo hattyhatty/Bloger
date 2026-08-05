@@ -254,6 +254,21 @@ label { display: block; margin-bottom: 7px; color: #735461; font-size: 13px; fon
 .status.scored { background: #b98131; }
 .status.converted { background: #15803d; }
 .status.failed { background: #c2415b; }
+.status.forming { background: #8b5cf6; }
+.status.ready { background: #0ea5e9; }
+.status.analyzed { background: #3867d6; }
+.status.analyzing { background: #0ea5e9; }
+
+.cluster-topic-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255,255,255,.8);
+  min-width: 0;
+}
+.cluster-topic-row > span { overflow-wrap: anywhere; }
 
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
 table { width: 100%; border-collapse: collapse; min-width: 760px; }
