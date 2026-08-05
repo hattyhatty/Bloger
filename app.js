@@ -235,11 +235,14 @@ const appState = {
   selectedContentId: null,
   editContentId: null,
   selectedTopicId: null,
+  selectedBriefDate: "",
   editPromptId: null,
   editKnowledgeId: null,
   editFeedSourceId: null,
   selectedClusterId: null,
   editPublishJobId: null,
+  isGeneratingBrief: false,
+  briefError: "",
   researchView: "topics",
   radarViewMode: "card",
   filters: {
@@ -273,6 +276,10 @@ const appState = {
 const uid = prefix => `${prefix}_${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(16).slice(2)}`;
 const now = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);
+const localDateString = (date = new Date()) => {
+  const d = date instanceof Date ? date : new Date(date);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 const clampScore = value => Math.max(0, Math.min(100, Number(value) || 0));
 const splitTags = value => String(value || "").split(/[,，\s]+/).map(item => item.trim()).filter(Boolean);
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
@@ -345,6 +352,15 @@ function normalizeContent(item = {}) {
     aiAnalysis: item.aiAnalysis || "",
     commentSummary: item.commentSummary || "",
     reviewNotes: item.reviewNotes || "",
+    body: item.body || "",
+    dailyBriefDate: item.dailyBriefDate || "",
+    dailyBriefId: item.dailyBriefId || "",
+    recommendedAngle: item.recommendedAngle || "",
+    recommendedHook: item.recommendedHook || "",
+    recommendedContentType: item.recommendedContentType || "",
+    recommendedPlatform: isTargetPlatform(item.recommendedPlatform) ? item.recommendedPlatform : "",
+    recommendationReason: item.recommendationReason || "",
+    recommendationPriority: item.recommendationPriority || "",
     copyrightStatus: item.copyrightStatus || "待检查",
     statusHistory: Array.isArray(item.statusHistory) ? item.statusHistory : [{ status: item.status || CONTENT_STATUS.DISCOVERED, at: createdAt, note: "初始化" }],
     createdAt,
@@ -473,6 +489,71 @@ function normalizeTopicCluster(item = {}) {
     analysisError: item.analysisError || "",
     createdAt,
     updatedAt: item.updatedAt || createdAt
+  };
+}
+
+function normalizeBriefStory(item = {}, rank = 1) {
+  return {
+    rank: Number(item.rank) || rank,
+    topicId: item.topicId || "",
+    clusterId: item.clusterId || "",
+    title: item.title || "",
+    source: item.source || "",
+    sourceUrl: item.sourceUrl || "",
+    isOfficialSource: Boolean(item.isOfficialSource),
+    publishedAt: item.publishedAt || "",
+    finalScore: clampScore(item.finalScore || 0),
+    whyImportant: item.whyImportant || "",
+    summaryZh: item.summaryZh || "",
+    suggestedAngle: item.suggestedAngle || "",
+    recommendedPlatforms: safeTargetPlatforms(item.recommendedPlatforms),
+    confidence: clampScore(item.confidence ?? 80)
+  };
+}
+
+function normalizeBriefRecommendation(item = {}) {
+  return {
+    topicId: item.topicId || "",
+    clusterId: item.clusterId || "",
+    title: item.title || "",
+    contentType: CONTENT_TYPES.includes(item.contentType) ? item.contentType : "短视频",
+    recommendedPlatform: isTargetPlatform(item.recommendedPlatform) ? item.recommendedPlatform : "小红书",
+    angle: item.angle || "",
+    hook: item.hook || "",
+    reason: item.reason || "",
+    priority: item.priority || "P2",
+    sourceUrl: item.sourceUrl || ""
+  };
+}
+
+function normalizeBriefWatchItem(item = {}) {
+  return {
+    topicId: item.topicId || "",
+    title: item.title || "",
+    source: item.source || "",
+    sourceUrl: item.sourceUrl || "",
+    reason: item.reason || "",
+    watchCondition: item.watchCondition || ""
+  };
+}
+
+function normalizeDailyBrief(item = {}) {
+  const date = item.date || localDateString();
+  const sourceTopicIds = Array.isArray(item.sourceTopicIds) ? [...new Set(item.sourceTopicIds.filter(Boolean))] : [];
+  return {
+    id: item.id || `brief_${date}`,
+    date,
+    generatedAt: item.generatedAt || now(),
+    generationMode: item.generationMode === "AI" ? "AI" : "FALLBACK",
+    headline: item.headline || "今日 AI 热点简报",
+    executiveSummary: item.executiveSummary || "",
+    topStories: (Array.isArray(item.topStories) ? item.topStories : []).slice(0, 5).map(normalizeBriefStory),
+    contentRecommendations: (Array.isArray(item.contentRecommendations) ? item.contentRecommendations : []).slice(0, 3).map(normalizeBriefRecommendation),
+    watchList: (Array.isArray(item.watchList) ? item.watchList : []).slice(0, 3).map(normalizeBriefWatchItem),
+    sourceTopicIds,
+    sourceCount: Number(item.sourceCount) || sourceTopicIds.length,
+    officialSourceCount: Number(item.officialSourceCount) || 0,
+    warnings: Array.isArray(item.warnings) ? [...new Set(item.warnings.filter(Boolean))] : []
   };
 }
 
@@ -777,10 +858,11 @@ function saveDb() {
 function migrateDatabase(raw) {
   const source = raw && raw.contentItems ? raw : createInitialData();
   const newDb = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     contentItems: [],
     topics: [],
     topicClusters: [],
+    dailyBriefs: [],
     generatedAssets: [],
     archivedGeneratedAssets: [],
     videoProjects: [],
@@ -819,6 +901,7 @@ function migrateDatabase(raw) {
   const existingSourceCache = Array.isArray(source.sourceCache) ? source.sourceCache : [];
   const existingFeedCache = Array.isArray(source.feedCache) ? source.feedCache : [];
   const existingClusters = Array.isArray(source.topicClusters) ? source.topicClusters : [];
+  const existingBriefs = Array.isArray(source.dailyBriefs) ? source.dailyBriefs : [];
 
   (source.contentItems || []).forEach(oldItem => {
     const content = normalizeContent(oldItem);
@@ -862,6 +945,7 @@ function migrateDatabase(raw) {
   existingSourceCache.forEach(item => newDb.sourceCache.push(normalizeSourceCache(item)));
   existingFeedCache.forEach(item => newDb.feedCache.push(normalizeFeedCache(item)));
   existingClusters.forEach(item => newDb.topicClusters.push(normalizeTopicCluster(item)));
+  existingBriefs.forEach(item => newDb.dailyBriefs.push(normalizeDailyBrief(item)));
   newDb.topics = existingTopics.map(normalizeTopic);
 
   newDb.promptTemplates = (source.promptTemplates || createMockPrompts()).map(normalizePrompt);
@@ -1406,6 +1490,301 @@ const ClusterPipeline = {
     const clustering = this.clusterPendingTopics();
     const recalculated = this.recalculateAllClusters();
     return { clustering, recalculated: recalculated.length };
+  }
+};
+
+const DAILY_BRIEF_DEFAULT_OPTIONS = Object.freeze({
+  lookbackHours: 72,
+  maxCandidates: 12,
+  maxTopStories: 5,
+  maxRecommendations: 3,
+  maxWatchList: 3,
+  maxSourceShare: 0.4,
+  minimumScore: 40
+});
+
+const DailyBriefStore = {
+  getAll() { return (db.dailyBriefs || []).map(normalizeDailyBrief).sort((a, b) => new Date(b.date) - new Date(a.date)); },
+  getByDate(date) { return this.getAll().find(brief => brief.date === date) || null; },
+  getLatest() { return this.getAll()[0] || null; },
+  save(brief) {
+    db.dailyBriefs = db.dailyBriefs || [];
+    const record = normalizeDailyBrief(brief);
+    const index = db.dailyBriefs.findIndex(item => item.date === record.date);
+    if (index >= 0) db.dailyBriefs[index] = record;
+    else db.dailyBriefs.unshift(record);
+    this.removeOldBriefs(false);
+    saveDb();
+    return record;
+  },
+  removeOldBriefs(shouldSave = true) {
+    db.dailyBriefs = (db.dailyBriefs || []).map(normalizeDailyBrief).sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 7);
+    if (shouldSave) saveDb();
+    return db.dailyBriefs;
+  }
+};
+
+const DailyBriefService = {
+  getOptions(options = {}) { return { ...DAILY_BRIEF_DEFAULT_OPTIONS, ...options }; },
+  getTopicTime(topic) {
+    const published = new Date(topic.publishedAt).getTime();
+    const updated = new Date(topic.updatedAt).getTime();
+    return Math.max(Number.isFinite(published) ? published : 0, Number.isFinite(updated) ? updated : 0);
+  },
+  isEligible(topic, minimumScore = DAILY_BRIEF_DEFAULT_OPTIONS.minimumScore) {
+    return topic && ![TOPIC_STATUS.DUPLICATE, TOPIC_STATUS.ARCHIVED, TOPIC_STATUS.FAILED].includes(topic.status) && topic.finalScore >= minimumScore;
+  },
+  betterRepresentative(a, b) {
+    const trust = { high: 3, normal: 2, low: 1 };
+    const completeness = topic => String(topic.rawText || topic.summary || topic.aiAnalysis || "").length;
+    return Number(Boolean(b.isOfficialSource)) - Number(Boolean(a.isOfficialSource)) ||
+      (trust[b.sourceTrustLevel] || 2) - (trust[a.sourceTrustLevel] || 2) ||
+      b.finalScore - a.finalScore ||
+      completeness(b) - completeness(a) ||
+      new Date(a.publishedAt) - new Date(b.publishedAt);
+  },
+  dedupeCandidates(topics) {
+    const selected = [];
+    const replaceOrSkip = candidate => {
+      const index = selected.findIndex(existing => {
+        if (candidate.clusterId && existing.clusterId && candidate.clusterId === existing.clusterId) return true;
+        if (candidate.canonicalUrl && existing.canonicalUrl && candidate.canonicalUrl === existing.canonicalUrl) return true;
+        if (candidate.contentHash && existing.contentHash && candidate.contentHash === existing.contentHash) return true;
+        const similarity = Math.round(TopicDeduplicator.similarity(TopicClusteringService.normalizeTitle(candidate.title), TopicClusteringService.normalizeTitle(existing.title)) * 100);
+        return similarity >= 85;
+      });
+      if (index < 0) return selected.push(candidate);
+      if (this.betterRepresentative(selected[index], candidate) > 0) selected[index] = candidate;
+      return selected.length;
+    };
+    topics.forEach(replaceOrSkip);
+    return selected;
+  },
+  rankCandidates(topics) {
+    const sourceCounts = topics.reduce((acc, topic) => ({ ...acc, [topic.source]: (acc[topic.source] || 0) + 1 }), {});
+    return topics.map(topic => {
+      const sourceTrustBonus = clampScore((topic.isOfficialSource ? 4 : 0) + (topic.sourceTrustLevel === "high" ? 1 : 0));
+      const analyzedBonus = topic.status === TOPIC_STATUS.ANALYZED || topic.analysisStatus === "analyzed" ? 3 : 0;
+      const sourceDiversityAdjustment = sourceCounts[topic.source] > 1 ? -Math.min(6, sourceCounts[topic.source] - 1) : 0;
+      const briefRankScore = clampScore(Math.round(topic.finalScore * .55 + topic.freshnessScore * .2 + sourceTrustBonus + analyzedBonus + sourceDiversityAdjustment));
+      return { ...topic, briefRankScore };
+    }).sort((a, b) =>
+      b.briefRankScore - a.briefRankScore ||
+      Number(b.isOfficialSource) - Number(a.isOfficialSource) ||
+      b.finalScore - a.finalScore
+    );
+  },
+  applySourceCap(ranked, options) {
+    const maxPerSource = Math.max(1, Math.floor(options.maxCandidates * options.maxSourceShare));
+    const counts = {};
+    const picked = [];
+    ranked.forEach(topic => {
+      if (picked.length >= options.maxCandidates) return;
+      if ((counts[topic.source] || 0) >= maxPerSource) return;
+      counts[topic.source] = (counts[topic.source] || 0) + 1;
+      picked.push(topic);
+    });
+    if (picked.length < Math.min(5, ranked.length)) {
+      ranked.forEach(topic => {
+        if (picked.length >= options.maxCandidates || picked.some(item => item.id === topic.id)) return;
+        picked.push(topic);
+      });
+    }
+    return picked.slice(0, options.maxCandidates);
+  },
+  selectCandidates(options = {}) {
+    const config = this.getOptions(options);
+    const nowMs = Date.now();
+    const base = TopicStore.getAll().filter(topic => this.isEligible(topic, config.minimumScore));
+    let warnings = [];
+    let scoped = base.filter(topic => (nowMs - this.getTopicTime(topic)) / 3600000 <= config.lookbackHours);
+    if (scoped.length < 5) {
+      scoped = base.filter(topic => (nowMs - this.getTopicTime(topic)) / 3600000 <= 24 * 7);
+      warnings.push("最近 72 小时热点不足，已扩大到最近 7 天。");
+    }
+    if (scoped.length < 5) {
+      scoped = base;
+      warnings.push("今日可用热点较少。");
+    }
+    const deduped = this.dedupeCandidates(scoped);
+    const ranked = this.rankCandidates(deduped);
+    const candidates = this.applySourceCap(ranked, config);
+    if (!candidates.length) warnings.push("暂时没有足够的热点数据。请先刷新 GitHub 或 Official Feed Source。");
+    if (new Set(candidates.map(topic => topic.source)).size < 2 && candidates.length > 1) warnings.push("来源数量不足。");
+    return { candidates, warnings, options: config };
+  },
+  topicSummary(topic) {
+    const analysisObject = typeof topic.aiAnalysis === "object" && topic.aiAnalysis ? topic.aiAnalysis : null;
+    const summary = analysisObject?.summaryZh || topic.summaryZh || topic.summary || String(topic.rawText || "").slice(0, 200);
+    const warnings = /[a-z]{4,}/i.test(summary) && !/[\u4e00-\u9fa5]/.test(summary) ? ["原始来源摘要，尚未生成中文分析"] : [];
+    return { summary, warnings };
+  },
+  defaultAngle(topic) {
+    const first = topic.suggestedAngles?.[0] || (typeof topic.aiAnalysis === "object" ? topic.aiAnalysis?.suggestedAngles?.[0] : "");
+    if (first) return first;
+    if (topic.category === "AI Coding") return "这个工具是否真的能提升开发效率";
+    if (topic.category === "AI Video") return "普通创作者能不能马上用起来";
+    if (topic.category === "AI Agent") return "Agent 从演示走向真实工作流了吗";
+    return "这件 AI 热点对中文用户意味着什么";
+  },
+  briefStoryFromTopic(topic, rank = 1) {
+    const { summary, warnings } = this.topicSummary(topic);
+    return {
+      rank,
+      topicId: topic.id,
+      clusterId: topic.clusterId || "",
+      title: topic.title,
+      source: topic.source,
+      sourceUrl: topic.canonicalUrl || topic.url,
+      isOfficialSource: topic.isOfficialSource,
+      publishedAt: topic.publishedAt,
+      finalScore: topic.finalScore,
+      whyImportant: topic.whyTrending || topic.scoreReason || "分数、热度和新鲜度综合靠前，适合今日关注。",
+      summaryZh: summary,
+      suggestedAngle: this.defaultAngle(topic),
+      recommendedPlatforms: safeTargetPlatforms(topic.recommendedPlatforms).length ? safeTargetPlatforms(topic.recommendedPlatforms) : ["小红书"],
+      confidence: topic.briefRankScore || topic.finalScore,
+      warnings
+    };
+  },
+  recommendationFromTopic(topic, priority = 1) {
+    const platform = safeTargetPlatforms(topic.recommendedPlatforms)[0] || "小红书";
+    const angle = this.defaultAngle(topic);
+    return {
+      topicId: topic.id,
+      clusterId: topic.clusterId || "",
+      title: topic.title,
+      contentType: platform === "小红书" ? "图文" : "短视频",
+      recommendedPlatform: platform,
+      angle,
+      hook: `海外都在讨论：${topic.title}`,
+      reason: topic.chinaFitScore >= 80 ? "中文平台适配度高，容易转成可理解的观点或教程。" : "热点分数靠前，适合做今日跟进内容。",
+      priority: `P${priority}`,
+      sourceUrl: topic.canonicalUrl || topic.url
+    };
+  },
+  validateAiBrief(raw, candidates, baseWarnings = []) {
+    const candidateMap = new Map(candidates.map(topic => [topic.id, topic]));
+    const seenIn = list => {
+      const seen = new Set();
+      return (Array.isArray(list) ? list : []).filter(item => {
+        const topic = candidateMap.get(item.topicId);
+        if (!topic || seen.has(item.topicId)) return false;
+        seen.add(item.topicId);
+        item.clusterId = topic.clusterId || "";
+        item.title = item.title || topic.title;
+        item.source = item.source || topic.source;
+        item.sourceUrl = topic.canonicalUrl || topic.url;
+        item.isOfficialSource = topic.isOfficialSource;
+        item.publishedAt = item.publishedAt || topic.publishedAt;
+        item.finalScore = topic.finalScore;
+        return true;
+      });
+    };
+    const topStories = seenIn(raw.topStories).slice(0, DAILY_BRIEF_DEFAULT_OPTIONS.maxTopStories).map((item, index) => normalizeBriefStory(item, index + 1));
+    const contentRecommendations = seenIn(raw.contentRecommendations).slice(0, DAILY_BRIEF_DEFAULT_OPTIONS.maxRecommendations).map(item => normalizeBriefRecommendation({ ...item, recommendedPlatform: safeTargetPlatforms([item.recommendedPlatform])[0] || safeTargetPlatforms(candidateMap.get(item.topicId)?.recommendedPlatforms)[0] || "小红书" }));
+    const watchList = seenIn(raw.watchList).slice(0, DAILY_BRIEF_DEFAULT_OPTIONS.maxWatchList).map(normalizeBriefWatchItem);
+    if (!topStories.length && !contentRecommendations.length && !watchList.length) throw new Error("AI Brief 校验后没有可用条目");
+    return normalizeDailyBrief({
+      date: localDateString(),
+      generatedAt: now(),
+      generationMode: "AI",
+      headline: raw.headline || "今日 AI 热点简报",
+      executiveSummary: raw.executiveSummary || "",
+      topStories,
+      contentRecommendations,
+      watchList,
+      sourceTopicIds: candidates.map(topic => topic.id),
+      sourceCount: candidates.length,
+      officialSourceCount: candidates.filter(topic => topic.isOfficialSource).length,
+      warnings: [...baseWarnings, ...(Array.isArray(raw.warnings) ? raw.warnings : [])]
+    });
+  },
+  async generateWithAI(candidates, warnings = []) {
+    const payload = candidates.map(topic => ({
+      id: topic.id,
+      title: topic.title,
+      source: topic.source,
+      isOfficialSource: topic.isOfficialSource,
+      publishedAt: topic.publishedAt,
+      finalScore: topic.finalScore,
+      summary: topic.summary,
+      aiAnalysis: topic.aiAnalysis,
+      suggestedAngles: topic.suggestedAngles,
+      recommendedPlatforms: topic.recommendedPlatforms,
+      canonicalUrl: topic.canonicalUrl || topic.url
+    }));
+    const prompt = `请基于以下 Topic 生成中文 Research Daily Brief，只返回 JSON。不得编造输入以外的信息，不得新增 Topic，不得修改来源链接；非官方来源不得包装成已确认事实。信息不足时写“目前信息有限”。\n返回结构：{\"headline\":\"\",\"executiveSummary\":\"\",\"topStories\":[],\"contentRecommendations\":[],\"watchList\":[],\"warnings\":[]}\n每条 topStories 必须包含 topicId、whyImportant、summaryZh、suggestedAngle、recommendedPlatforms、confidence。每条 contentRecommendations 必须包含 topicId、contentType、recommendedPlatform、angle、hook、reason、priority。每条 watchList 必须包含 topicId、reason、watchCondition。\n候选 Topic：\n${JSON.stringify(payload, null, 2)}`;
+    const text = await aiRouter.generateText(prompt, { task: "dailyBrief.generate", title: "Research Daily Brief", format: "Daily Brief JSON", systemPrompt: "你是 AI Content OS 的研究简报编辑。只输出 JSON，必须让每条内容 grounded 到输入 topicId。" });
+    const parsed = safeParseJSON(text, null);
+    if (!parsed) throw new Error("AI 返回不是合法 JSON");
+    return this.validateAiBrief(parsed, candidates, warnings);
+  },
+  generateFallback(candidates, warnings = []) {
+    const ranked = this.rankCandidates(candidates);
+    const summaryWarnings = [];
+    const topStories = ranked.slice(0, DAILY_BRIEF_DEFAULT_OPTIONS.maxTopStories).map((topic, index) => {
+      const story = this.briefStoryFromTopic(topic, index + 1);
+      summaryWarnings.push(...(story.warnings || []));
+      delete story.warnings;
+      return story;
+    });
+    const contentRecommendations = ranked.slice(0, DAILY_BRIEF_DEFAULT_OPTIONS.maxRecommendations).map((topic, index) => this.recommendationFromTopic(topic, index + 1));
+    const recommendedIds = new Set(contentRecommendations.map(item => item.topicId));
+    const watchList = ranked.filter(topic => !recommendedIds.has(topic.id)).slice(0, DAILY_BRIEF_DEFAULT_OPTIONS.maxWatchList).map(topic => ({
+      topicId: topic.id,
+      title: topic.title,
+      source: topic.source,
+      sourceUrl: topic.canonicalUrl || topic.url,
+      reason: topic.whyTrending || "热度仍在变化，适合继续观察。",
+      watchCondition: "如果后续出现官方确认、更多讨论或实测结果，再转入内容生产。"
+    }));
+    return normalizeDailyBrief({
+      date: localDateString(),
+      generatedAt: now(),
+      generationMode: "FALLBACK",
+      headline: "今日 AI 热点简报",
+      executiveSummary: topStories.length ? `今日筛选出 ${candidates.length} 条可用热点，优先关注：${topStories.slice(0, 3).map(item => item.title).join("、")}。` : "暂时没有足够的热点数据。",
+      topStories,
+      contentRecommendations,
+      watchList,
+      sourceTopicIds: candidates.map(topic => topic.id),
+      sourceCount: candidates.length,
+      officialSourceCount: candidates.filter(topic => topic.isOfficialSource).length,
+      warnings: [...warnings, "AI 不可用，当前简报由本地规则生成", ...summaryWarnings]
+    });
+  },
+  async generateToday(options = {}) {
+    const { candidates, warnings } = this.selectCandidates(options);
+    if (!candidates.length) {
+      const brief = this.generateFallback([], warnings);
+      return DailyBriefStore.save(brief);
+    }
+    try {
+      const brief = await this.generateWithAI(candidates, warnings);
+      return DailyBriefStore.save(brief);
+    } catch (error) {
+      const brief = this.generateFallback(candidates, [...warnings, "AI 生成失败，已使用本地规则生成简报。", error.message || String(error)]);
+      return DailyBriefStore.save(brief);
+    }
+  },
+  createContentFromRecommendation(briefId, topicId) {
+    const brief = DailyBriefStore.getAll().find(item => item.id === briefId) || DailyBriefStore.getLatest();
+    const recommendation = brief?.contentRecommendations.find(item => item.topicId === topicId);
+    const content = ResearchPipeline.convertToContent(topicId);
+    if (!content) return null;
+    ContentStore.update(content.id, {
+      dailyBriefDate: brief?.date || localDateString(),
+      dailyBriefId: brief?.id || "",
+      recommendedAngle: recommendation?.angle || "",
+      recommendedHook: recommendation?.hook || "",
+      recommendedContentType: recommendation?.contentType || "",
+      recommendedPlatform: recommendation?.recommendedPlatform || "",
+      recommendationReason: recommendation?.reason || "",
+      recommendationPriority: recommendation?.priority || ""
+    });
+    appState.selectedContentId = content.id;
+    return ContentStore.getById(content.id);
   }
 };
 
@@ -3122,6 +3501,8 @@ window.ClusterAnalysisService = ClusterAnalysisService;
 window.ClusterContentService = ClusterContentService;
 window.ClusterKnowledgeService = ClusterKnowledgeService;
 window.ClusterPipeline = ClusterPipeline;
+window.DailyBriefStore = DailyBriefStore;
+window.DailyBriefService = DailyBriefService;
 window.SourceCacheStore = SourceCacheStore;
 window.FeedCacheStore = FeedCacheStore;
 window.FeedSourceStore = FeedSourceStore;
@@ -3159,10 +3540,11 @@ window.TaskExecutor = TaskExecutor;
 // =========================
 function createInitialData() {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     contentItems: createMockContents(),
     topics: createMockTopics(),
     topicClusters: [],
+    dailyBriefs: [],
     generatedAssets: [],
     archivedGeneratedAssets: [],
     videoProjects: [],
@@ -3428,6 +3810,7 @@ function compactContentRow(item) {
 }
 
 function renderResearch() {
+  if (appState.researchView === "dailyBrief") return renderResearchDailyBrief();
   if (appState.researchView === "clusters") return renderResearchClusters();
   const filters = appState.filters;
   const topics = TopicStore.getFiltered({
@@ -3483,8 +3866,10 @@ function renderResearchViewToggle() {
   return `<div class="card toolbar">
     <button class="btn small ghost ${appState.researchView === "topics" ? "active" : ""}" data-research-view="topics">Topics</button>
     <button class="btn small ghost ${appState.researchView === "clusters" ? "active" : ""}" data-research-view="clusters">Clusters</button>
+    <button class="btn small ghost ${appState.researchView === "dailyBrief" ? "active" : ""}" data-research-view="dailyBrief">Daily Brief</button>
     <span class="chip">Topic ${TopicStore.getAll().length}</span>
     <span class="chip">Cluster ${TopicClusterStore.getAll().length}</span>
+    <span class="chip">Brief ${DailyBriefStore.getAll().length}</span>
     <span class="chip">Unclustered ${TopicStore.getAll().filter(topic => !topic.clusterId && topic.status !== TOPIC_STATUS.DUPLICATE && topic.status !== TOPIC_STATUS.ARCHIVED).length}</span>
   </div>`;
 }
@@ -3581,6 +3966,144 @@ function renderResearchClusters() {
       </aside>
     </div>
   `;
+}
+
+function renderResearchDailyBrief() {
+  const todayDate = localDateString();
+  if (!appState.selectedBriefDate) appState.selectedBriefDate = todayDate;
+  const selected = DailyBriefStore.getByDate(appState.selectedBriefDate) || DailyBriefStore.getLatest();
+  const candidatesPreview = DailyBriefService.selectCandidates();
+  const canGenerate = candidatesPreview.candidates.length > 0;
+  return `
+    ${renderSourceToolbar()}
+    ${renderResearchViewToggle()}
+    <div class="grid two">
+      <div class="card span-all">
+        <div class="item-head">
+          <div>
+            <h3>Research Daily Brief</h3>
+            <div class="meta">当前日期：${todayDate} · 使用浏览器本地日期</div>
+          </div>
+          <div class="toolbar">
+            <button class="btn" data-generate-daily-brief ${appState.isGeneratingBrief ? "disabled" : ""}>${DailyBriefStore.getByDate(todayDate) ? "重新生成" : "生成今日简报"}</button>
+            <button class="btn ghost" data-refresh-brief-view>刷新视图</button>
+          </div>
+        </div>
+        ${appState.isGeneratingBrief ? `<div class="empty">正在整理今日热点……</div>` : ""}
+        ${appState.briefError ? `<div class="empty">生成失败：${escapeHtml(appState.briefError)}</div>` : ""}
+        ${!canGenerate ? `<div class="empty">暂时没有足够的热点数据。请先刷新 GitHub 或 Official Feed Source。</div>` : ""}
+        <div class="chips">
+          <span class="chip">候选 Topic ${candidatesPreview.candidates.length}</span>
+          <span class="chip">官方来源 ${candidatesPreview.candidates.filter(topic => topic.isOfficialSource).length}</span>
+          <span class="chip">窗口 72h，不足自动扩展 7 天</span>
+        </div>
+        ${candidatesPreview.warnings.length ? `<div class="meta">${candidatesPreview.warnings.map(escapeHtml).join(" · ")}</div>` : ""}
+      </div>
+      <div class="card">
+        <h3>最近 7 天简报</h3>
+        <div class="mini-stack">
+          ${DailyBriefStore.getAll().map(brief => `<button class="topic-card ${brief.date === appState.selectedBriefDate ? "active" : ""}" data-select-brief-date="${brief.date}">
+            <div class="item-head"><strong>${brief.date}</strong><span class="chip">${brief.generationMode}</span></div>
+            <div class="meta">${brief.generatedAt ? new Date(brief.generatedAt).toLocaleString("zh-CN") : "—"} · Topic ${brief.sourceCount}</div>
+            <div>${escapeHtml(brief.headline)}</div>
+          </button>`).join("") || empty("还没有生成过简报。")}
+        </div>
+      </div>
+      <div class="card">
+        <h3>简报状态</h3>
+        ${selected ? `
+          ${kv("上次生成时间", selected.generatedAt ? new Date(selected.generatedAt).toLocaleString("zh-CN") : "—")}
+          ${kv("生成模式", selected.generationMode === "AI" ? "AI" : "本地规则")}
+          ${kv("本次使用 Topic 数量", selected.sourceCount)}
+          ${kv("官方来源数量", selected.officialSourceCount)}
+          <div class="divider"></div>
+          <strong>warnings</strong>
+          ${selected.warnings.length ? tagChips(selected.warnings) : `<div class="meta">—</div>`}
+        ` : empty("请选择或生成一份简报。")}
+      </div>
+      <div class="span-all">
+        ${selected ? renderDailyBriefDetail(selected) : empty("生成今日简报后，这里会显示今日重点摘要、Top Stories、内容建议和 Watch List。")}
+      </div>
+    </div>
+  `;
+}
+
+function renderDailyBriefDetail(brief) {
+  return `<div class="grid">
+    <div class="card">
+      <div class="item-head"><h3>${escapeHtml(brief.headline)}</h3><span class="chip">${brief.date}</span></div>
+      <p>${escapeHtml(brief.executiveSummary)}</p>
+    </div>
+    <div class="card">
+      <h3>Top Stories</h3>
+      <div class="mini-stack">
+        ${brief.topStories.length ? brief.topStories.map(story => renderBriefStoryCard(brief, story)).join("") : empty("暂无 Top Stories。")}
+      </div>
+    </div>
+    <div class="card">
+      <h3>今日内容建议</h3>
+      <div class="mini-stack">
+        ${brief.contentRecommendations.length ? brief.contentRecommendations.map(item => renderBriefRecommendationCard(brief, item)).join("") : empty("暂无内容建议。")}
+      </div>
+    </div>
+    <div class="card">
+      <h3>Watch List</h3>
+      <div class="mini-stack">
+        ${brief.watchList.length ? brief.watchList.map(item => renderBriefWatchCard(item)).join("") : empty("暂无 Watch List。")}
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderBriefStoryCard(brief, story) {
+  const topic = TopicStore.getById(story.topicId);
+  const sourceUrl = topic?.canonicalUrl || topic?.url || story.sourceUrl;
+  return `<div class="item-card card">
+    <div class="item-head"><h4 class="item-title">#${story.rank} ${escapeHtml(story.title)}</h4><span class="score">${story.finalScore}</span></div>
+    <div class="meta">${escapeHtml(story.source)} · ${story.isOfficialSource ? "官方来源" : "社区/第三方来源"} · ${story.publishedAt ? new Date(story.publishedAt).toLocaleString("zh-CN") : "—"}</div>
+    <p>${escapeHtml(story.summaryZh)}</p>
+    ${kv("Why Important", escapeHtml(story.whyImportant))}
+    ${kv("Suggested Angle", escapeHtml(story.suggestedAngle))}
+    ${tagChips(story.recommendedPlatforms)}
+    <div class="toolbar">
+      <button class="btn small ghost" data-brief-open-topic="${story.topicId}">打开 Topic</button>
+      <button class="btn small" data-brief-create-content="${brief.id}:${story.topicId}">Create Content</button>
+      <button class="btn small ghost" data-topic-save-knowledge="${story.topicId}">Save To Knowledge</button>
+      ${sourceUrl ? `<a class="btn small ghost" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">打开原始来源</a>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderBriefRecommendationCard(brief, item) {
+  const topic = TopicStore.getById(item.topicId);
+  const sourceUrl = topic?.canonicalUrl || topic?.url || item.sourceUrl;
+  const content = ContentStore.getAll().find(existing => existing.sourceTopicId === item.topicId);
+  return `<div class="item-card card">
+    <div class="item-head"><h4 class="item-title">${escapeHtml(item.title)}</h4><span class="chip">${escapeHtml(item.priority)}</span></div>
+    <div class="chips"><span class="chip">${escapeHtml(item.recommendedPlatform)}</span><span class="chip">${escapeHtml(item.contentType)}</span></div>
+    ${kv("Angle", escapeHtml(item.angle))}
+    ${kv("Hook", escapeHtml(item.hook))}
+    ${kv("Reason", escapeHtml(item.reason))}
+    <div class="toolbar">
+      <button class="btn small" data-brief-create-content="${brief.id}:${item.topicId}">${content ? "打开已有 Content" : "Create Content"}</button>
+      <button class="btn small ghost" data-brief-open-topic="${item.topicId}">打开 Topic</button>
+      ${sourceUrl ? `<a class="btn small ghost" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">打开来源</a>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderBriefWatchCard(item) {
+  const topic = TopicStore.getById(item.topicId);
+  const sourceUrl = topic?.canonicalUrl || topic?.url || item.sourceUrl;
+  return `<div class="item-card card">
+    <div class="item-head"><h4 class="item-title">${escapeHtml(item.title)}</h4><span class="chip">${escapeHtml(item.source)}</span></div>
+    ${kv("Reason", escapeHtml(item.reason))}
+    ${kv("Watch Condition", escapeHtml(item.watchCondition))}
+    <div class="toolbar">
+      <button class="btn small ghost" data-brief-open-topic="${item.topicId}">打开 Topic</button>
+      ${sourceUrl ? `<a class="btn small ghost" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">打开来源</a>` : ""}
+    </div>
+  </div>`;
 }
 
 function renderClusterCard(cluster) {
@@ -4132,7 +4655,7 @@ function renderSettingsV2() {
     ${renderClusteringSettings(clusteringConfig)}
     <div class="card"><h3>Storage Providers</h3><p>当前启用：<strong>${db.settings.provider}</strong></p><div class="mini-stack"><span class="chip">StorageProvider</span><span class="chip">LocalStorageProvider 已实现</span><span class="chip">SupabaseProvider placeholder</span></div></div>
     <div class="card"><h3>AI Capabilities</h3><p>所有生成行为通过统一 aiRouter；真实调用仅预留给 openai / zai / deepseek / custom。</p><div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>
-    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">Topic ${db.topics.length}</span><span class="chip">TopicCluster ${db.topicClusters.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
+    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">Topic ${db.topics.length}</span><span class="chip">TopicCluster ${db.topicClusters.length}</span><span class="chip">DailyBrief ${db.dailyBriefs?.length || 0}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
     <div class="card"><h3>后台配置</h3><textarea id="settingsNotes">${escapeHtml(db.settings.adminNotes)}</textarea><div class="toolbar" style="margin-top:12px"><button class="btn" data-save-settings>保存设置</button></div></div>
   </div>`;
 }
@@ -4406,6 +4929,37 @@ document.addEventListener("click", async event => {
     return render();
   }
   if (target.dataset.researchView) { appState.researchView = target.dataset.researchView; return render(); }
+  if (target.dataset.generateDailyBrief !== undefined) {
+    appState.isGeneratingBrief = true;
+    appState.briefError = "";
+    render();
+    try {
+      const brief = await DailyBriefService.generateToday();
+      appState.selectedBriefDate = brief.date;
+    } catch (error) {
+      appState.briefError = error.message || String(error);
+    } finally {
+      appState.isGeneratingBrief = false;
+    }
+    return render();
+  }
+  if (target.dataset.refreshBriefView !== undefined) return render();
+  if (target.dataset.selectBriefDate) { appState.selectedBriefDate = target.dataset.selectBriefDate; return render(); }
+  if (target.dataset.briefOpenTopic) {
+    appState.selectedTopicId = target.dataset.briefOpenTopic;
+    appState.researchView = "topics";
+    return render();
+  }
+  if (target.dataset.briefCreateContent) {
+    const [briefId, topicId] = target.dataset.briefCreateContent.split(":");
+    try {
+      const content = DailyBriefService.createContentFromRecommendation(briefId, topicId);
+      if (content) return setPage("workspace");
+    } catch (error) {
+      appState.briefError = error.message || String(error);
+    }
+    return render();
+  }
   if (target.dataset.selectTopic) { appState.selectedTopicId = target.dataset.selectTopic; return render(); }
   if (target.dataset.openCluster) { appState.selectedClusterId = target.dataset.openCluster; appState.researchView = "clusters"; return render(); }
   if (target.dataset.selectCluster) { appState.selectedClusterId = target.dataset.selectCluster; return render(); }
