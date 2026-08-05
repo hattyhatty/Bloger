@@ -769,6 +769,31 @@ function normalizeAnalyticsRecord(item = {}) {
   };
 }
 
+function normalizeExperience(item = {}) {
+  const createdAt = item.createdAt || now();
+  return {
+    id: item.id || uid("experience"),
+    publishJobId: item.publishJobId || "",
+    analyticsRecordId: item.analyticsRecordId || "",
+    contentId: item.contentId || "",
+    contentTitle: item.contentTitle || "",
+    platform: CONTENT_STUDIO_PLATFORMS.includes(item.platform) ? item.platform : "抖音",
+    contentType: item.contentType || "口播稿",
+    topicCategory: item.topicCategory || "海外 AI 热点",
+    topicId: item.topicId || "",
+    performanceResult: item.performanceResult || "",
+    effectivePractices: Array.isArray(item.effectivePractices) ? item.effectivePractices : splitTags(item.effectivePractices),
+    improvements: Array.isArray(item.improvements) ? item.improvements : splitTags(item.improvements),
+    titleStyle: item.titleStyle || "",
+    hookStyle: item.hookStyle || "",
+    reviewSummary: item.reviewSummary || "",
+    sourceMetrics: item.sourceMetrics || {},
+    reviewedAt: item.reviewedAt || now(),
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+}
+
 function normalizeTask(item = {}) {
   const createdAt = item.createdAt || now();
   return {
@@ -1011,6 +1036,7 @@ function migrateDatabase(raw) {
     videoProjects: [],
     publishJobs: [],
     analyticsRecords: [],
+    experienceItems: [],
     tasks: [],
     sourceCache: [],
     feedCache: [],
@@ -1040,6 +1066,7 @@ function migrateDatabase(raw) {
   const existingVideoProjects = Array.isArray(source.videoProjects) ? source.videoProjects : [];
   const existingJobs = Array.isArray(source.publishJobs) ? source.publishJobs : [];
   const existingAnalytics = Array.isArray(source.analyticsRecords) ? source.analyticsRecords : [];
+  const existingExperiences = Array.isArray(source.experienceItems) ? source.experienceItems : [];
   const existingTasks = Array.isArray(source.tasks) ? source.tasks : [];
   const existingSourceCache = Array.isArray(source.sourceCache) ? source.sourceCache : [];
   const existingFeedCache = Array.isArray(source.feedCache) ? source.feedCache : [];
@@ -1084,6 +1111,7 @@ function migrateDatabase(raw) {
   });
   existingJobs.forEach(item => newDb.publishJobs.push(normalizePublishJob(item)));
   existingAnalytics.forEach(item => newDb.analyticsRecords.push(normalizeAnalyticsRecord(item)));
+  existingExperiences.forEach(item => newDb.experienceItems.push(normalizeExperience(item)));
   existingTasks.forEach(item => newDb.tasks.push(normalizeTask(item)));
   existingSourceCache.forEach(item => newDb.sourceCache.push(normalizeSourceCache(item)));
   existingFeedCache.forEach(item => newDb.feedCache.push(normalizeFeedCache(item)));
@@ -1169,6 +1197,7 @@ const ContentStore = {
     db.videoProjects = db.videoProjects.filter(item => item.contentId !== id);
     db.publishJobs = db.publishJobs.filter(item => item.contentId !== id);
     db.analyticsRecords = db.analyticsRecords.filter(item => item.contentId !== id);
+    db.experienceItems = (db.experienceItems || []).filter(item => item.contentId !== id);
     if (appState.selectedContentId === id) appState.selectedContentId = db.contentItems[0]?.id || null;
     saveDb();
   },
@@ -2943,6 +2972,22 @@ const AnalyticsStore = {
   }
 };
 
+const ExperienceStore = {
+  ...createCrudStore("experienceItems", normalizeExperience),
+  findDuplicate({ publishJobId, contentId, platform, contentType }) {
+    return this.getAll().find(item =>
+      (publishJobId && item.publishJobId === publishJobId) ||
+      (item.contentId === contentId && item.platform === platform && item.contentType === contentType)
+    ) || null;
+  },
+  upsertExperience(payload) {
+    const record = normalizeExperience(payload);
+    const existing = this.findDuplicate(record);
+    if (existing) return this.update(existing.id, { ...record, id: existing.id, createdAt: existing.createdAt });
+    return this.create(record);
+  }
+};
+
 const AnalyticsService = {
   publishedJobs() { return PublishJobStore.getAll().filter(job => job.status === PUBLISH_STATUS.PUBLISHED); },
   enrichedRecords() {
@@ -3136,6 +3181,169 @@ const TrackingService = {
       aiPerformanceReview: aiReview,
       aiPerformanceReviewUpdatedAt: aiReview ? now() : record.aiPerformanceReviewUpdatedAt
     });
+  }
+};
+
+const LearningService = {
+  enrichedRecordByJob(jobId) {
+    return AnalyticsService.enrichedRecords().find(record => record.publishJobId === jobId) || null;
+  },
+  categoryFor(record) {
+    return record.topic?.category || record.content?.topic || record.content?.tags?.[0] || "海外 AI 热点";
+  },
+  latestCompletedMetrics(record) {
+    const done = TrackingService.completedCheckpoints(record);
+    return done.length ? done[done.length - 1].metrics : normalizeTrackingMetrics(record);
+  },
+  hasTrackingData(record) {
+    return Boolean(record?.trackingStartedAt && TrackingService.completedCheckpoints(record).length);
+  },
+  benchmark(record) {
+    const peers = AnalyticsService.enrichedRecords().filter(item => item.id !== record.id && item.platform === record.platform && item.views > 0);
+    if (!peers.length) return { avgEngagementRate: 0, avgSaveRate: 0, avgShareRate: 0, avgCommentRate: 0, count: 0 };
+    const avg = key => Number((peers.reduce((sum, item) => sum + (Number(item[key]) || 0), 0) / peers.length).toFixed(2));
+    return { avgEngagementRate: avg("engagementRate"), avgSaveRate: avg("saveRate"), avgShareRate: avg("shareRate"), avgCommentRate: avg("commentRate"), count: peers.length };
+  },
+  buildLocalReview(record) {
+    if (!this.hasTrackingData(record)) {
+      return { summary: "暂无足够追踪数据生成复盘。请至少完成一个检查点。", effectivePractices: [], improvements: [], performanceResult: "数据不足", titleStyle: "", hookStyle: "" };
+    }
+    const metrics = this.latestCompletedMetrics(record);
+    const benchmark = this.benchmark(record);
+    const strong = [];
+    const weak = [];
+    [
+      ["互动率", metrics.engagementRate, benchmark.avgEngagementRate || 8],
+      ["收藏率", metrics.saveRate, benchmark.avgSaveRate || 3],
+      ["分享率", metrics.shareRate, benchmark.avgShareRate || 1.5],
+      ["评论率", metrics.commentRate, benchmark.avgCommentRate || 1]
+    ].forEach(([label, value, base]) => {
+      if (value >= base * 1.15) strong.push(`${label}表现突出（${value}%）`);
+      if (value > 0 && value < base * .7) weak.push(`${label}低于参考水平（${value}%）`);
+    });
+    const content = record.content || ContentStore.getById(record.contentId);
+    const title = record.job?.titleSnapshot || content?.draftTitle || content?.title || "";
+    const hook = content?.draftHook || content?.recommendedHook || "";
+    const titleStyle = title.includes("？") || title.includes("?") ? "问题式标题" : title.length <= 18 ? "短标题直给" : "信息密度型标题";
+    const hookStyle = /为什么|怎么|如何|突然|正在|爆火/.test(hook) ? "趋势解释型 Hook" : hook ? "观点切入型 Hook" : "未记录 Hook";
+    const effectivePractices = [...strong, strong.length ? `${record.platform} · ${record.contentType} 适配有效` : "", titleStyle, hookStyle].filter(Boolean).slice(0, 5);
+    const improvements = [
+      ...weak,
+      weak.length ? "下一次优先优化低于平均的互动动作设计" : "",
+      metrics.views < 500 ? "曝光偏低，建议复盘发布时间、标题清晰度和首屏 Hook" : "",
+      metrics.saveRate < metrics.shareRate ? "收藏动机不够明确，可增加清单、步骤或可复用结论" : ""
+    ].filter(Boolean).slice(0, 5);
+    const performanceResult = `${metrics.views} views · ER ${metrics.engagementRate}% · Save ${metrics.saveRate}% · Share ${metrics.shareRate}%`;
+    const summary = [
+      `表现结果：${performanceResult}。`,
+      strong.length ? `表现较好：${strong.join("、")}。` : "暂未发现明显高于参考水平的指标。",
+      weak.length ? `低于平均：${weak.join("、")}。` : "暂未发现明显低于参考水平的指标。",
+      `可能影响：${titleStyle}、${hookStyle} 与 ${record.contentType} 在 ${record.platform} 的适配共同影响表现。`,
+      effectivePractices.length ? `下次保留：${effectivePractices.join("；")}。` : "下次保留：继续保留来源链接和明确观点。",
+      improvements.length ? `下次调整：${improvements.join("；")}。` : "下次调整：继续积累更多数据后再判断。"
+    ].join("\n");
+    return { summary, effectivePractices, improvements, performanceResult, titleStyle, hookStyle };
+  },
+  async generateReview(jobId) {
+    const record = this.enrichedRecordByJob(jobId);
+    if (!record) throw new Error("找不到 Analytics 记录");
+    const local = this.buildLocalReview(record);
+    let aiSummary = "";
+    const enoughData = this.hasTrackingData(record) && TrackingService.completedCheckpoints(record).length >= 2;
+    if (enoughData && !getAiFallbackReason()) {
+      try {
+        aiSummary = await routeAiText(`请只基于以下真实追踪数据，生成简短中文内容复盘。不要虚构平台数据，不要自动改写、批准或发布内容。\n标题：${record.title}\n平台：${record.platform}\n内容形式：${record.contentType}\nTopic 分类：${this.categoryFor(record)}\n检查点：${JSON.stringify(record.checkpoints)}\n本地复盘：${local.summary}`, {
+          task: "learning.performanceReview",
+          format: "内容经验复盘",
+          title: record.title
+        });
+      } catch {
+        aiSummary = "";
+      }
+    }
+    return AnalyticsStore.upsertForJob(jobId, {
+      performanceAnalysis: local.summary,
+      performanceAnalysisUpdatedAt: now(),
+      aiPerformanceReview: aiSummary || record.aiPerformanceReview,
+      aiPerformanceReviewUpdatedAt: aiSummary ? now() : record.aiPerformanceReviewUpdatedAt
+    });
+  },
+  saveExperience(jobId) {
+    const record = this.enrichedRecordByJob(jobId);
+    if (!record || !this.hasTrackingData(record)) throw new Error("请先完成追踪数据并生成复盘");
+    const local = this.buildLocalReview(record);
+    const content = record.content || ContentStore.getById(record.contentId);
+    const topic = record.topic || (content?.sourceTopicId ? TopicStore.getById(content.sourceTopicId) : null);
+    return ExperienceStore.upsertExperience({
+      publishJobId: record.publishJobId,
+      analyticsRecordId: record.id,
+      contentId: record.contentId,
+      contentTitle: record.title,
+      platform: record.platform,
+      contentType: record.contentType,
+      topicCategory: topic?.category || this.categoryFor(record),
+      topicId: topic?.id || content?.sourceTopicId || "",
+      performanceResult: local.performanceResult,
+      effectivePractices: local.effectivePractices,
+      improvements: local.improvements,
+      titleStyle: local.titleStyle,
+      hookStyle: local.hookStyle,
+      reviewSummary: record.performanceAnalysis || local.summary,
+      sourceMetrics: {
+        views: record.views,
+        likes: record.likes,
+        comments: record.comments,
+        shares: record.shares,
+        saves: record.saves,
+        followersGained: record.followersGained,
+        engagementRate: record.engagementRate,
+        saveRate: record.saveRate,
+        shareRate: record.shareRate,
+        commentRate: record.commentRate
+      },
+      reviewedAt: now()
+    });
+  },
+  referencesForContent(contentId, platform = "") {
+    const content = ContentStore.getById(contentId);
+    if (!content) return { highPlatform: [], sameCategory: [], titleHooks: [], avoid: [], topicCategory: "" };
+    const selectedPlatform = CONTENT_STUDIO_PLATFORMS.includes(platform) ? platform : content.studioPlatform;
+    const topicCategory = content.sourceTopicId ? TopicStore.getById(content.sourceTopicId)?.category : content.topic;
+    const experiences = ExperienceStore.getAll();
+    const highPlatform = experiences
+      .filter(item => item.platform === selectedPlatform && Number(item.sourceMetrics?.engagementRate) > 0)
+      .sort((a, b) => Number(b.sourceMetrics?.engagementRate) - Number(a.sourceMetrics?.engagementRate))
+      .slice(0, 3);
+    const sameCategory = experiences
+      .filter(item => item.topicCategory === topicCategory)
+      .sort((a, b) => Number(b.sourceMetrics?.views) - Number(a.sourceMetrics?.views))
+      .slice(0, 3);
+    const titleHooks = [...new Set([...highPlatform, ...sameCategory].flatMap(item => [item.titleStyle, item.hookStyle]).filter(Boolean))].slice(0, 4);
+    const avoid = [...new Set([...highPlatform, ...sameCategory].flatMap(item => item.improvements || []).filter(Boolean))].slice(0, 4);
+    return { highPlatform, sameCategory, titleHooks, avoid, topicCategory: topicCategory || "海外 AI 热点" };
+  },
+  analyticsInsights(records) {
+    if (!records.length) return ["暂无足够数据。"];
+    const categoryGroups = records.reduce((acc, record) => {
+      const category = this.categoryFor(record);
+      acc[category] = acc[category] || { name: category, views: 0, engagement: 0, count: 0 };
+      acc[category].views += record.views;
+      acc[category].engagement += record.likes + record.comments + record.shares + record.saves;
+      acc[category].count += 1;
+      return acc;
+    }, {});
+    const bestCategory = Object.values(categoryGroups).map(item => ({ ...item, engagementRate: item.views ? Number((item.engagement / item.views * 100).toFixed(2)) : 0 })).sort((a, b) => b.engagementRate - a.engagementRate || b.views - a.views)[0];
+    const bestPlatform = AnalyticsService.bestGroup(records, "platform");
+    const bestFormat = AnalyticsService.bestGroup(records, "contentType");
+    const highSave = records.filter(record => record.saveRate >= 3).sort((a, b) => b.saveRate - a.saveRate).slice(0, 3);
+    const highShare = records.filter(record => record.shareRate >= 1.5).sort((a, b) => b.shareRate - a.shareRate).slice(0, 3);
+    const lines = [];
+    if (bestCategory) lines.push(`表现最好的 Topic 分类：${bestCategory.name}（ER ${bestCategory.engagementRate}%）。`);
+    if (bestPlatform) lines.push(`表现最好的平台：${bestPlatform.name}（ER ${bestPlatform.engagementRate}%）。`);
+    if (bestFormat) lines.push(`表现最好的内容形式：${bestFormat.name}（ER ${bestFormat.engagementRate}%）。`);
+    lines.push(highSave.length ? `高收藏内容共同特点：${highSave.map(record => record.content?.draftHook || record.title).filter(Boolean).slice(0, 2).join("；")}。` : "高收藏内容共同特点：暂无足够数据。");
+    lines.push(highShare.length ? `高分享内容共同特点：${highShare.map(record => record.title).join("；")}。` : "高分享内容共同特点：暂无足够数据。");
+    return lines;
   }
 };
 
@@ -4211,6 +4419,8 @@ window.PublishJobStore = PublishJobStore;
 window.PublishingService = PublishingService;
 window.AnalyticsStore = AnalyticsStore;
 window.AnalyticsService = AnalyticsService;
+window.ExperienceStore = ExperienceStore;
+window.LearningService = LearningService;
 window.PromptStore = PromptStore;
 window.KnowledgeStore = KnowledgeStore;
 window.TaskQueue = TaskQueue;
@@ -4245,6 +4455,7 @@ function createInitialData() {
     videoProjects: [],
     publishJobs: [],
     analyticsRecords: [],
+    experienceItems: [],
     tasks: [],
     sourceCache: [],
     feedCache: [],
@@ -5113,6 +5324,7 @@ function renderWorkspace() {
   const draft = ContentStudioService.getDraft(content.id);
   const sourceTopic = content.sourceTopicId ? TopicStore.getById(content.sourceTopicId) : null;
   const sourceCluster = content.sourceClusterId ? TopicClusterStore.getById(content.sourceClusterId) : null;
+  const learningRefs = LearningService.referencesForContent(content.id, draft.platform);
   return `<div class="card toolbar">
       <select id="workspaceSelect">${ContentStore.getAll().map(item => `<option value="${item.id}" ${item.id === content.id ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}</select>
       <button class="btn ghost" data-analyze="${content.id}">AI 分析</button>
@@ -5185,6 +5397,9 @@ function renderWorkspace() {
         ${kv("Approval Status", `${approvalStatusPill(content.approvalStatus)} ${ApprovalService.isModifiedAfterApproval(content) ? "<span class=\"chip\">批准后已修改</span>" : ""}`)}
         ${kv("Approved At", content.approvedAt ? new Date(content.approvedAt).toLocaleString("zh-CN") : "—")}
         <div class="divider"></div>
+        <h3>历史表现参考</h3>
+        ${renderLearningReferences(learningRefs)}
+        <div class="divider"></div>
         <h3>加入发布队列</h3>
         <div class="form-grid single">
           <div><label>计划发布时间</label><input id="studioPublishAt" type="datetime-local" value="${defaultScheduleTime()}" /></div>
@@ -5206,6 +5421,29 @@ function renderWorkspace() {
         ${renderAssetGroup("B站", assets, [ASSET_TYPES.BILIBILI_SCRIPT, ASSET_TYPES.VIDEO_STORYBOARD, ASSET_TYPES.COVER_TITLE])}
       </div>
     </div>`;
+}
+
+function renderLearningReferences(refs) {
+  const platformItems = refs.highPlatform || [];
+  const categoryItems = refs.sameCategory || [];
+  const hasData = platformItems.length || categoryItems.length || refs.titleHooks?.length || refs.avoid?.length;
+  if (!hasData) return empty("暂无足够历史经验。生成内容时不会自动修改正文，只在这里提供参考。");
+  return `<div class="mini-stack">
+    <div class="meta">只作为创作参考，不会自动写入标题、Hook 或正文。</div>
+    <strong>同平台高表现内容</strong>
+    ${platformItems.length ? platformItems.map(item => `<div class="experience-card">
+      <div class="item-head"><span>${escapeHtml(item.contentTitle)}</span><span class="score">${Number(item.sourceMetrics?.engagementRate) || 0}% ER</span></div>
+      <div class="meta">${escapeHtml(item.platform)} · ${escapeHtml(item.contentType)} · ${escapeHtml(item.performanceResult)}</div>
+      ${tagChips((item.effectivePractices || []).slice(0, 3))}
+    </div>`).join("") : empty("暂无同平台高表现内容。")}
+    <strong>同 Topic 分类历史表现：${escapeHtml(refs.topicCategory || "—")}</strong>
+    ${categoryItems.length ? categoryItems.map(item => `<div class="experience-card">
+      <div class="item-head"><span>${escapeHtml(item.contentTitle)}</span><span class="chip">${escapeHtml(item.topicCategory)}</span></div>
+      <div class="meta">${escapeHtml(item.performanceResult)}</div>
+    </div>`).join("") : empty("暂无同分类经验。")}
+    ${refs.titleHooks?.length ? kv("推荐参考的标题 / Hook 风格", tagChips(refs.titleHooks)) : ""}
+    ${refs.avoid?.length ? kv("需要避免的问题", tagChips(refs.avoid)) : ""}
+  </div>`;
 }
 
 function renderAssetGroup(platform, assets, types) {
@@ -5461,9 +5699,33 @@ function renderAnalytics() {
       ${summary.topContent ? kv("表现最好的内容", `${escapeHtml(summary.topContent.title)} · ${summary.topContent.views} views`) : ""}
     </div>
   </div>
+  <div class="grid two">
+    <div class="card">
+      <h3>Performance Learning Loop</h3>
+      <div class="mini-stack">${LearningService.analyticsInsights(records).map(line => `<div class="empty">${escapeHtml(line)}</div>`).join("")}</div>
+    </div>
+    <div class="card">
+      <div class="item-head"><h3>Experience Library</h3><span class="chip">${ExperienceStore.getAll().length} 条经验</span></div>
+      <div class="mini-stack">${ExperienceStore.getAll().slice(0, 8).map(renderExperienceCard).join("") || empty("暂无经验。请先在已追踪的 Published 内容上生成复盘并保存经验。")}</div>
+    </div>
+  </div>
   <div class="card">
     <h3>内容表现列表</h3>
     <div class="mini-stack">${records.map(renderAnalyticsRecordCard).join("") || empty("当前筛选条件下暂无表现数据。")}</div>
+  </div>`;
+}
+
+function renderExperienceCard(item) {
+  return `<div class="experience-card">
+    <div class="item-head"><strong>${escapeHtml(item.contentTitle)}</strong><span class="score">${Number(item.sourceMetrics?.engagementRate) || 0}% ER</span></div>
+    <div class="meta">${escapeHtml(item.platform)} · ${escapeHtml(item.contentType)} · ${escapeHtml(item.topicCategory)} · ${item.reviewedAt ? new Date(item.reviewedAt).toLocaleString("zh-CN") : "—"}</div>
+    ${item.performanceResult ? `<div class="meta">${escapeHtml(item.performanceResult)}</div>` : ""}
+    ${item.effectivePractices?.length ? kv("有效做法", tagChips(item.effectivePractices)) : ""}
+    ${item.improvements?.length ? kv("需要改进", tagChips(item.improvements)) : ""}
+    <div class="toolbar">
+      ${item.contentId ? `<button class="btn small ghost" data-open-workspace="${item.contentId}">打开 Content</button>` : ""}
+      ${item.publishJobId ? `<button class="btn small ghost" data-open-analytics-publish="${item.publishJobId}">返回 Publishing</button>` : ""}
+    </div>
   </div>`;
 }
 
@@ -5483,6 +5745,7 @@ function renderAnalyticsRecordCard(record) {
     ${record.aiPerformanceReview ? `<pre class="note-block">${escapeHtml(record.aiPerformanceReview)}</pre>` : ""}
     <div class="meta">原 Content：${escapeHtml(record.content?.title || "—")} · 原 Topic：${escapeHtml(record.topic?.title || "—")}</div>
     <div class="toolbar">
+      ${record.trackingStartedAt ? `<button class="btn small ghost" data-generate-learning-review="${record.publishJobId}">生成复盘</button><button class="btn small ghost" data-save-experience="${record.publishJobId}">保存经验</button>` : ""}
       ${record.job ? `<button class="btn small ghost" data-open-analytics-publish="${record.job.id}">返回 Publishing</button>` : ""}
       ${record.content ? `<button class="btn small ghost" data-open-workspace="${record.content.id}">返回 Content Studio</button>` : ""}
     </div>
@@ -5527,7 +5790,7 @@ function renderSettings() {
   return `<div class="grid two">
     <div class="card"><h3>Storage Providers</h3><p>当前启用：<strong>${db.settings.provider}</strong></p><div class="mini-stack"><span class="chip">StorageProvider</span><span class="chip">LocalStorageProvider 已实现</span><span class="chip">SupabaseProvider placeholder</span></div></div>
     <div class="card"><h3>AI Capabilities</h3><p>原 Skills 管理已合并到这里。所有生成行为通过统一 aiRouter mock 方法。</p><div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>
-    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span></div></div>
+    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Experience ${db.experienceItems?.length || 0}</span></div></div>
     <div class="card"><h3>后台配置</h3><textarea id="settingsNotes">${escapeHtml(db.settings.adminNotes)}</textarea><div class="toolbar" style="margin-top:12px"><button class="btn" data-save-settings>保存设置</button></div></div>
   </div>`;
 }
@@ -5609,7 +5872,7 @@ function renderSettingsV2() {
     ${renderClusteringSettings(clusteringConfig)}
     <div class="card"><h3>Storage Providers</h3><p>当前启用：<strong>${db.settings.provider}</strong></p><div class="mini-stack"><span class="chip">StorageProvider</span><span class="chip">LocalStorageProvider 已实现</span><span class="chip">SupabaseProvider placeholder</span></div></div>
     <div class="card"><h3>AI Capabilities</h3><p>所有生成行为通过统一 aiRouter；真实调用仅预留给 openai / zai / deepseek / custom。</p><div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>
-    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">Topic ${db.topics.length}</span><span class="chip">TopicCluster ${db.topicClusters.length}</span><span class="chip">DailyBrief ${db.dailyBriefs?.length || 0}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
+    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">Topic ${db.topics.length}</span><span class="chip">TopicCluster ${db.topicClusters.length}</span><span class="chip">DailyBrief ${db.dailyBriefs?.length || 0}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Experience ${db.experienceItems?.length || 0}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
     <div class="card"><h3>后台配置</h3><textarea id="settingsNotes">${escapeHtml(db.settings.adminNotes)}</textarea><div class="toolbar" style="margin-top:12px"><button class="btn" data-save-settings>保存设置</button></div></div>
   </div>`;
 }
@@ -6226,6 +6489,23 @@ document.addEventListener("click", async event => {
       appState.selectedAnalyticsJobId = record.publishJobId;
     } catch (error) {
       alert(error.message || "请先更新至少一个检查点。");
+    }
+    return render();
+  }
+  if (target.dataset.generateLearningReview) {
+    try {
+      const record = await LearningService.generateReview(target.dataset.generateLearningReview);
+      appState.selectedAnalyticsJobId = record.publishJobId;
+    } catch (error) {
+      alert(error.message || "生成复盘失败。");
+    }
+    return render();
+  }
+  if (target.dataset.saveExperience) {
+    try {
+      LearningService.saveExperience(target.dataset.saveExperience);
+    } catch (error) {
+      alert(error.message || "保存经验失败。");
     }
     return render();
   }

@@ -291,6 +291,15 @@ label { display: block; margin-bottom: 7px; color: #735461; font-size: 13px; fon
 .tracking-point.done { border-color: rgba(47,155,104,.28); background: #f4fff9; }
 .tracking-point.pending { border-color: rgba(217,119,6,.25); background: #fffaf0; }
 .tracking-point.skipped { background: #f8fafc; }
+.experience-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: #fff;
+}
 .note-block {
   margin: 10px 0 0;
   padding: 12px;
