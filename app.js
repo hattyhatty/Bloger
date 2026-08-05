@@ -107,6 +107,15 @@ const CONTENT_TYPES = Object.freeze(["图文", "短视频", "视频脚本", "口
 const CONTENT_STUDIO_FORMATS = Object.freeze(["短帖", "口播稿", "长文"]);
 const PUBLISH_STATUS = Object.freeze({ DRAFT: "DRAFT", READY: "READY", SCHEDULED: "SCHEDULED", PUBLISHED: "PUBLISHED", FAILED: "FAILED", CANCELLED: "CANCELLED" });
 const PUBLISH_STATUS_LABELS = Object.freeze({ DRAFT: "待准备", READY: "可以发布", SCHEDULED: "已排期", PUBLISHED: "已发布", FAILED: "发布失败", CANCELLED: "已取消" });
+const TRACKING_STATUS = Object.freeze({ NOT_STARTED: "NOT_STARTED", TRACKING: "TRACKING", COMPLETED: "COMPLETED" });
+const TRACKING_STATUS_LABELS = Object.freeze({ NOT_STARTED: "未开始", TRACKING: "Tracking", COMPLETED: "已完成" });
+const TRACKING_CHECKPOINTS = Object.freeze([
+  { id: "24h", label: "24 小时", hours: 24 },
+  { id: "3d", label: "3 天", hours: 72 },
+  { id: "7d", label: "7 天", hours: 168 }
+]);
+const CHECKPOINT_STATUS = Object.freeze({ PENDING: "PENDING", DONE: "DONE", SKIPPED: "SKIPPED" });
+const CHECKPOINT_STATUS_LABELS = Object.freeze({ PENDING: "待更新", DONE: "已完成", SKIPPED: "已跳过" });
 const LEGACY_LONG_FORM_PLATFORM = ["公", "众", "号"].join("");
 const TASK_STATUS = Object.freeze({ PENDING: "PENDING", RUNNING: "RUNNING", SUCCESS: "SUCCESS", FAILED: "FAILED" });
 const TASK_TYPES = Object.freeze({
@@ -663,34 +672,98 @@ function normalizePublishJob(item = {}) {
   };
 }
 
-function normalizeAnalyticsRecord(item = {}) {
+function defaultTrackingCheckpoints(publishedAt = "") {
+  const base = new Date(publishedAt || now()).getTime();
+  const safeBase = Number.isFinite(base) ? base : Date.now();
+  return TRACKING_CHECKPOINTS.map(point => ({
+    id: point.id,
+    label: point.label,
+    dueAt: new Date(safeBase + point.hours * 3600000).toISOString(),
+    status: CHECKPOINT_STATUS.PENDING,
+    metrics: null,
+    updatedAt: ""
+  }));
+}
+
+function normalizeTrackingMetrics(item = {}) {
   const views = Number(item.views) || 0;
   const likes = Number(item.likes) || 0;
   const comments = Number(item.comments) || 0;
   const saves = Number(item.saves) || 0;
   const shares = Number(item.shares) || 0;
   const rate = value => views > 0 ? Number((value / views * 100).toFixed(2)) : 0;
-  const createdAt = item.createdAt || now();
   return {
-    id: item.id || uid("analytics"),
-    publishJobId: item.publishJobId || "",
-    contentId: item.contentId || "",
-    platform: CONTENT_STUDIO_PLATFORMS.includes(item.platform) ? item.platform : "抖音",
-    contentType: item.contentType || "口播稿",
-    publishedAt: item.publishedAt || now(),
     statsDate: item.statsDate || localDateString(),
     views,
     likes,
     comments,
     saves,
     shares,
+    followersGained: Number(item.followersGained) || 0,
     engagementRate: rate(likes + comments + saves + shares),
     saveRate: rate(saves),
     shareRate: rate(shares),
     commentRate: rate(comments),
+    updatedAt: item.updatedAt || now()
+  };
+}
+
+function normalizeTrackingCheckpoint(item = {}, publishedAt = "") {
+  const template = TRACKING_CHECKPOINTS.find(point => point.id === item.id) || TRACKING_CHECKPOINTS[0];
+  const fallback = defaultTrackingCheckpoints(publishedAt).find(point => point.id === template.id);
+  const status = Object.values(CHECKPOINT_STATUS).includes(item.status) ? item.status : CHECKPOINT_STATUS.PENDING;
+  return {
+    id: template.id,
+    label: item.label || template.label,
+    dueAt: item.dueAt || fallback?.dueAt || "",
+    status,
+    metrics: item.metrics ? normalizeTrackingMetrics(item.metrics) : null,
+    updatedAt: item.updatedAt || item.metrics?.updatedAt || ""
+  };
+}
+
+function normalizeAnalyticsRecord(item = {}) {
+  const metrics = normalizeTrackingMetrics(item);
+  const createdAt = item.createdAt || now();
+  const publishedAt = item.publishedAt || now();
+  const checkpoints = TRACKING_CHECKPOINTS.map(point =>
+    normalizeTrackingCheckpoint((item.checkpoints || []).find(cp => cp.id === point.id) || { id: point.id }, publishedAt)
+  );
+  const finishedCount = checkpoints.filter(point => [CHECKPOINT_STATUS.DONE, CHECKPOINT_STATUS.SKIPPED].includes(point.status)).length;
+  const trackingStatus = Object.values(TRACKING_STATUS).includes(item.trackingStatus)
+    ? item.trackingStatus
+    : (item.trackingStartedAt ? (finishedCount === checkpoints.length ? TRACKING_STATUS.COMPLETED : TRACKING_STATUS.TRACKING) : TRACKING_STATUS.NOT_STARTED);
+  return {
+    id: item.id || uid("analytics"),
+    publishJobId: item.publishJobId || "",
+    contentId: item.contentId || "",
+    sourceTopicId: item.sourceTopicId || "",
+    sourceClusterId: item.sourceClusterId || "",
+    platform: CONTENT_STUDIO_PLATFORMS.includes(item.platform) ? item.platform : "抖音",
+    contentType: item.contentType || "口播稿",
+    publishedAt,
+    statsDate: metrics.statsDate,
+    views: metrics.views,
+    likes: metrics.likes,
+    comments: metrics.comments,
+    saves: metrics.saves,
+    shares: metrics.shares,
+    engagementRate: metrics.engagementRate,
+    saveRate: metrics.saveRate,
+    shareRate: metrics.shareRate,
+    commentRate: metrics.commentRate,
     completionRate: item.completionRate || "",
-    followersGained: Number(item.followersGained) || 0,
+    followersGained: metrics.followersGained,
     reviewNotes: item.reviewNotes || "",
+    trackingStatus,
+    trackingStartedAt: item.trackingStartedAt || "",
+    checkpoints,
+    checkpointChanges: item.checkpointChanges || {},
+    performanceAnalysis: item.performanceAnalysis || "",
+    performanceAnalysisUpdatedAt: item.performanceAnalysisUpdatedAt || "",
+    aiPerformanceReview: item.aiPerformanceReview || "",
+    aiPerformanceReviewUpdatedAt: item.aiPerformanceReviewUpdatedAt || "",
+    lastMetricsAt: item.lastMetricsAt || metrics.updatedAt || "",
     createdAt,
     updatedAt: item.updatedAt || createdAt
   };
@@ -2928,6 +3001,144 @@ const AnalyticsService = {
   }
 };
 
+const TrackingService = {
+  getRecord(jobId) { return AnalyticsStore.getByPublishJobId(jobId); },
+  ensurePublishedJob(jobId) {
+    const job = PublishJobStore.getById(jobId);
+    if (!job) throw new Error("找不到发布任务");
+    if (job.status !== PUBLISH_STATUS.PUBLISHED) throw new Error("只有 Published 任务可以启动追踪");
+    if (!job.actualPublishedAt || !job.url) throw new Error("请先填写实际发布时间和发布链接");
+    return job;
+  },
+  start(jobId) {
+    const job = this.ensurePublishedJob(jobId);
+    const existing = AnalyticsStore.getByPublishJobId(jobId);
+    if (existing?.trackingStartedAt) return existing;
+    const content = ContentStore.getById(job.contentId);
+    const record = AnalyticsStore.upsertForJob(jobId, {
+      trackingStatus: TRACKING_STATUS.TRACKING,
+      trackingStartedAt: now(),
+      sourceTopicId: content?.sourceTopicId || "",
+      sourceClusterId: content?.sourceClusterId || "",
+      checkpoints: defaultTrackingCheckpoints(job.actualPublishedAt),
+      statsDate: localDateString()
+    });
+    if (content) ContentStore.update(content.id, { status: CONTENT_STATUS.TRACKING });
+    return AnalyticsStore.getByPublishJobId(record.publishJobId);
+  },
+  updateCheckpoint(jobId, checkpointId, metrics = {}) {
+    const job = this.ensurePublishedJob(jobId);
+    const record = AnalyticsStore.getByPublishJobId(jobId) || this.start(jobId);
+    const normalizedMetrics = normalizeTrackingMetrics({ ...metrics, updatedAt: now() });
+    const checkpoints = (record.checkpoints || defaultTrackingCheckpoints(job.actualPublishedAt)).map(point =>
+      point.id === checkpointId
+        ? { ...point, status: CHECKPOINT_STATUS.DONE, metrics: normalizedMetrics, updatedAt: now() }
+        : point
+    );
+    const trackingStatus = checkpoints.every(point => [CHECKPOINT_STATUS.DONE, CHECKPOINT_STATUS.SKIPPED].includes(point.status))
+      ? TRACKING_STATUS.COMPLETED
+      : TRACKING_STATUS.TRACKING;
+    return AnalyticsStore.upsertForJob(jobId, {
+      ...normalizedMetrics,
+      checkpoints,
+      trackingStatus,
+      trackingStartedAt: record.trackingStartedAt || now(),
+      checkpointChanges: this.calculateChanges(checkpoints),
+      lastMetricsAt: now()
+    });
+  },
+  skipCheckpoint(jobId, checkpointId) {
+    const job = this.ensurePublishedJob(jobId);
+    const record = AnalyticsStore.getByPublishJobId(jobId) || this.start(jobId);
+    const checkpoints = (record.checkpoints || defaultTrackingCheckpoints(job.actualPublishedAt)).map(point =>
+      point.id === checkpointId ? { ...point, status: CHECKPOINT_STATUS.SKIPPED, updatedAt: now() } : point
+    );
+    const trackingStatus = checkpoints.every(point => [CHECKPOINT_STATUS.DONE, CHECKPOINT_STATUS.SKIPPED].includes(point.status))
+      ? TRACKING_STATUS.COMPLETED
+      : TRACKING_STATUS.TRACKING;
+    return AnalyticsStore.upsertForJob(jobId, {
+      checkpoints,
+      trackingStatus,
+      trackingStartedAt: record.trackingStartedAt || now(),
+      checkpointChanges: this.calculateChanges(checkpoints)
+    });
+  },
+  completedCheckpoints(record) {
+    return (record?.checkpoints || []).filter(point => point.status === CHECKPOINT_STATUS.DONE && point.metrics);
+  },
+  calculateChanges(checkpoints = []) {
+    const done = checkpoints.filter(point => point.status === CHECKPOINT_STATUS.DONE && point.metrics);
+    return done.reduce((acc, point, index) => {
+      const engagement = point.metrics.likes + point.metrics.comments + point.metrics.shares + point.metrics.saves;
+      if (index === 0) {
+        acc[point.id] = { views: point.metrics.views, engagement, followersGained: point.metrics.followersGained };
+      } else {
+        const prev = done[index - 1].metrics;
+        const prevEngagement = prev.likes + prev.comments + prev.shares + prev.saves;
+        acc[point.id] = {
+          views: point.metrics.views - prev.views,
+          engagement: engagement - prevEngagement,
+          followersGained: point.metrics.followersGained - prev.followersGained
+        };
+      }
+      return acc;
+    }, {});
+  },
+  localAnalysis(record) {
+    const done = this.completedCheckpoints(record);
+    if (!done.length) return "暂无检查点数据。请先更新 24h / 3d / 7d 任意一个时间点。";
+    const latest = done[done.length - 1].metrics;
+    const first = done[0].metrics;
+    const platformPeers = AnalyticsService.enrichedRecords().filter(item => item.id !== record.id && item.platform === record.platform && item.views > 0);
+    const peerAvg = platformPeers.length ? Number((platformPeers.reduce((sum, item) => sum + item.engagementRate, 0) / platformPeers.length).toFixed(2)) : 0;
+    const totalEngagement = latest.likes + latest.comments + latest.shares + latest.saves;
+    const firstEngagement = first.likes + first.comments + first.shares + first.saves;
+    const rateItems = [
+      ["收藏率", latest.saveRate],
+      ["分享率", latest.shareRate],
+      ["评论率", latest.commentRate],
+      ["互动率", latest.engagementRate]
+    ].sort((a, b) => b[1] - a[1]);
+    const compare = peerAvg
+      ? (latest.engagementRate >= peerAvg ? `高于同平台平均 ${Number((latest.engagementRate - peerAvg).toFixed(2))} 个百分点` : `低于同平台平均 ${Number((peerAvg - latest.engagementRate).toFixed(2))} 个百分点`)
+      : "暂无同平台平均值可对比";
+    return [
+      `最新数据：${latest.views} views，互动 ${totalEngagement}，互动率 ${latest.engagementRate}%。`,
+      `增长情况：较首个检查点增加 ${latest.views - first.views} views，互动增加 ${totalEngagement - firstEngagement}。`,
+      `平台对比：${compare}。`,
+      `突出指标：${rateItems[0][0]} ${rateItems[0][1]}%。`,
+      `最弱指标：${rateItems[rateItems.length - 1][0]} ${rateItems[rateItems.length - 1][1]}%。`
+    ].join("\n");
+  },
+  async analyze(jobId) {
+    const record = AnalyticsStore.getByPublishJobId(jobId);
+    if (!record) throw new Error("请先启动追踪");
+    if (!this.completedCheckpoints(record).length) throw new Error("请先至少完成一个检查点");
+    const local = this.localAnalysis(record);
+    const sevenDayDone = record.checkpoints?.find(point => point.id === "7d")?.status === CHECKPOINT_STATUS.DONE;
+    let aiReview = record.aiPerformanceReview || "";
+    if (sevenDayDone && !getAiFallbackReason()) {
+      try {
+        const job = PublishJobStore.getById(jobId);
+        const content = ContentStore.getById(record.contentId);
+        aiReview = await routeAiText(`请只基于以下已有数据，生成一段中文发布复盘，不要虚构平台数据。\n标题：${job?.titleSnapshot || content?.title || ""}\n平台：${record.platform}\n内容形式：${record.contentType}\n来源链接：${content?.sourceUrl || ""}\n检查点数据：${JSON.stringify(record.checkpoints)}\n本地分析：${local}`, {
+          task: "analytics.performanceReview",
+          format: "发布后复盘",
+          title: job?.titleSnapshot || content?.title || ""
+        });
+      } catch {
+        aiReview = "";
+      }
+    }
+    return AnalyticsStore.upsertForJob(jobId, {
+      performanceAnalysis: local,
+      performanceAnalysisUpdatedAt: now(),
+      aiPerformanceReview: aiReview,
+      aiPerformanceReviewUpdatedAt: aiReview ? now() : record.aiPerformanceReviewUpdatedAt
+    });
+  }
+};
+
 const TaskQueue = {
   getAll() { return (db.tasks || []).map(normalizeTask).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)); },
   getById(id) { return (db.tasks || []).find(item => item.id === id) || null; },
@@ -5095,6 +5306,80 @@ function renderPublishJobCard(job) {
   </button>`;
 }
 
+function renderMetricChips(metrics = {}) {
+  return `<div class="chips">
+    <span class="chip">Views ${Number(metrics.views) || 0}</span>
+    <span class="chip">Likes ${Number(metrics.likes) || 0}</span>
+    <span class="chip">Comments ${Number(metrics.comments) || 0}</span>
+    <span class="chip">Shares ${Number(metrics.shares) || 0}</span>
+    <span class="chip">Saves ${Number(metrics.saves) || 0}</span>
+    <span class="chip">Followers ${Number(metrics.followersGained) || 0}</span>
+    <span class="chip">ER ${Number(metrics.engagementRate) || 0}%</span>
+  </div>`;
+}
+
+function renderCheckpointTimeline(record) {
+  const checkpoints = record?.checkpoints || [];
+  if (!checkpoints.length) return empty("暂无检查点。");
+  return `<div class="tracking-timeline">${checkpoints.map(point => {
+    const dueText = point.dueAt ? new Date(point.dueAt).toLocaleString("zh-CN") : "—";
+    const due = point.status === CHECKPOINT_STATUS.PENDING && point.dueAt && new Date(point.dueAt).getTime() <= Date.now();
+    const changes = record.checkpointChanges?.[point.id];
+    return `<div class="tracking-point ${String(point.status || "").toLowerCase()}">
+      <div class="item-head"><strong>${escapeHtml(point.label)}</strong><span class="${statusClass(point.status)}">${CHECKPOINT_STATUS_LABELS[point.status] || point.status}</span></div>
+      <div class="meta">应检查：${escapeHtml(dueText)}${due ? " · 已到检查时间，请更新数据" : ""}</div>
+      ${point.metrics ? renderMetricChips(point.metrics) : ""}
+      ${changes ? `<div class="meta">较上一完成点变化：Views ${changes.views >= 0 ? "+" : ""}${changes.views} · 互动 ${changes.engagement >= 0 ? "+" : ""}${changes.engagement} · 涨粉 ${changes.followersGained >= 0 ? "+" : ""}${changes.followersGained}</div>` : ""}
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function renderTrackingPanel(job) {
+  if (!job?.id) return "";
+  const record = AnalyticsStore.getByPublishJobId(job.id);
+  if (job.status !== PUBLISH_STATUS.PUBLISHED) {
+    return `<div class="divider"></div><strong>发布后追踪</strong>${empty("标记为 Published 后，可以启动 24h / 3d / 7d 数据追踪。")}`;
+  }
+  const missing = [];
+  if (!job.actualPublishedAt) missing.push("实际发布时间");
+  if (!job.url) missing.push("发布链接");
+  if (!record?.trackingStartedAt) {
+    return `<div class="divider"></div>
+    <strong>发布后追踪</strong>
+    ${missing.length ? empty(`启动前请先补充：${missing.join("、")}`) : empty("尚未启动追踪。启动后会创建 24h / 3d / 7d 三个检查点。")}
+    <div class="toolbar"><button class="btn small" data-start-tracking="${job.id}" ${missing.length ? "disabled" : ""}>Start Tracking</button></div>`;
+  }
+  const selectedPoint = record.checkpoints?.find(point => point.status === CHECKPOINT_STATUS.PENDING) || record.checkpoints?.[0];
+  const latest = normalizeTrackingMetrics(record);
+  return `<div class="divider"></div>
+    <strong>发布后追踪</strong>
+    <div class="chips">
+      <span class="${statusClass(record.trackingStatus)}">${TRACKING_STATUS_LABELS[record.trackingStatus] || record.trackingStatus}</span>
+      <span class="chip">Started ${record.trackingStartedAt ? new Date(record.trackingStartedAt).toLocaleString("zh-CN") : "—"}</span>
+      <span class="chip">Last Metrics ${record.lastMetricsAt ? new Date(record.lastMetricsAt).toLocaleString("zh-CN") : "—"}</span>
+    </div>
+    ${renderCheckpointTimeline(record)}
+    <div class="divider"></div>
+    <strong>Update Metrics</strong>
+    <div class="form-grid">
+      <div><label>检查时间点</label><select id="trackingCheckpointId">${record.checkpoints.map(point => `<option value="${point.id}" ${point.id === selectedPoint?.id ? "selected" : ""}>${escapeHtml(point.label)} · ${CHECKPOINT_STATUS_LABELS[point.status]}</option>`).join("")}</select></div>
+      <div><label>Views</label><input id="trackingViews" type="number" value="${latest.views || 0}" /></div>
+      <div><label>Likes</label><input id="trackingLikes" type="number" value="${latest.likes || 0}" /></div>
+      <div><label>Comments</label><input id="trackingComments" type="number" value="${latest.comments || 0}" /></div>
+      <div><label>Shares</label><input id="trackingShares" type="number" value="${latest.shares || 0}" /></div>
+      <div><label>Saves</label><input id="trackingSaves" type="number" value="${latest.saves || 0}" /></div>
+      <div><label>Followers Gained</label><input id="trackingFollowers" type="number" value="${latest.followersGained || 0}" /></div>
+    </div>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="btn small" data-update-tracking="${job.id}">保存检查点数据</button>
+      <button class="btn small ghost" data-skip-tracking="${job.id}">跳过该检查点</button>
+      <button class="btn small ghost" data-analyze-performance="${job.id}">Analyze Performance</button>
+      <button class="btn small ghost" data-open-analytics="${job.id}">Open Analytics</button>
+    </div>
+    ${record.performanceAnalysis ? kv("本地表现分析", `<pre class="note-block">${escapeHtml(record.performanceAnalysis)}</pre>`) : ""}
+    ${record.aiPerformanceReview ? kv("AI 7天复盘", `<pre class="note-block">${escapeHtml(record.aiPerformanceReview)}</pre>`) : ""}`;
+}
+
 function renderPublishDetail(job) {
   const editJob = appState.editPublishJobId && appState.editPublishJobId !== "__new__" ? PublishJobStore.getById(appState.editPublishJobId) : null;
   const item = editJob || job || {};
@@ -5126,6 +5411,7 @@ function renderPublishDetail(job) {
       ${item.id ? `<button class="btn small ghost" data-copy-publish="${item.id}:title">复制标题</button><button class="btn small ghost" data-copy-publish="${item.id}:body">复制正文</button><button class="btn small ghost" data-copy-publish="${item.id}:tags">复制标签</button><button class="btn small ghost" data-export-publish="${item.id}:txt">导出 TXT</button><button class="btn small ghost" data-export-publish="${item.id}:md">导出 Markdown</button><button class="btn small ghost" data-open-workspace="${item.contentId}">打开来源内容</button><button class="btn small danger" data-remove-job="${item.id}">删除</button>` : ""}
     </div>
     ${item.url ? kv("线上链接", `<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.url)}</a>`) : ""}
+    ${renderTrackingPanel(item)}
   </div>`;
 }
 
@@ -5185,17 +5471,16 @@ function renderAnalyticsRecordCard(record) {
   return `<div class="item-card card">
     <div class="item-head"><h3 class="item-title">${escapeHtml(record.title)}</h3><span class="score">${record.engagementRate}% ER</span></div>
     <div class="meta">${escapeHtml(record.platform)} · ${escapeHtml(record.contentType)} · 发布 ${record.publishedAt ? new Date(record.publishedAt).toLocaleString("zh-CN") : "—"} · 统计 ${escapeHtml(record.statsDate)}</div>
+    ${renderMetricChips(record)}
     <div class="chips">
-      <span class="chip">Views ${record.views}</span>
-      <span class="chip">Likes ${record.likes}</span>
-      <span class="chip">Comments ${record.comments}</span>
-      <span class="chip">Shares ${record.shares}</span>
-      <span class="chip">Saves ${record.saves}</span>
-      <span class="chip">Followers ${record.followersGained}</span>
+      <span class="${statusClass(record.trackingStatus)}">${TRACKING_STATUS_LABELS[record.trackingStatus] || record.trackingStatus}</span>
       <span class="chip">Save ${record.saveRate}%</span>
       <span class="chip">Share ${record.shareRate}%</span>
       <span class="chip">Comment ${record.commentRate}%</span>
     </div>
+    ${record.trackingStartedAt ? renderCheckpointTimeline(record) : ""}
+    ${record.performanceAnalysis ? `<pre class="note-block">${escapeHtml(record.performanceAnalysis)}</pre>` : ""}
+    ${record.aiPerformanceReview ? `<pre class="note-block">${escapeHtml(record.aiPerformanceReview)}</pre>` : ""}
     <div class="meta">原 Content：${escapeHtml(record.content?.title || "—")} · 原 Topic：${escapeHtml(record.topic?.title || "—")}</div>
     <div class="toolbar">
       ${record.job ? `<button class="btn small ghost" data-open-analytics-publish="${record.job.id}">返回 Publishing</button>` : ""}
@@ -5899,6 +6184,54 @@ document.addEventListener("click", async event => {
       notes: document.getElementById("publishNotes")?.value.trim() || ""
     });
     return render();
+  }
+  if (target.dataset.startTracking) {
+    try {
+      const record = TrackingService.start(target.dataset.startTracking);
+      appState.selectedAnalyticsJobId = record.publishJobId;
+    } catch (error) {
+      alert(error.message || "启动追踪失败。");
+    }
+    return render();
+  }
+  if (target.dataset.updateTracking) {
+    try {
+      const record = TrackingService.updateCheckpoint(target.dataset.updateTracking, document.getElementById("trackingCheckpointId")?.value || "24h", {
+        statsDate: localDateString(),
+        views: Number(document.getElementById("trackingViews")?.value) || 0,
+        likes: Number(document.getElementById("trackingLikes")?.value) || 0,
+        comments: Number(document.getElementById("trackingComments")?.value) || 0,
+        shares: Number(document.getElementById("trackingShares")?.value) || 0,
+        saves: Number(document.getElementById("trackingSaves")?.value) || 0,
+        followersGained: Number(document.getElementById("trackingFollowers")?.value) || 0
+      });
+      appState.selectedAnalyticsJobId = record.publishJobId;
+    } catch (error) {
+      alert(error.message || "保存追踪数据失败。");
+    }
+    return render();
+  }
+  if (target.dataset.skipTracking) {
+    try {
+      const record = TrackingService.skipCheckpoint(target.dataset.skipTracking, document.getElementById("trackingCheckpointId")?.value || "24h");
+      appState.selectedAnalyticsJobId = record.publishJobId;
+    } catch (error) {
+      alert(error.message || "跳过检查点失败。");
+    }
+    return render();
+  }
+  if (target.dataset.analyzePerformance) {
+    try {
+      const record = await TrackingService.analyze(target.dataset.analyzePerformance);
+      appState.selectedAnalyticsJobId = record.publishJobId;
+    } catch (error) {
+      alert(error.message || "请先更新至少一个检查点。");
+    }
+    return render();
+  }
+  if (target.dataset.openAnalytics) {
+    appState.selectedAnalyticsJobId = target.dataset.openAnalytics;
+    return setPage("analytics");
   }
   if (target.dataset.copyPublish) {
     const [jobId, part] = target.dataset.copyPublish.split(":");
