@@ -245,6 +245,7 @@ const appState = {
   editPublishJobId: null,
   selectedPublishJobId: null,
   publishView: "queue",
+  selectedAnalyticsJobId: null,
   isGeneratingBrief: false,
   briefError: "",
   studioDrafts: {},
@@ -274,7 +275,10 @@ const appState = {
     clusterSort: "finalScore",
     publishPlatform: "",
     publishStatus: "",
-    publishDate: ""
+    publishDate: "",
+    analyticsRange: "30",
+    analyticsPlatform: "",
+    analyticsContentType: ""
   }
 };
 
@@ -635,20 +639,35 @@ function normalizePublishJob(item = {}) {
 }
 
 function normalizeAnalyticsRecord(item = {}) {
+  const views = Number(item.views) || 0;
+  const likes = Number(item.likes) || 0;
+  const comments = Number(item.comments) || 0;
+  const saves = Number(item.saves) || 0;
+  const shares = Number(item.shares) || 0;
+  const rate = value => views > 0 ? Number((value / views * 100).toFixed(2)) : 0;
+  const createdAt = item.createdAt || now();
   return {
     id: item.id || uid("analytics"),
+    publishJobId: item.publishJobId || "",
     contentId: item.contentId || "",
-    platform: isTargetPlatform(item.platform) ? item.platform : "抖音",
+    platform: CONTENT_STUDIO_PLATFORMS.includes(item.platform) ? item.platform : "抖音",
+    contentType: item.contentType || "口播稿",
     publishedAt: item.publishedAt || now(),
-    views: Number(item.views) || 0,
-    likes: Number(item.likes) || 0,
-    comments: Number(item.comments) || 0,
-    saves: Number(item.saves) || 0,
-    shares: Number(item.shares) || 0,
+    statsDate: item.statsDate || localDateString(),
+    views,
+    likes,
+    comments,
+    saves,
+    shares,
+    engagementRate: rate(likes + comments + saves + shares),
+    saveRate: rate(saves),
+    shareRate: rate(shares),
+    commentRate: rate(comments),
     completionRate: item.completionRate || "",
     followersGained: Number(item.followersGained) || 0,
     reviewNotes: item.reviewNotes || "",
-    createdAt: item.createdAt || now()
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
   };
 }
 
@@ -2716,7 +2735,89 @@ const PublishingService = {
 
 const AnalyticsStore = {
   ...createCrudStore("analyticsRecords", normalizeAnalyticsRecord),
-  getByContentId(contentId) { return this.getAll().filter(item => item.contentId === contentId); }
+  getByContentId(contentId) { return this.getAll().filter(item => item.contentId === contentId); },
+  getByPublishJobId(publishJobId) { return this.getAll().find(item => item.publishJobId === publishJobId) || null; },
+  upsertForJob(publishJobId, metrics = {}) {
+    const job = PublishJobStore.getById(publishJobId);
+    if (!job) throw new Error("找不到发布任务");
+    const existing = this.getByPublishJobId(publishJobId);
+    const record = normalizeAnalyticsRecord({
+      ...(existing || {}),
+      ...metrics,
+      publishJobId,
+      contentId: job.contentId,
+      platform: job.platform,
+      contentType: job.contentType,
+      publishedAt: job.actualPublishedAt || job.scheduledAt || now(),
+      updatedAt: now()
+    });
+    if (existing) {
+      const index = db.analyticsRecords.findIndex(item => item.id === existing.id);
+      db.analyticsRecords[index] = record;
+    } else {
+      db.analyticsRecords.unshift(record);
+    }
+    saveDb();
+    return record;
+  }
+};
+
+const AnalyticsService = {
+  publishedJobs() { return PublishJobStore.getAll().filter(job => job.status === PUBLISH_STATUS.PUBLISHED); },
+  enrichedRecords() {
+    return AnalyticsStore.getAll().map(record => {
+      const job = record.publishJobId ? PublishJobStore.getById(record.publishJobId) : null;
+      const content = ContentStore.getById(record.contentId || job?.contentId);
+      const topic = content?.sourceTopicId ? TopicStore.getById(content.sourceTopicId) : null;
+      return { ...record, job, content, topic, title: job?.titleSnapshot || content?.draftTitle || content?.title || "内容已删除" };
+    });
+  },
+  filterRecords() {
+    const days = Number(appState.filters.analyticsRange) || 30;
+    const cutoff = Date.now() - days * 86400000;
+    return this.enrichedRecords().filter(record => {
+      const time = new Date(record.statsDate || record.publishedAt).getTime();
+      if (Number.isFinite(time) && time < cutoff) return false;
+      if (appState.filters.analyticsPlatform && record.platform !== appState.filters.analyticsPlatform) return false;
+      if (appState.filters.analyticsContentType && record.contentType !== appState.filters.analyticsContentType) return false;
+      return true;
+    });
+  },
+  summarize(records) {
+    const totalViews = records.reduce((sum, item) => sum + item.views, 0);
+    const totalEngagement = records.reduce((sum, item) => sum + item.likes + item.comments + item.shares + item.saves, 0);
+    const avgEngagementRate = totalViews ? Number((totalEngagement / totalViews * 100).toFixed(2)) : 0;
+    const followers = records.reduce((sum, item) => sum + item.followersGained, 0);
+    const topContent = [...records].sort((a, b) => b.views - a.views)[0] || null;
+    const bestPlatform = this.bestGroup(records, "platform");
+    const bestFormat = this.bestGroup(records, "contentType");
+    return { totalPublished: this.publishedJobs().length, totalViews, totalEngagement, avgEngagementRate, followers, topContent, bestPlatform, bestFormat };
+  },
+  bestGroup(records, key) {
+    const groups = records.reduce((acc, item) => {
+      const name = item[key] || "未设置";
+      acc[name] = acc[name] || { name, views: 0, engagement: 0, count: 0, followers: 0 };
+      acc[name].views += item.views;
+      acc[name].engagement += item.likes + item.comments + item.shares + item.saves;
+      acc[name].followers += item.followersGained;
+      acc[name].count += 1;
+      return acc;
+    }, {});
+    return Object.values(groups).map(group => ({ ...group, engagementRate: group.views ? Number((group.engagement / group.views * 100).toFixed(2)) : 0 })).sort((a, b) => b.engagementRate - a.engagementRate || b.views - a.views)[0] || null;
+  },
+  insights(records) {
+    const summary = this.summarize(records);
+    const avg = summary.avgEngagementRate;
+    const low = records.filter(record => avg > 0 && record.engagementRate < avg * .55).slice(0, 3);
+    const topTopics = [...records].filter(record => record.topic).sort((a, b) => b.views - a.views).slice(0, 3);
+    const lines = [];
+    if (summary.bestPlatform) lines.push(`${summary.bestPlatform.name} 平均互动率最高（${summary.bestPlatform.engagementRate}%）。`);
+    if (summary.bestFormat) lines.push(`${summary.bestFormat.name} 是当前表现最好的内容形式。`);
+    if (topTopics.length) lines.push(`浏览量最高的 Topic 来自：${topTopics.map(item => item.topic.title).join("、")}。`);
+    if (low.length) lines.push(`低于平均表现的内容：${low.map(item => item.title).join("、")}，建议复盘标题、Hook 或发布时间。`);
+    if (!lines.length) lines.push("暂无足够数据生成洞察。");
+    return lines;
+  }
 };
 
 const TaskQueue = {
@@ -3789,6 +3890,7 @@ window.VideoProjectStore = VideoProjectStore;
 window.PublishJobStore = PublishJobStore;
 window.PublishingService = PublishingService;
 window.AnalyticsStore = AnalyticsStore;
+window.AnalyticsService = AnalyticsService;
 window.PromptStore = PromptStore;
 window.KnowledgeStore = KnowledgeStore;
 window.TaskQueue = TaskQueue;
@@ -4902,27 +5004,78 @@ function renderPublishDetail(job) {
 }
 
 function renderAnalytics() {
-  const records = AnalyticsStore.getAll();
-  return `<div class="card">
-    <h3>手动录入数据</h3>
-    <div class="form-grid">
-      <div class="span-2"><label>内容</label><select id="analyticsContentId">${ContentStore.getAll().map(item => `<option value="${item.id}">${escapeHtml(item.title)}</option>`).join("")}</select></div>
-      <div><label>平台</label><select id="analyticsPlatform">${targetPlatformOptions()}</select></div>
-      <div><label>发布时间</label><input id="analyticsPublishedAt" type="datetime-local" /></div>
-      <div><label>播放量</label><input id="analyticsViews" type="number" value="0" /></div>
-      <div><label>点赞</label><input id="analyticsLikes" type="number" value="0" /></div>
-      <div><label>评论</label><input id="analyticsComments" type="number" value="0" /></div>
-      <div><label>收藏</label><input id="analyticsSaves" type="number" value="0" /></div>
-      <div><label>转发</label><input id="analyticsShares" type="number" value="0" /></div>
-      <div><label>完播率</label><input id="analyticsCompletion" placeholder="例如 42%" /></div>
-      <div><label>涨粉</label><input id="analyticsFollowers" type="number" value="0" /></div>
-    </div>
-    <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-analytics>保存并生成 mock 复盘</button></div>
+  const publishedJobs = AnalyticsService.publishedJobs();
+  if (!appState.selectedAnalyticsJobId || !PublishJobStore.getById(appState.selectedAnalyticsJobId)) appState.selectedAnalyticsJobId = publishedJobs[0]?.id || "";
+  const selectedJob = PublishJobStore.getById(appState.selectedAnalyticsJobId);
+  const selectedRecord = selectedJob ? AnalyticsStore.getByPublishJobId(selectedJob.id) : null;
+  const records = AnalyticsService.filterRecords();
+  const summary = AnalyticsService.summarize(records);
+  return `<div class="card toolbar">
+    <select id="analyticsRange"><option value="7" ${appState.filters.analyticsRange === "7" ? "selected" : ""}>最近 7 天</option><option value="30" ${appState.filters.analyticsRange === "30" ? "selected" : ""}>最近 30 天</option><option value="90" ${appState.filters.analyticsRange === "90" ? "selected" : ""}>最近 90 天</option><option value="365" ${appState.filters.analyticsRange === "365" ? "selected" : ""}>最近 1 年</option></select>
+    <select id="analyticsPlatformFilter"><option value="">全部平台</option>${CONTENT_STUDIO_PLATFORMS.map(item => `<option value="${item}" ${item === appState.filters.analyticsPlatform ? "selected" : ""}>${item}</option>`).join("")}</select>
+    <select id="analyticsContentTypeFilter"><option value="">全部形式</option>${CONTENT_STUDIO_FORMATS.map(item => `<option value="${item}" ${item === appState.filters.analyticsContentType ? "selected" : ""}>${item}</option>`).join("")}</select>
+    <span class="chip">已发布任务 ${publishedJobs.length}</span>
   </div>
-  <div class="grid">${records.map(record => {
-    const item = ContentStore.getById(record.contentId);
-    return `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(item?.title || "内容已删除")}</h3><span class="chip">${record.platform}</span></div><div class="meta">播放 ${record.views} · 赞 ${record.likes} · 评 ${record.comments} · 完播 ${escapeHtml(record.completionRate || "—")} · 涨粉 ${record.followersGained}</div><p>${escapeHtml(record.reviewNotes)}</p></div>`;
-  }).join("") || empty("暂无数据复盘记录。")}</div>`;
+  <div class="grid four">
+    ${statCard("总发布数量", summary.totalPublished, "Published 任务")}
+    ${statCard("总浏览量", summary.totalViews, "Views")}
+    ${statCard("总互动量", summary.totalEngagement, "Likes + Comments + Shares + Saves")}
+    ${statCard("平均互动率", `${summary.avgEngagementRate}%`, "Engagement Rate")}
+  </div>
+  <div class="grid three">
+    ${statCard("涨粉数量", summary.followers, "Followers Gained")}
+    ${statCard("最佳平台", summary.bestPlatform ? `${summary.bestPlatform.name} · ${summary.bestPlatform.engagementRate}%` : "—", "按平均互动率")}
+    ${statCard("最佳内容形式", summary.bestFormat ? `${summary.bestFormat.name} · ${summary.bestFormat.engagementRate}%` : "—", "按平均互动率")}
+  </div>
+  <div class="grid two">
+    <div class="card">
+      <h3>数据录入</h3>
+      ${publishedJobs.length ? `<div class="form-grid">
+        <div class="span-2"><label>Published 任务</label><select id="analyticsPublishJobId">${publishedJobs.map(job => `<option value="${job.id}" ${job.id === appState.selectedAnalyticsJobId ? "selected" : ""}>${escapeHtml(job.platform)} · ${escapeHtml(job.titleSnapshot || ContentStore.getById(job.contentId)?.title || job.id)}</option>`).join("")}</select></div>
+        <div><label>数据统计日期</label><input id="analyticsStatsDate" type="date" value="${escapeHtml(selectedRecord?.statsDate || localDateString())}" /></div>
+        <div><label>Views</label><input id="analyticsViews" type="number" value="${selectedRecord?.views || 0}" /></div>
+        <div><label>Likes</label><input id="analyticsLikes" type="number" value="${selectedRecord?.likes || 0}" /></div>
+        <div><label>Comments</label><input id="analyticsComments" type="number" value="${selectedRecord?.comments || 0}" /></div>
+        <div><label>Shares</label><input id="analyticsShares" type="number" value="${selectedRecord?.shares || 0}" /></div>
+        <div><label>Saves</label><input id="analyticsSaves" type="number" value="${selectedRecord?.saves || 0}" /></div>
+        <div><label>Followers Gained</label><input id="analyticsFollowers" type="number" value="${selectedRecord?.followersGained || 0}" /></div>
+      </div>
+      <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-analytics>保存表现数据</button>${selectedJob ? `<button class="btn ghost" data-open-analytics-publish="${selectedJob.id}">返回 Publishing</button>` : ""}</div>
+      ${selectedRecord ? `<div class="meta">最后更新：${new Date(selectedRecord.updatedAt).toLocaleString("zh-CN")} · ER ${selectedRecord.engagementRate}% · Save ${selectedRecord.saveRate}% · Share ${selectedRecord.shareRate}% · Comment ${selectedRecord.commentRate}%</div>` : ""}` : empty("还没有 Published 任务。请先在 Publishing Center 手动标记 Published。")}
+    </div>
+    <div class="card">
+      <h3>简单洞察</h3>
+      <div class="mini-stack">${AnalyticsService.insights(records).map(line => `<div class="empty">${escapeHtml(line)}</div>`).join("")}</div>
+      ${summary.topContent ? kv("表现最好的内容", `${escapeHtml(summary.topContent.title)} · ${summary.topContent.views} views`) : ""}
+    </div>
+  </div>
+  <div class="card">
+    <h3>内容表现列表</h3>
+    <div class="mini-stack">${records.map(renderAnalyticsRecordCard).join("") || empty("当前筛选条件下暂无表现数据。")}</div>
+  </div>`;
+}
+
+function renderAnalyticsRecordCard(record) {
+  return `<div class="item-card card">
+    <div class="item-head"><h3 class="item-title">${escapeHtml(record.title)}</h3><span class="score">${record.engagementRate}% ER</span></div>
+    <div class="meta">${escapeHtml(record.platform)} · ${escapeHtml(record.contentType)} · 发布 ${record.publishedAt ? new Date(record.publishedAt).toLocaleString("zh-CN") : "—"} · 统计 ${escapeHtml(record.statsDate)}</div>
+    <div class="chips">
+      <span class="chip">Views ${record.views}</span>
+      <span class="chip">Likes ${record.likes}</span>
+      <span class="chip">Comments ${record.comments}</span>
+      <span class="chip">Shares ${record.shares}</span>
+      <span class="chip">Saves ${record.saves}</span>
+      <span class="chip">Followers ${record.followersGained}</span>
+      <span class="chip">Save ${record.saveRate}%</span>
+      <span class="chip">Share ${record.shareRate}%</span>
+      <span class="chip">Comment ${record.commentRate}%</span>
+    </div>
+    <div class="meta">原 Content：${escapeHtml(record.content?.title || "—")} · 原 Topic：${escapeHtml(record.topic?.title || "—")}</div>
+    <div class="toolbar">
+      ${record.job ? `<button class="btn small ghost" data-open-analytics-publish="${record.job.id}">返回 Publishing</button>` : ""}
+      ${record.content ? `<button class="btn small ghost" data-open-workspace="${record.content.id}">返回 Content Studio</button>` : ""}
+    </div>
+  </div>`;
 }
 
 function renderPromptLibrary() {
@@ -5174,7 +5327,8 @@ function bindScopedInputs() {
     ["libraryQuery", "libraryQuery"], ["libraryStatus", "libraryStatus"], ["libraryPlatform", "libraryPlatform"], ["libraryTag", "libraryTag"],
     ["researchSource", "researchSource"], ["researchSourceType", "researchSourceType"], ["researchCategory", "researchCategory"], ["researchSort", "researchSort"], ["researchDate", "researchDate"],
     ["clusterSourceCount", "clusterSourceCount"], ["clusterCategory", "clusterCategory"], ["clusterStatus", "clusterStatus"], ["clusterOfficial", "clusterOfficial"], ["clusterDate", "clusterDate"], ["clusterSort", "clusterSort"],
-    ["publishPlatformFilter", "publishPlatform"], ["publishStatusFilter", "publishStatus"], ["publishDateFilter", "publishDate"]
+    ["publishPlatformFilter", "publishPlatform"], ["publishStatusFilter", "publishStatus"], ["publishDateFilter", "publishDate"],
+    ["analyticsRange", "analyticsRange"], ["analyticsPlatformFilter", "analyticsPlatform"], ["analyticsContentTypeFilter", "analyticsContentType"]
   ];
   bindings.forEach(([id, key]) => {
     const el = document.getElementById(id);
@@ -5184,6 +5338,8 @@ function bindScopedInputs() {
   });
   const workspaceSelect = document.getElementById("workspaceSelect");
   if (workspaceSelect) workspaceSelect.addEventListener("change", () => { appState.selectedContentId = workspaceSelect.value; render(); });
+  const analyticsSelect = document.getElementById("analyticsPublishJobId");
+  if (analyticsSelect) analyticsSelect.addEventListener("change", () => { appState.selectedAnalyticsJobId = analyticsSelect.value; render(); });
 }
 
 function renderHealth() {
@@ -5604,18 +5760,24 @@ document.addEventListener("click", async event => {
     PublishingService.download(jobId, format);
     return render();
   }
+  if (target.dataset.openAnalyticsPublish) {
+    appState.selectedPublishJobId = target.dataset.openAnalyticsPublish;
+    appState.editPublishJobId = null;
+    return setPage("publish");
+  }
   if (target.dataset.saveAnalytics !== undefined) {
-    workflowPipeline.recordAnalytics(document.getElementById("analyticsContentId").value, {
-      platform: document.getElementById("analyticsPlatform").value,
-      publishedAt: document.getElementById("analyticsPublishedAt").value || new Date().toISOString(),
+    const publishJobId = document.getElementById("analyticsPublishJobId")?.value || appState.selectedAnalyticsJobId;
+    if (!publishJobId) return render();
+    const record = AnalyticsStore.upsertForJob(publishJobId, {
+      statsDate: document.getElementById("analyticsStatsDate").value || localDateString(),
       views: Number(document.getElementById("analyticsViews").value) || 0,
       likes: Number(document.getElementById("analyticsLikes").value) || 0,
       comments: Number(document.getElementById("analyticsComments").value) || 0,
       saves: Number(document.getElementById("analyticsSaves").value) || 0,
       shares: Number(document.getElementById("analyticsShares").value) || 0,
-      completionRate: document.getElementById("analyticsCompletion").value,
       followersGained: Number(document.getElementById("analyticsFollowers").value) || 0
     });
+    appState.selectedAnalyticsJobId = record.publishJobId;
     return render();
   }
   if (target.dataset.savePrompt !== undefined) {
