@@ -837,6 +837,25 @@ function normalizeAiStatus(item = {}) {
   };
 }
 
+function normalizeBackendApiConfig(item = {}) {
+  return {
+    enabled: Boolean(item.enabled),
+    baseUrl: item.baseUrl || "http://localhost:8000",
+    syncOnSave: item.syncOnSave !== false,
+    updatedAt: item.updatedAt || ""
+  };
+}
+
+function normalizeBackendStatus(item = {}) {
+  return {
+    lastSuccess: Boolean(item.lastSuccess),
+    lastAction: item.lastAction || "",
+    lastError: item.lastError || "",
+    lastSummary: item.lastSummary || "",
+    updatedAt: item.updatedAt || ""
+  };
+}
+
 function normalizeGithubSourceConfig(item = {}) {
   return {
     enabled: Boolean(item.enabled),
@@ -1014,13 +1033,107 @@ class SupabaseProvider extends StorageProvider {
   save() { return false; }
 }
 
+class ApiClient {
+  constructor(configGetter = () => normalizeBackendApiConfig(db.settings?.backendApiConfig)) {
+    this.configGetter = configGetter;
+  }
+  config() {
+    const config = this.configGetter();
+    return { ...config, baseUrl: String(config.baseUrl || "").replace(/\/$/, "") };
+  }
+  async request(path, options = {}) {
+    const config = this.config();
+    if (!config.baseUrl) throw new Error("Backend Base URL 未设置");
+    const response = await fetch(`${config.baseUrl}${path}`, {
+      ...options,
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+    });
+    if (!response.ok) throw new Error(`Backend API HTTP ${response.status}`);
+    const type = response.headers.get("content-type") || "";
+    return type.includes("application/json") ? response.json() : response.text();
+  }
+  health() { return this.request("/api/health"); }
+  corePayload(data = db) {
+    return {
+      topics: data.topics || [],
+      contentItems: data.contentItems || [],
+      knowledgeItems: data.knowledgeItems || []
+    };
+  }
+  importLocalStorage(data) {
+    return this.request("/api/import/localstorage-core", { method: "POST", body: JSON.stringify(this.corePayload(data)) });
+  }
+  async pullCoreData() {
+    const [topics, contents, knowledgeItems] = await Promise.all([
+      this.request("/api/topics?limit=500"),
+      this.request("/api/contents?limit=500"),
+      this.request("/api/knowledge?limit=500")
+    ]);
+    return { topics, contents, knowledgeItems };
+  }
+  exportKnowledgeMarkdown(ids = []) {
+    return this.request("/api/knowledge/export/markdown", { method: "POST", body: JSON.stringify({ ids }) });
+  }
+}
+
 const storageProvider = new LocalStorageProvider(STORAGE_KEY);
+const apiClient = new ApiClient();
+const backendApiProvider = apiClient;
+let backendSyncTimer = null;
+let backendBootstrapDone = false;
 let db = migrateDatabase(storageProvider.load());
 saveDb();
 
 function saveDb() {
   storageProvider.save(db);
+  scheduleBackendSync();
   renderHealth();
+}
+
+function updateBackendStatus(patch = {}) {
+  db.settings.backendStatus = normalizeBackendStatus({ ...(db.settings.backendStatus || {}), ...patch, updatedAt: now() });
+  storageProvider.save(db);
+  renderHealth();
+  return db.settings.backendStatus;
+}
+
+function scheduleBackendSync() {
+  const config = normalizeBackendApiConfig(db.settings?.backendApiConfig);
+  if (!config.enabled || !config.syncOnSave) return;
+  clearTimeout(backendSyncTimer);
+  backendSyncTimer = setTimeout(() => {
+    backendApiProvider.importLocalStorage(db)
+      .then(summary => updateBackendStatus({ lastSuccess: true, lastAction: "syncOnSave", lastError: "", lastSummary: JSON.stringify(summary) }))
+      .catch(error => updateBackendStatus({ lastSuccess: false, lastAction: "syncOnSave", lastError: error.message || String(error), lastSummary: "已保留 localStorage 本地备份" }));
+  }, 800);
+}
+
+function upsertById(list, item) {
+  const index = list.findIndex(existing => existing.id === item.id);
+  if (index >= 0) list[index] = { ...list[index], ...item, updatedAt: item.updatedAt || list[index].updatedAt };
+  else list.unshift(item);
+}
+
+function mergeBackendCoreData(snapshot = {}) {
+  (snapshot.topics || []).forEach(item => upsertById(db.topics, normalizeTopic({ ...(item.raw || {}), id: item.id, source: item.source, title: item.title, url: item.url, author: item.author, category: item.category, status: item.status, score: item.score })));
+  (snapshot.contents || []).forEach(item => upsertById(db.contentItems, normalizeContent({ ...(item.raw || {}), id: item.id, sourceTopicId: item.topic_id || item.raw?.sourceTopicId, title: item.title, status: item.status, studioPlatform: item.platform, studioFormat: item.content_type, sourceUrl: item.source_url })));
+  (snapshot.knowledgeItems || []).forEach(item => upsertById(db.knowledgeItems, normalizeKnowledge({ ...(item.raw || {}), id: item.id, linkedTopicId: item.topic_id || item.raw?.linkedTopicId, linkedContentIds: item.content_id ? [item.content_id] : item.raw?.linkedContentIds, title: item.title, source: item.source_url || item.raw?.source, tags: item.tags, summary: item.body })));
+  storageProvider.save(db);
+  render();
+  return snapshot;
+}
+
+async function bootstrapBackendCoreData() {
+  const config = normalizeBackendApiConfig(db.settings?.backendApiConfig);
+  if (backendBootstrapDone || !config.enabled) return;
+  backendBootstrapDone = true;
+  try {
+    const snapshot = await apiClient.pullCoreData();
+    mergeBackendCoreData(snapshot);
+    updateBackendStatus({ lastSuccess: true, lastAction: "bootstrapPull", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Contents ${snapshot.contents.length} · Knowledge ${snapshot.knowledgeItems.length}` });
+  } catch (error) {
+    updateBackendStatus({ lastSuccess: false, lastAction: "bootstrapPull", lastError: error.message || String(error), lastSummary: "后端不可用，继续使用 localStorage" });
+  }
 }
 
 function migrateDatabase(raw) {
@@ -1051,6 +1164,8 @@ function migrateDatabase(raw) {
 
   newDb.settings.aiApiConfig = normalizeAiApiConfig(source.settings?.aiApiConfig);
   newDb.settings.aiStatus = normalizeAiStatus(source.settings?.aiStatus);
+  newDb.settings.backendApiConfig = normalizeBackendApiConfig(source.settings?.backendApiConfig);
+  newDb.settings.backendStatus = normalizeBackendStatus(source.settings?.backendStatus);
   newDb.settings.githubSourceConfig = normalizeGithubSourceConfig(source.settings?.githubSourceConfig);
   newDb.settings.feedSources = (Array.isArray(source.settings?.feedSources) && source.settings.feedSources.length ? source.settings.feedSources : createPresetFeedSources()).map(normalizeFeedSource);
   newDb.settings.feedCorsProxyUrl = source.settings?.feedCorsProxyUrl || "";
@@ -4432,6 +4547,8 @@ window.workflowPipeline = workflowPipeline;
 window.callOpenAICompatible = callOpenAICompatible;
 window.safeParseJSON = safeParseJSON;
 window.testAiConnection = testAiConnection;
+window.backendApiProvider = backendApiProvider;
+window.mergeBackendCoreData = mergeBackendCoreData;
 window.PlannerAgent = PlannerAgent;
 window.ResearchAgent = ResearchAgent;
 window.WriterAgent = WriterAgent;
@@ -5799,6 +5916,8 @@ function renderSettingsV2() {
   const config = getAiApiConfig();
   const rawConfig = normalizeAiApiConfig(db.settings?.aiApiConfig);
   const status = normalizeAiStatus(db.settings?.aiStatus);
+  const backendConfig = normalizeBackendApiConfig(db.settings?.backendApiConfig);
+  const backendStatus = normalizeBackendStatus(db.settings?.backendStatus);
   const githubConfig = normalizeGithubSourceConfig(db.settings?.githubSourceConfig);
   const githubStatus = normalizeSourceStatus(db.settings?.sourceStatus?.github || { sourceId: "github" });
   const githubCacheMs = SourceCacheStore.getRemainingMs("github");
@@ -5838,6 +5957,33 @@ function renderSettingsV2() {
       <div class="mini-stack">
         ${["planner.recommend", "research.analyze", "writer.xhs", "writer.douyin", "writer.bilibili", "review.content", "video.prepare"].map(route => `<span class="chip">${route} → ${config.provider}</span>`).join("")}
       </div>
+    </div>
+    <div class="card">
+      <h3>Backend & Database</h3>
+      <p>Phase 7 使用 FastAPI + PostgreSQL。localStorage 会继续保留为本地备份；API Key 和平台 Token 不进入前端代码。</p>
+      <div class="form-grid">
+        <div><label>启用 Backend API</label><select id="backendEnabled"><option value="false" ${!backendConfig.enabled ? "selected" : ""}>关闭</option><option value="true" ${backendConfig.enabled ? "selected" : ""}>启用</option></select></div>
+        <div><label>Backend Base URL</label><input id="backendBaseUrl" value="${escapeHtml(backendConfig.baseUrl)}" placeholder="http://localhost:8000" /></div>
+        <div><label>保存时同步</label><select id="backendSyncOnSave"><option value="true" ${backendConfig.syncOnSave ? "selected" : ""}>启用</option><option value="false" ${!backendConfig.syncOnSave ? "selected" : ""}>关闭</option></select></div>
+      </div>
+      <div class="toolbar" style="margin-top:12px">
+        <button class="btn" data-save-backend-settings>保存后端设置</button>
+        <button class="btn ghost" data-test-backend-api>测试后端</button>
+        <button class="btn ghost" data-import-localstorage-backend>导入 localStorage 到数据库</button>
+        <button class="btn ghost" data-pull-backend-core>从数据库读取核心数据</button>
+        <button class="btn ghost" data-export-knowledge-markdown>导出 Knowledge Markdown</button>
+      </div>
+      <div class="meta">后端目录：backend/；启动后 API Docs：${escapeHtml(backendConfig.baseUrl)}/docs</div>
+    </div>
+    <div class="card">
+      <h3>Backend 状态</h3>
+      ${kv("启用状态", backendConfig.enabled ? "已启用" : "未启用")}
+      ${kv("Base URL", backendConfig.baseUrl)}
+      ${kv("最近动作", backendStatus.lastAction || "—")}
+      ${kv("最近成功", backendStatus.updatedAt ? (backendStatus.lastSuccess ? "成功" : "失败") : "暂无")}
+      ${kv("最近摘要", backendStatus.lastSummary || "—")}
+      ${kv("最近错误", backendStatus.lastError || "—")}
+      ${kv("更新时间", backendStatus.updatedAt ? new Date(backendStatus.updatedAt).toLocaleString("zh-CN") : "—")}
     </div>
     <div class="card">
       <h3>GitHub Source 设置</h3>
@@ -6023,6 +6169,8 @@ function renderHealth() {
   const aiConfig = getAiApiConfig();
   const rawAiConfig = normalizeAiApiConfig(db.settings?.aiApiConfig);
   const aiStatus = normalizeAiStatus(db.settings?.aiStatus);
+  const backendConfig = normalizeBackendApiConfig(db.settings?.backendApiConfig);
+  const backendStatus = normalizeBackendStatus(db.settings?.backendStatus);
   const aiCallState = aiStatus.lastUsedFallback ? "Fallback" : (aiStatus.lastSuccess ? "Success" : "—");
   target.innerHTML = `
     <span class="chip">Content ${db.contentItems?.length || 0}</span>
@@ -6035,6 +6183,8 @@ function renderHealth() {
     <span class="chip">Key: ${rawAiConfig.apiKey ? "已配置" : "未配置"}</span>
     <span class="chip">AI Task: ${escapeHtml(aiStatus.lastTask || "—")}</span>
     <span class="chip">AI Call: ${aiCallState}</span>
+    <span class="chip">Backend: ${backendConfig.enabled ? "API" : "localStorage"}</span>
+    <span class="chip">DB Sync: ${backendStatus.updatedAt ? (backendStatus.lastSuccess ? "Success" : "Failed") : "—"}</span>
     ${aiStatus.lastError ? `<span class="chip">AI Error: ${escapeHtml(aiStatus.lastError)}</span>` : ""}
     ${aiStatus.lastFallbackReason ? `<span class="chip">Fallback: ${escapeHtml(aiStatus.lastFallbackReason)}</span>` : ""}
     <div class="divider"></div>
@@ -6636,6 +6786,68 @@ document.addEventListener("click", async event => {
     await testAiConnection();
     return;
   }
+  if (target.dataset.saveBackendSettings !== undefined) {
+    db.settings.backendApiConfig = normalizeBackendApiConfig({
+      enabled: document.getElementById("backendEnabled").value === "true",
+      baseUrl: document.getElementById("backendBaseUrl").value.trim() || "http://localhost:8000",
+      syncOnSave: document.getElementById("backendSyncOnSave").value === "true",
+      updatedAt: now()
+    });
+    saveDb();
+    return render();
+  }
+  if (target.dataset.testBackendApi !== undefined) {
+    db.settings.backendApiConfig = normalizeBackendApiConfig({
+      enabled: document.getElementById("backendEnabled").value === "true",
+      baseUrl: document.getElementById("backendBaseUrl").value.trim() || "http://localhost:8000",
+      syncOnSave: document.getElementById("backendSyncOnSave").value === "true",
+      updatedAt: now()
+    });
+    storageProvider.save(db);
+    try {
+      const result = await backendApiProvider.health();
+      updateBackendStatus({ lastSuccess: true, lastAction: "health", lastError: "", lastSummary: result.status || "ok" });
+    } catch (error) {
+      updateBackendStatus({ lastSuccess: false, lastAction: "health", lastError: error.message || String(error), lastSummary: "后端未连接，localStorage 仍可使用" });
+    }
+    return render();
+  }
+  if (target.dataset.importLocalstorageBackend !== undefined) {
+    try {
+      const summary = await backendApiProvider.importLocalStorage(db);
+      updateBackendStatus({ lastSuccess: true, lastAction: "importLocalStorage", lastError: "", lastSummary: JSON.stringify(summary) });
+    } catch (error) {
+      updateBackendStatus({ lastSuccess: false, lastAction: "importLocalStorage", lastError: error.message || String(error), lastSummary: "导入失败，localStorage 未丢失" });
+    }
+    return render();
+  }
+  if (target.dataset.pullBackendCore !== undefined) {
+    try {
+      const snapshot = await backendApiProvider.pullCoreData();
+      mergeBackendCoreData(snapshot);
+      updateBackendStatus({ lastSuccess: true, lastAction: "pullCoreData", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Contents ${snapshot.contents.length}` });
+    } catch (error) {
+      updateBackendStatus({ lastSuccess: false, lastAction: "pullCoreData", lastError: error.message || String(error), lastSummary: "读取失败，继续使用本地数据" });
+    }
+    return render();
+  }
+  if (target.dataset.exportKnowledgeMarkdown !== undefined) {
+    try {
+      const result = await backendApiProvider.exportKnowledgeMarkdown([]);
+      const combined = (result.files || []).map(file => `<!-- ${file.filename} -->\n${file.content}`).join("\n\n");
+      const blob = new Blob([combined || "# Knowledge Export\n\n暂无 Knowledge。"], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ai-content-os-knowledge-${localDateString()}.md`;
+      a.click();
+      URL.revokeObjectURL(url);
+      updateBackendStatus({ lastSuccess: true, lastAction: "exportKnowledgeMarkdown", lastError: "", lastSummary: `${result.files?.length || 0} files` });
+    } catch (error) {
+      updateBackendStatus({ lastSuccess: false, lastAction: "exportKnowledgeMarkdown", lastError: error.message || String(error), lastSummary: "导出失败，请确认后端已启动" });
+    }
+    return render();
+  }
   if (target.dataset.saveClusteringSettings !== undefined) {
     db.settings.clusteringConfig = collectClusteringConfig();
     saveDb();
@@ -6697,3 +6909,4 @@ document.getElementById("globalSearch").addEventListener("input", event => {
 
 if (!appState.selectedContentId) appState.selectedContentId = ContentStore.getAll()[0]?.id || null;
 render();
+bootstrapBackendCoreData();
