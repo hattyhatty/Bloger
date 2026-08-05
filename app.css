@@ -149,6 +149,9 @@ label { display: block; margin-bottom: 7px; color: #735461; font-size: 13px; fon
 .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .workspace-grid { grid-template-columns: 1fr 1.12fr 1fr; }
+.content-studio-list { max-height: 72vh; overflow: auto; padding-right: 2px; }
+.content-editor-card { align-content: start; }
+.studio-body { min-height: 360px; }
 .form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: end; }
 .form-grid.single { grid-template-columns: 1fr; }
 .span-2 { grid-column: span 2; }

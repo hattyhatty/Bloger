@@ -92,7 +92,9 @@ const CLUSTER_STATUS_LABELS = Object.freeze({
   FAILED: "处理失败"
 });
 const TARGET_PLATFORMS = Object.freeze(["小红书", "抖音", "B站"]);
+const CONTENT_STUDIO_PLATFORMS = Object.freeze(["小红书", "抖音", "B站", "公众号"]);
 const CONTENT_TYPES = Object.freeze(["图文", "短视频", "视频脚本", "口播"]);
+const CONTENT_STUDIO_FORMATS = Object.freeze(["短帖", "口播稿", "长文"]);
 const PUBLISH_STATUS = Object.freeze({ DRAFT: "DRAFT", SCHEDULED: "SCHEDULED", PUBLISHED: "PUBLISHED", FAILED: "FAILED" });
 const PUBLISH_STATUS_LABELS = Object.freeze({ DRAFT: "草稿", SCHEDULED: "已排期", PUBLISHED: "已发布", FAILED: "发布失败" });
 const LEGACY_LONG_FORM_PLATFORM = ["公", "众", "号"].join("");
@@ -243,6 +245,7 @@ const appState = {
   editPublishJobId: null,
   isGeneratingBrief: false,
   briefError: "",
+  studioDrafts: {},
   researchView: "topics",
   radarViewMode: "card",
   filters: {
@@ -304,6 +307,8 @@ const scoreBadge = score => `<span class="score">${clampScore(score)}分</span>`
 const tagChips = tags => `<div class="chips">${(tags || []).map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}</div>`;
 const sourcePlatformOptions = selected => SOURCE_PLATFORMS.map(item => `<option ${item === selected ? "selected" : ""}>${item}</option>`).join("");
 const targetPlatformOptions = selected => TARGET_PLATFORMS.map(item => `<option ${item === selected ? "selected" : ""}>${item}</option>`).join("");
+const studioPlatformOptions = selected => CONTENT_STUDIO_PLATFORMS.map(item => `<option value="${item}" ${item === selected ? "selected" : ""}>${item}</option>`).join("");
+const studioFormatOptions = selected => CONTENT_STUDIO_FORMATS.map(item => `<option value="${item}" ${item === selected ? "selected" : ""}>${item}</option>`).join("");
 const statusOptions = selected => Object.values(CONTENT_STATUS).map(item => `<option value="${item}" ${item === selected ? "selected" : ""}>${STATUS_LABELS[item]}</option>`).join("");
 
 function empty(text) { return `<div class="empty">${text}</div>`; }
@@ -361,6 +366,14 @@ function normalizeContent(item = {}) {
     recommendedPlatform: isTargetPlatform(item.recommendedPlatform) ? item.recommendedPlatform : "",
     recommendationReason: item.recommendationReason || "",
     recommendationPriority: item.recommendationPriority || "",
+    studioPlatform: CONTENT_STUDIO_PLATFORMS.includes(item.studioPlatform) ? item.studioPlatform : (CONTENT_STUDIO_PLATFORMS.includes(item.recommendedPlatform) ? item.recommendedPlatform : targetPlatforms[0]),
+    studioFormat: CONTENT_STUDIO_FORMATS.includes(item.studioFormat) ? item.studioFormat : (item.recommendedContentType === "图文" ? "短帖" : item.recommendedContentType === "文章" ? "长文" : "口播稿"),
+    draftTitle: item.draftTitle || "",
+    draftHook: item.draftHook || "",
+    draftBody: item.draftBody || item.body || "",
+    draftTags: Array.isArray(item.draftTags) ? item.draftTags : splitTags(item.draftTags),
+    draftUpdatedAt: item.draftUpdatedAt || "",
+    draftGenerationNote: item.draftGenerationNote || "",
     copyrightStatus: item.copyrightStatus || "待检查",
     statusHistory: Array.isArray(item.statusHistory) ? item.statusHistory : [{ status: item.status || CONTENT_STATUS.DISCOVERED, at: createdAt, note: "初始化" }],
     createdAt,
@@ -1785,6 +1798,147 @@ const DailyBriefService = {
     });
     appState.selectedContentId = content.id;
     return ContentStore.getById(content.id);
+  }
+};
+
+const ContentStudioService = {
+  getDraft(contentId) {
+    const content = ContentStore.getById(contentId);
+    if (!content) return null;
+    const pending = appState.studioDrafts?.[contentId] || {};
+    return {
+      platform: pending.platform || content.studioPlatform || safeTargetPlatforms(content.targetPlatforms)[0] || "小红书",
+      format: pending.format || content.studioFormat || "口播稿",
+      title: pending.title ?? content.draftTitle ?? content.title,
+      hook: pending.hook ?? content.draftHook ?? content.recommendedHook ?? "",
+      body: pending.body ?? content.draftBody ?? content.body ?? "",
+      tags: Array.isArray(pending.tags) ? pending.tags : (content.draftTags?.length ? content.draftTags : content.tags),
+      note: pending.note || content.draftGenerationNote || "",
+      generatedAt: pending.generatedAt || content.draftUpdatedAt || ""
+    };
+  },
+  fallbackDraft(content, platform, format, note = "AI 不可用，已使用本地规则生成草稿。") {
+    const angle = content.recommendedAngle || content.selectedAngle || "这件事对中文用户意味着什么";
+    const sourceTitle = content.sourceTitle || content.title;
+    const hook = content.recommendedHook || `海外 AI 圈正在讨论：${sourceTitle}`;
+    const body = [
+      hook,
+      "",
+      `核心信息：${content.aiAnalysis || content.originalSummary || content.clusterSummary || "目前信息有限，建议先保留来源并等待更多信息。"}`,
+      "",
+      `中文角度：${angle}`,
+      "",
+      `为什么值得关注：${content.recommendationReason || "它和 AI 工具、模型能力或普通用户工作流直接相关。"}`,
+      "",
+      `来源：${content.sourceUrl || "暂无原始链接"}`
+    ].join("\n");
+    return {
+      platform,
+      format,
+      title: content.draftTitle || content.title,
+      hook,
+      body: content.draftBody || body,
+      tags: content.draftTags?.length ? content.draftTags : [...new Set([...(content.tags || []), platform, format].filter(Boolean))].slice(0, 8),
+      note,
+      generatedAt: now()
+    };
+  },
+  async generateDraft(contentId, platform, format) {
+    const content = ContentStore.getById(contentId);
+    if (!content) throw new Error("找不到当前 Content");
+    const safePlatform = CONTENT_STUDIO_PLATFORMS.includes(platform) ? platform : "小红书";
+    const safeFormat = CONTENT_STUDIO_FORMATS.includes(format) ? format : "口播稿";
+    const previous = this.getDraft(contentId) || {};
+    const generatedFallback = this.fallbackDraft(content, safePlatform, safeFormat);
+    const fallback = {
+      ...generatedFallback,
+      title: previous.title || generatedFallback.title,
+      hook: previous.hook || generatedFallback.hook,
+      body: previous.body || generatedFallback.body,
+      tags: previous.tags?.length ? previous.tags : generatedFallback.tags,
+      note: "AI 不可用，已保留当前编辑器草稿。"
+    };
+    const prompt = `请基于已有 Research/Content 信息，生成一份可编辑中文内容草稿。只返回 JSON，不要输出解释文字。
+JSON schema:
+{"title":"","hook":"","body":"","tags":[]}
+
+要求：
+- 目标平台：${safePlatform}
+- 内容形式：${safeFormat}
+- 保留来源事实，不编造链接或未确认结论
+- 标题、Hook、正文/脚本、标签都用中文
+- 公众号可写成长文风格，但本阶段不做真实发布
+
+Content:
+标题：${content.title}
+来源标题：${content.sourceTitle}
+原始链接：${content.sourceUrl}
+推荐角度：${content.recommendedAngle || content.selectedAngle}
+推荐 Hook：${content.recommendedHook}
+推荐原因：${content.recommendationReason}
+AI 分析：${content.aiAnalysis}
+评论总结：${content.commentSummary}
+摘要：${content.originalSummary || content.clusterSummary}
+标签：${content.tags.join(", ")}`;
+    try {
+      const text = await aiRouter.generateText(prompt, {
+        task: "contentStudio.generateDraft",
+        title: content.title,
+        format: "Content Studio Draft JSON",
+        systemPrompt: "你是 AI Content OS 的中文内容编辑。只输出 JSON，不能编造来源，不能输出 markdown code fence 以外的多余解释。"
+      });
+      const parsed = safeParseJSON(text, null);
+      if (!parsed) return fallback;
+      return {
+        platform: safePlatform,
+        format: safeFormat,
+        title: parsed.title || fallback.title,
+        hook: parsed.hook || fallback.hook,
+        body: parsed.body || fallback.body,
+        tags: Array.isArray(parsed.tags) && parsed.tags.length ? parsed.tags.map(String).slice(0, 10) : fallback.tags,
+        note: "AI 草稿已生成，保存前不会覆盖原内容。",
+        generatedAt: now()
+      };
+    } catch (error) {
+      return this.fallbackDraft(content, safePlatform, safeFormat, error.message || "AI 调用失败，已保留本地草稿。");
+    }
+  },
+  setPendingDraft(contentId, draft) {
+    appState.studioDrafts = appState.studioDrafts || {};
+    appState.studioDrafts[contentId] = draft;
+    return draft;
+  },
+  collectDraftFromForm(contentId) {
+    const content = ContentStore.getById(contentId);
+    if (!content) throw new Error("找不到当前 Content");
+    return {
+      platform: document.getElementById("studioPlatform")?.value || content.studioPlatform,
+      format: document.getElementById("studioFormat")?.value || content.studioFormat,
+      title: document.getElementById("studioTitle")?.value.trim() || content.title,
+      hook: document.getElementById("studioHook")?.value.trim() || "",
+      body: document.getElementById("studioBody")?.value.trim() || "",
+      tags: splitTags(document.getElementById("studioTags")?.value || ""),
+      note: "已手动保存草稿。",
+      generatedAt: now()
+    };
+  },
+  saveDraft(contentId, draft) {
+    const content = ContentStore.getById(contentId);
+    if (!content) throw new Error("找不到当前 Content");
+    const payload = {
+      studioPlatform: draft.platform,
+      studioFormat: draft.format,
+      draftTitle: draft.title,
+      draftHook: draft.hook,
+      draftBody: draft.body,
+      draftTags: draft.tags,
+      draftUpdatedAt: draft.generatedAt || now(),
+      draftGenerationNote: draft.note || "草稿已保存。",
+      status: content.status === CONTENT_STATUS.DISCOVERED || content.status === CONTENT_STATUS.COLLECTED ? CONTENT_STATUS.WRITING : content.status
+    };
+    const saved = ContentStore.update(contentId, payload);
+    if (appState.studioDrafts) delete appState.studioDrafts[contentId];
+    return saved;
   }
 };
 
@@ -3503,6 +3657,7 @@ window.ClusterKnowledgeService = ClusterKnowledgeService;
 window.ClusterPipeline = ClusterPipeline;
 window.DailyBriefStore = DailyBriefStore;
 window.DailyBriefService = DailyBriefService;
+window.ContentStudioService = ContentStudioService;
 window.SourceCacheStore = SourceCacheStore;
 window.FeedCacheStore = FeedCacheStore;
 window.FeedSourceStore = FeedSourceStore;
@@ -4415,38 +4570,70 @@ function renderWorkspace() {
   if (!content) return empty("还没有 Content，请先在 Content Library 新增。");
   appState.selectedContentId = content.id;
   const assets = GeneratedAssetStore.getByContentId(content.id);
+  const draft = ContentStudioService.getDraft(content.id);
+  const sourceTopic = content.sourceTopicId ? TopicStore.getById(content.sourceTopicId) : null;
+  const sourceCluster = content.sourceClusterId ? TopicClusterStore.getById(content.sourceClusterId) : null;
   return `<div class="card toolbar">
       <select id="workspaceSelect">${ContentStore.getAll().map(item => `<option value="${item.id}" ${item.id === content.id ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}</select>
       <button class="btn ghost" data-analyze="${content.id}">AI 分析</button>
-      <button class="btn" data-generate-all="${content.id}">全部生成</button>
+      <button class="btn" data-studio-generate="${content.id}">生成草稿</button>
+      <button class="btn ghost" data-studio-save="${content.id}">保存草稿</button>
       <button class="btn ghost" data-review="${content.id}">AI 审核</button>
     </div>
     <div class="grid workspace-grid">
       <div class="card">
-        <h3>原始信息</h3>
-        ${kv("来源平台", content.sourcePlatform)}
-        ${kv("原始标题", content.sourceTitle)}
-        ${kv("原始链接", `<a href="${escapeHtml(content.sourceUrl)}" target="_blank" rel="noreferrer">${escapeHtml(content.sourceUrl)}</a>`)}
-        ${kv("发布时间", content.sourcePublishedAt)}
-        ${kv("原文摘要", content.originalSummary)}
+        <h3>内容列表</h3>
+        <div class="mini-stack content-studio-list">
+          ${ContentStore.getAll().map(item => `<button class="topic-card ${item.id === content.id ? "active" : ""}" data-open-workspace="${item.id}">
+            <div class="item-head"><strong>${escapeHtml(item.title)}</strong>${statusPill(item.status)}</div>
+            <div class="meta">${escapeHtml(item.sourcePlatform)} · ${escapeHtml(item.studioPlatform || item.targetPlatforms[0] || "未设置")} · ${escapeHtml(item.studioFormat || item.contentType)}</div>
+            <div class="chips">${(item.draftBody ? ["已有草稿"] : ["待生成"]).map(label => `<span class="chip">${label}</span>`).join("")}${(item.tags || []).slice(0, 2).map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join("")}</div>
+          </button>`).join("")}
+        </div>
+      </div>
+      <div class="card content-editor-card">
+        <div class="item-head">
+          <h3>Content Studio 编辑器</h3>
+          <span class="chip">${escapeHtml(draft.platform)} · ${escapeHtml(draft.format)}</span>
+        </div>
+        <div class="form-grid single">
+          <div><label>标题</label><input id="studioTitle" value="${escapeHtml(draft.title)}" /></div>
+          <div><label>Hook</label><textarea id="studioHook">${escapeHtml(draft.hook)}</textarea></div>
+          <div><label>正文 / 脚本</label><textarea id="studioBody" class="studio-body">${escapeHtml(draft.body)}</textarea></div>
+          <div><label>标签</label><input id="studioTags" value="${escapeHtml((draft.tags || []).join("，"))}" /></div>
+        </div>
+        <div class="toolbar" style="margin-top:12px">
+          <button class="btn" data-studio-save="${content.id}">保存草稿</button>
+          <button class="btn ghost" data-studio-generate="${content.id}">重新生成</button>
+        </div>
+        <div class="meta">${escapeHtml(draft.note || "重新生成会先放入编辑器预览，不会自动覆盖已保存草稿。")}${draft.generatedAt ? ` · ${new Date(draft.generatedAt).toLocaleString("zh-CN")}` : ""}</div>
+      </div>
+      <div class="card">
+        <h3>来源与生成设置</h3>
+        <div class="form-grid single">
+          <div><label>目标平台</label><select id="studioPlatform">${studioPlatformOptions(draft.platform)}</select></div>
+          <div><label>内容形式</label><select id="studioFormat">${studioFormatOptions(draft.format)}</select></div>
+        </div>
+        ${kv("来源平台", escapeHtml(content.sourcePlatform))}
+        ${kv("原始标题", escapeHtml(content.sourceTitle))}
+        ${kv("原始链接", content.sourceUrl ? `<a href="${escapeHtml(content.sourceUrl)}" target="_blank" rel="noreferrer">${escapeHtml(content.sourceUrl)}</a>` : "—")}
+        ${kv("来源 Topic", sourceTopic ? escapeHtml(sourceTopic.title) : escapeHtml(content.sourceTopicId || "—"))}
+        ${kv("来源 Cluster", sourceCluster ? escapeHtml(sourceCluster.title) : escapeHtml(content.sourceClusterId || "—"))}
+        ${kv("推荐角度", escapeHtml(content.recommendedAngle || content.selectedAngle || "—"))}
+        ${kv("推荐 Hook", escapeHtml(content.recommendedHook || "—"))}
+        ${kv("推荐原因", escapeHtml(content.recommendationReason || "—"))}
+        ${kv("Daily Brief", escapeHtml(content.dailyBriefDate || "—"))}
+        ${kv("原文摘要", escapeHtml(content.originalSummary || content.clusterSummary))}
+        ${kv("AI 分析", escapeHtml(content.aiAnalysis || "尚未分析。"))}
         ${kv("标签", tagChips(content.tags))}
         ${kv("分数", `${scoreBadge(content.finalScore)} ${scoreBadge(content.hotScore)} ${scoreBadge(content.chinaFitScore)}`)}
         ${kv("状态", statusPill(content.status))}
-      </div>
-      <div class="card">
-        <h3>AI 分析</h3>
-        ${kv("中文总结", content.aiAnalysis || "尚未分析，点击 Mock 分析。")}
-        ${kv("评论观点总结", content.commentSummary)}
-        ${kv("中文平台适配角度", content.selectedAngle)}
-        ${kv("争议点", content.controversyScore >= 75 ? "争议强：适合做对比、反问、评论区讨论。" : "争议中等：适合做知识解释。")}
-        ${kv("推荐内容形式", content.targetPlatforms.join(" / ") + " · " + content.contentType)}
-      </div>
-      <div class="card">
-        <h3>生成结果</h3>
+        <div class="divider"></div>
+        <h3>旧生成资产</h3>
         <div class="toolbar">
-          <button class="btn small ghost" data-generate="${content.id}:小红书">生成小红书</button>
-          <button class="btn small ghost" data-generate="${content.id}:抖音">生成抖音</button>
-          <button class="btn small ghost" data-generate="${content.id}:B站">生成 B站</button>
+          <button class="btn small ghost" data-generate="${content.id}:小红书">生成小红书资产</button>
+          <button class="btn small ghost" data-generate="${content.id}:抖音">生成抖音资产</button>
+          <button class="btn small ghost" data-generate="${content.id}:B站">生成 B站资产</button>
         </div>
         ${renderAssetGroup("小红书", assets, [ASSET_TYPES.XHS_POST, ASSET_TYPES.COVER_TITLE])}
         ${renderAssetGroup("抖音", assets, [ASSET_TYPES.DOUYIN_SCRIPT, ASSET_TYPES.VIDEO_STORYBOARD, ASSET_TYPES.VOICEOVER_TEXT, ASSET_TYPES.SUBTITLE_TEXT])}
@@ -5108,6 +5295,22 @@ document.addEventListener("click", async event => {
     return render();
   }
   if (target.dataset.analyze) { await ResearchAgent.analyze(target.dataset.analyze); return render(); }
+  if (target.dataset.studioGenerate) {
+    const contentId = target.dataset.studioGenerate;
+    const platform = document.getElementById("studioPlatform")?.value || ContentStore.getById(contentId)?.studioPlatform || "小红书";
+    const format = document.getElementById("studioFormat")?.value || ContentStore.getById(contentId)?.studioFormat || "口播稿";
+    const currentDraft = ContentStudioService.collectDraftFromForm(contentId);
+    ContentStudioService.setPendingDraft(contentId, currentDraft);
+    const generated = await ContentStudioService.generateDraft(contentId, platform, format);
+    ContentStudioService.setPendingDraft(contentId, generated);
+    return render();
+  }
+  if (target.dataset.studioSave) {
+    const contentId = target.dataset.studioSave;
+    const draft = ContentStudioService.collectDraftFromForm(contentId);
+    ContentStudioService.saveDraft(contentId, draft);
+    return render();
+  }
   if (target.dataset.generate) {
     const [id, platform] = target.dataset.generate.split(":");
     await WriterAgent.generate(id, platform);
