@@ -95,8 +95,8 @@ const TARGET_PLATFORMS = Object.freeze(["小红书", "抖音", "B站"]);
 const CONTENT_STUDIO_PLATFORMS = Object.freeze(["小红书", "抖音", "B站", "公众号"]);
 const CONTENT_TYPES = Object.freeze(["图文", "短视频", "视频脚本", "口播"]);
 const CONTENT_STUDIO_FORMATS = Object.freeze(["短帖", "口播稿", "长文"]);
-const PUBLISH_STATUS = Object.freeze({ DRAFT: "DRAFT", SCHEDULED: "SCHEDULED", PUBLISHED: "PUBLISHED", FAILED: "FAILED" });
-const PUBLISH_STATUS_LABELS = Object.freeze({ DRAFT: "草稿", SCHEDULED: "已排期", PUBLISHED: "已发布", FAILED: "发布失败" });
+const PUBLISH_STATUS = Object.freeze({ DRAFT: "DRAFT", READY: "READY", SCHEDULED: "SCHEDULED", PUBLISHED: "PUBLISHED", FAILED: "FAILED", CANCELLED: "CANCELLED" });
+const PUBLISH_STATUS_LABELS = Object.freeze({ DRAFT: "待准备", READY: "可以发布", SCHEDULED: "已排期", PUBLISHED: "已发布", FAILED: "发布失败", CANCELLED: "已取消" });
 const LEGACY_LONG_FORM_PLATFORM = ["公", "众", "号"].join("");
 const TASK_STATUS = Object.freeze({ PENDING: "PENDING", RUNNING: "RUNNING", SUCCESS: "SUCCESS", FAILED: "FAILED" });
 const TASK_TYPES = Object.freeze({
@@ -222,7 +222,7 @@ const NAV_ITEMS = [
   ["library", "▦", "Content Library 内容库", "Content Library", "所有 Content 对象的数据库视图。"],
   ["workspace", "✎", "Content Workspace 内容工作区", "Content Workspace", "围绕单条 Content 完成分析、生成和审核。"],
   ["video", "▶", "Video Pipeline 视频流水线", "Video Pipeline", "管理脚本、分镜、配音、字幕、封面和视频就绪状态。"],
-  ["publish", "□", "Publish Center 发布中心", "Publish Center", "管理小红书、抖音、B站发布计划。"],
+  ["publish", "□", "Publishing Center 发布中心", "Publishing Center", "管理平台版本、发布队列、排期和导出。"],
   ["analytics", "↗", "Analytics 数据复盘", "Analytics", "录入小红书、抖音、B站发布数据，并生成 mock 复盘建议。"],
   ["prompts", "#", "Prompt Library 提示词库", "Prompt Library", "把提示词作为可维护的数据对象管理。"],
   ["knowledge", "◈", "Knowledge Base 知识库", "Knowledge Base", "沉淀知识条目和关联内容。"],
@@ -243,6 +243,8 @@ const appState = {
   editFeedSourceId: null,
   selectedClusterId: null,
   editPublishJobId: null,
+  selectedPublishJobId: null,
+  publishView: "queue",
   isGeneratingBrief: false,
   briefError: "",
   studioDrafts: {},
@@ -269,7 +271,10 @@ const appState = {
     clusterStatus: "",
     clusterOfficial: "",
     clusterDate: "30 Days",
-    clusterSort: "finalScore"
+    clusterSort: "finalScore",
+    publishPlatform: "",
+    publishStatus: "",
+    publishDate: ""
   }
 };
 
@@ -374,6 +379,7 @@ function normalizeContent(item = {}) {
     draftTags: Array.isArray(item.draftTags) ? item.draftTags : splitTags(item.draftTags),
     draftUpdatedAt: item.draftUpdatedAt || "",
     draftGenerationNote: item.draftGenerationNote || "",
+    publishedPlatforms: Array.isArray(item.publishedPlatforms) ? item.publishedPlatforms : [],
     copyrightStatus: item.copyrightStatus || "待检查",
     statusHistory: Array.isArray(item.statusHistory) ? item.statusHistory : [{ status: item.status || CONTENT_STATUS.DISCOVERED, at: createdAt, note: "初始化" }],
     createdAt,
@@ -611,11 +617,18 @@ function normalizePublishJob(item = {}) {
   return {
     id: item.id || uid("job"),
     contentId: item.contentId || "",
-    platform: isTargetPlatform(item.platform) ? item.platform : "小红书",
+    platform: CONTENT_STUDIO_PLATFORMS.includes(item.platform) ? item.platform : "小红书",
+    contentType: item.contentType || item.format || "口播稿",
     scheduledAt: item.scheduledAt || "",
     status: Object.values(PUBLISH_STATUS).includes(item.status) ? item.status : PUBLISH_STATUS.DRAFT,
     url: item.url || "",
     notes: item.notes || "",
+    actualPublishedAt: item.actualPublishedAt || "",
+    titleSnapshot: item.titleSnapshot || "",
+    bodySnapshot: item.bodySnapshot || "",
+    tagsSnapshot: Array.isArray(item.tagsSnapshot) ? item.tagsSnapshot : splitTags(item.tagsSnapshot),
+    checklist: Array.isArray(item.checklist) ? item.checklist : [],
+    lastCheckAt: item.lastCheckAt || "",
     createdAt,
     updatedAt: item.updatedAt || createdAt
   };
@@ -2597,6 +2610,110 @@ const PublishJobStore = {
   getByContentId(contentId) { return this.getAll().filter(item => item.contentId === contentId); }
 };
 
+const PublishingService = {
+  getPlatformVersion(contentId, platform = "", contentType = "") {
+    const content = ContentStore.getById(contentId);
+    if (!content) return null;
+    const draft = ContentStudioService.getDraft(contentId) || {};
+    const selectedPlatform = CONTENT_STUDIO_PLATFORMS.includes(platform) ? platform : (content.studioPlatform || draft.platform || "小红书");
+    const selectedType = contentType || content.studioFormat || draft.format || "口播稿";
+    return {
+      content,
+      platform: selectedPlatform,
+      contentType: selectedType,
+      title: content.draftTitle || draft.title || content.title,
+      body: content.draftBody || draft.body || content.aiAnalysis || content.originalSummary || "",
+      hook: content.draftHook || draft.hook || "",
+      tags: content.draftTags?.length ? content.draftTags : (draft.tags?.length ? draft.tags : content.tags),
+      sourceUrl: content.sourceUrl,
+      reviewed: [CONTENT_STATUS.REVIEWING, CONTENT_STATUS.VIDEO_READY, CONTENT_STATUS.SCHEDULED, CONTENT_STATUS.PUBLISHED].includes(content.status) || /riskLevel|审核|low|medium|high|通过/i.test(content.reviewNotes || "")
+    };
+  },
+  preflight(jobOrPayload) {
+    const contentId = jobOrPayload.contentId;
+    const version = this.getPlatformVersion(contentId, jobOrPayload.platform, jobOrPayload.contentType);
+    const missing = [];
+    if (!version?.title) missing.push("缺少标题");
+    if (!version?.body) missing.push("缺少正文或脚本");
+    if (!version?.reviewed) missing.push("尚未完成 Review");
+    if (!version?.sourceUrl) missing.push("缺少来源链接");
+    if (!jobOrPayload.platform) missing.push("缺少目标平台");
+    if (!jobOrPayload.scheduledAt) missing.push("缺少计划发布时间");
+    const content = version?.content;
+    if (/high|严重|高风险/i.test(content?.reviewNotes || "")) missing.push("仍有未处理的严重 Review 问题");
+    return { ok: missing.length === 0, missing, checkedAt: now() };
+  },
+  findDuplicate({ contentId, platform, contentType, scheduledAt }, ignoreId = "") {
+    return PublishJobStore.getAll().find(job =>
+      job.id !== ignoreId &&
+      job.contentId === contentId &&
+      job.platform === platform &&
+      job.contentType === contentType &&
+      job.scheduledAt === scheduledAt &&
+      job.status !== PUBLISH_STATUS.CANCELLED
+    ) || null;
+  },
+  createOrUpdate(payload, existingId = "") {
+    const version = this.getPlatformVersion(payload.contentId, payload.platform, payload.contentType);
+    if (!version) throw new Error("找不到来源 Content");
+    const record = {
+      ...payload,
+      platform: version.platform,
+      contentType: version.contentType,
+      titleSnapshot: version.title,
+      bodySnapshot: version.body,
+      tagsSnapshot: version.tags,
+      checklist: this.preflight(payload).missing,
+      lastCheckAt: now()
+    };
+    const duplicate = this.findDuplicate(record, existingId);
+    if (duplicate) {
+      appState.selectedPublishJobId = duplicate.id;
+      appState.editPublishJobId = duplicate.id;
+      return duplicate;
+    }
+    const job = existingId ? PublishJobStore.update(existingId, record) : PublishJobStore.create(record);
+    appState.selectedPublishJobId = job.id;
+    if ([PUBLISH_STATUS.READY, PUBLISH_STATUS.SCHEDULED].includes(job.status)) ContentStore.update(job.contentId, { status: CONTENT_STATUS.SCHEDULED });
+    if (job.status === PUBLISH_STATUS.PUBLISHED) this.markPublished(job.id, { actualPublishedAt: job.actualPublishedAt, url: job.url, notes: job.notes });
+    return PublishJobStore.getById(job.id);
+  },
+  markPublished(jobId, patch = {}) {
+    const job = PublishJobStore.update(jobId, { ...patch, status: PUBLISH_STATUS.PUBLISHED, actualPublishedAt: patch.actualPublishedAt || now() });
+    if (!job) return null;
+    const content = ContentStore.getById(job.contentId);
+    if (content) {
+      const records = (content.publishedPlatforms || []).filter(item => !(item.platform === job.platform && item.jobId === job.id));
+      records.push({ platform: job.platform, jobId: job.id, url: job.url, publishedAt: job.actualPublishedAt || now(), notes: job.notes });
+      ContentStore.update(content.id, { status: CONTENT_STATUS.PUBLISHED, publishedPlatforms: records });
+    }
+    return PublishJobStore.getById(jobId);
+  },
+  exportText(job, format = "txt") {
+    const content = ContentStore.getById(job.contentId);
+    const title = job.titleSnapshot || content?.draftTitle || content?.title || "";
+    const body = job.bodySnapshot || content?.draftBody || "";
+    const tags = job.tagsSnapshot?.length ? job.tagsSnapshot : (content?.draftTags || content?.tags || []);
+    const lines = format === "md"
+      ? [`# ${title}`, "", body, "", tags.length ? `标签：${tags.map(tag => `#${tag}`).join(" ")}` : "", job.notes ? `备注：${job.notes}` : ""]
+      : [title, "", body, "", tags.length ? `标签：${tags.map(tag => `#${tag}`).join(" ")}` : "", job.notes ? `备注：${job.notes}` : ""];
+    return lines.filter(line => line !== "").join("\n");
+  },
+  download(jobId, format = "txt") {
+    const job = PublishJobStore.getById(jobId);
+    if (!job) return null;
+    const text = this.exportText(job, format);
+    const blob = new Blob([text], { type: format === "md" ? "text/markdown;charset=utf-8" : "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(job.titleSnapshot || "publish").replace(/[\\/:*?"<>|]/g, "_")}.${format}`;
+    a.click();
+    URL.revokeObjectURL(url);
+    return text;
+  }
+};
+
 const AnalyticsStore = {
   ...createCrudStore("analyticsRecords", normalizeAnalyticsRecord),
   getByContentId(contentId) { return this.getAll().filter(item => item.contentId === contentId); }
@@ -3670,6 +3787,7 @@ window.stripHtml = stripHtml;
 window.GeneratedAssetStore = GeneratedAssetStore;
 window.VideoProjectStore = VideoProjectStore;
 window.PublishJobStore = PublishJobStore;
+window.PublishingService = PublishingService;
 window.AnalyticsStore = AnalyticsStore;
 window.PromptStore = PromptStore;
 window.KnowledgeStore = KnowledgeStore;
@@ -4623,11 +4741,22 @@ function renderWorkspace() {
         ${kv("推荐 Hook", escapeHtml(content.recommendedHook || "—"))}
         ${kv("推荐原因", escapeHtml(content.recommendationReason || "—"))}
         ${kv("Daily Brief", escapeHtml(content.dailyBriefDate || "—"))}
+        ${content.publishedPlatforms?.length ? kv("已发布平台", content.publishedPlatforms.map(item => `${escapeHtml(item.platform)}：<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.url || item.publishedAt)}</a>`).join("<br>")) : ""}
         ${kv("原文摘要", escapeHtml(content.originalSummary || content.clusterSummary))}
         ${kv("AI 分析", escapeHtml(content.aiAnalysis || "尚未分析。"))}
         ${kv("标签", tagChips(content.tags))}
         ${kv("分数", `${scoreBadge(content.finalScore)} ${scoreBadge(content.hotScore)} ${scoreBadge(content.chinaFitScore)}`)}
         ${kv("状态", statusPill(content.status))}
+        <div class="divider"></div>
+        <h3>加入发布队列</h3>
+        <div class="form-grid single">
+          <div><label>计划发布时间</label><input id="studioPublishAt" type="datetime-local" value="${defaultScheduleTime()}" /></div>
+          <div><label>发布备注</label><textarea id="studioPublishNotes" placeholder="例如：先发小红书测试标题，再根据评论调整抖音口播。"></textarea></div>
+        </div>
+        <div class="toolbar" style="margin-top:12px">
+          <button class="btn" data-studio-add-publish="${content.id}">加入发布队列</button>
+          <button class="btn ghost" data-nav="publish">打开 Publishing Center</button>
+        </div>
         <div class="divider"></div>
         <h3>旧生成资产</h3>
         <div class="toolbar">
@@ -4669,33 +4798,107 @@ function renderVideoProject(project) {
 }
 
 function renderPublishCenter() {
-  const selected = ContentStore.getById(appState.selectedContentId) || ContentStore.getAll()[0];
-  const editJob = appState.editPublishJobId ? PublishJobStore.getById(appState.editPublishJobId) : null;
-  return `<div class="card">
-    <h3>${editJob ? "编辑发布计划" : "新增发布计划"}</h3>
-    <div class="form-grid">
-      <div class="span-2"><label>内容</label><select id="publishContentId">${ContentStore.getAll().map(item => `<option value="${item.id}" ${item.id === (editJob?.contentId || selected?.id) ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}</select></div>
-      <div><label>平台</label><select id="publishPlatform">${targetPlatformOptions(editJob?.platform)}</select></div>
-      <div><label>发布时间</label><input id="publishScheduledAt" type="datetime-local" value="${escapeHtml(editJob?.scheduledAt || "")}" /></div>
-      <div><label>状态</label><select id="publishStatus">${Object.values(PUBLISH_STATUS).map(s => `<option value="${s}" ${s === editJob?.status ? "selected" : ""}>${PUBLISH_STATUS_LABELS[s]}</option>`).join("")}</select></div>
-      <div class="span-2"><label>链接</label><input id="publishUrl" value="${escapeHtml(editJob?.url)}" placeholder="发布后填入链接" /></div>
-      <div class="span-all"><label>备注</label><textarea id="publishNotes">${escapeHtml(editJob?.notes)}</textarea></div>
-    </div>
-    <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-publish>${editJob ? "保存发布计划" : "新增发布计划"}</button>${editJob ? `<button class="btn ghost" data-cancel-publish>取消</button>` : ""}</div>
+  const jobs = getFilteredPublishJobs();
+  if (appState.editPublishJobId !== "__new__" && (!appState.selectedPublishJobId || !PublishJobStore.getById(appState.selectedPublishJobId))) appState.selectedPublishJobId = jobs[0]?.id || PublishJobStore.getAll()[0]?.id || null;
+  const selectedJob = appState.editPublishJobId === "__new__" ? null : PublishJobStore.getById(appState.selectedPublishJobId);
+  return `<div class="card toolbar">
+    <button class="btn small ghost ${appState.publishView === "queue" ? "active" : ""}" data-publish-view="queue">Queue</button>
+    <button class="btn small ghost ${appState.publishView === "calendar" ? "active" : ""}" data-publish-view="calendar">Calendar</button>
+    <button class="btn small" data-new-publish-job>新增任务</button>
+    <span class="chip">任务 ${PublishJobStore.getAll().length}</span>
+    <span class="chip">Ready ${PublishJobStore.getAll().filter(job => job.status === PUBLISH_STATUS.READY).length}</span>
+    <span class="chip">Scheduled ${PublishJobStore.getAll().filter(job => job.status === PUBLISH_STATUS.SCHEDULED).length}</span>
   </div>
-  <div class="card"><h3>发布计划</h3>${PublishJobStore.getAll().length ? renderJobsTable(PublishJobStore.getAll()) : empty("暂无发布计划。")}</div>`;
+  <div class="research-layout">
+    <aside class="card research-filter">
+      <h3>Filters</h3>
+      <div class="form-grid single">
+        <div><label>平台</label><select id="publishPlatformFilter"><option value="">全部平台</option>${CONTENT_STUDIO_PLATFORMS.map(item => `<option value="${item}" ${item === appState.filters.publishPlatform ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+        <div><label>状态</label><select id="publishStatusFilter"><option value="">全部状态</option>${Object.values(PUBLISH_STATUS).map(item => `<option value="${item}" ${item === appState.filters.publishStatus ? "selected" : ""}>${PUBLISH_STATUS_LABELS[item]}</option>`).join("")}</select></div>
+        <div><label>日期</label><input id="publishDateFilter" type="date" value="${escapeHtml(appState.filters.publishDate)}" /></div>
+      </div>
+      <div class="divider"></div>
+      ${statCard("Queue", jobs.length, "当前筛选任务")}
+    </aside>
+    <section class="research-list">
+      <div class="card">
+        <h3>${appState.publishView === "calendar" ? "Publishing Calendar" : "Publishing Queue"}</h3>
+        ${appState.publishView === "calendar" ? renderPublishCalendar(jobs) : renderPublishQueue(jobs)}
+      </div>
+    </section>
+    <aside class="research-detail">
+      ${selectedJob || appState.editPublishJobId ? renderPublishDetail(selectedJob) : empty("请选择一个发布任务，或从 Content Studio 加入发布队列。")}
+    </aside>
+  </div>`;
 }
 
-function renderJobsTable(jobs) {
-  return `<div class="table-wrap"><table><thead><tr><th>发布日期</th><th>平台</th><th>标题</th><th>状态</th><th>链接</th><th>备注</th><th>操作</th></tr></thead><tbody>
-    ${jobs.map(job => {
-      const content = ContentStore.getById(job.contentId);
-      return `<tr>
-        <td>${escapeHtml(job.scheduledAt)}</td><td>${escapeHtml(job.platform)}</td><td>${escapeHtml(content?.title || "内容已删除")}</td><td>${PUBLISH_STATUS_LABELS[job.status] || job.status}</td><td>${escapeHtml(job.url || "—")}</td><td>${escapeHtml(job.notes || "—")}</td>
-        <td><button class="btn small ghost" data-edit-job="${job.id}">编辑</button> <button class="btn small danger" data-remove-job="${job.id}">删除</button></td>
-      </tr>`;
-    }).join("")}
-  </tbody></table></div>`;
+function getFilteredPublishJobs() {
+  return PublishJobStore.getAll().filter(job => {
+    if (appState.filters.publishPlatform && job.platform !== appState.filters.publishPlatform) return false;
+    if (appState.filters.publishStatus && job.status !== appState.filters.publishStatus) return false;
+    if (appState.filters.publishDate && String(job.scheduledAt || "").slice(0, 10) !== appState.filters.publishDate) return false;
+    return true;
+  }).sort((a, b) => String(a.scheduledAt || "").localeCompare(String(b.scheduledAt || "")) || new Date(b.updatedAt) - new Date(a.updatedAt));
+}
+
+function renderPublishQueue(jobs) {
+  return `<div class="mini-stack">${jobs.map(renderPublishJobCard).join("") || empty("暂无发布任务。")}</div>`;
+}
+
+function renderPublishCalendar(jobs) {
+  const groups = jobs.reduce((acc, job) => {
+    const date = String(job.scheduledAt || "未设置日期").slice(0, 10) || "未设置日期";
+    acc[date] = acc[date] || [];
+    acc[date].push(job);
+    return acc;
+  }, {});
+  return `<div class="mini-stack">${Object.entries(groups).map(([date, items]) => `<div class="card item-card">
+    <div class="item-head"><h3 class="item-title">${escapeHtml(date)}</h3><span class="chip">${items.length} tasks</span></div>
+    ${items.map(renderPublishJobCard).join("")}
+  </div>`).join("") || empty("暂无排期。")}</div>`;
+}
+
+function renderPublishJobCard(job) {
+  const content = ContentStore.getById(job.contentId);
+  return `<button class="topic-card ${job.id === appState.selectedPublishJobId ? "active" : ""}" data-select-publish-job="${job.id}">
+    <div class="item-head"><span class="score">${escapeHtml(job.platform)}</span><span class="${statusClass(job.status)}">${PUBLISH_STATUS_LABELS[job.status] || job.status}</span></div>
+    <h3 class="item-title">${escapeHtml(job.titleSnapshot || content?.draftTitle || content?.title || "内容已删除")}</h3>
+    <div class="meta">${escapeHtml(job.contentType)} · ${escapeHtml(job.scheduledAt || "未设置时间")} · 更新 ${new Date(job.updatedAt).toLocaleString("zh-CN")}</div>
+    <div class="meta">来源 Content：${escapeHtml(content?.title || job.contentId)}</div>
+  </button>`;
+}
+
+function renderPublishDetail(job) {
+  const editJob = appState.editPublishJobId && appState.editPublishJobId !== "__new__" ? PublishJobStore.getById(appState.editPublishJobId) : null;
+  const item = editJob || job || {};
+  const selectedContent = ContentStore.getById(item.contentId) || ContentStore.getById(appState.selectedContentId) || ContentStore.getAll()[0];
+  const check = item.id ? PublishingService.preflight(item) : { ok: false, missing: ["保存后执行发布前检查"] };
+  return `<div class="card sticky">
+    <h3>${editJob ? "编辑发布任务" : item.id ? "发布任务详情" : "新增发布任务"}</h3>
+    <div class="form-grid single">
+      <div><label>内容</label><select id="publishContentId">${ContentStore.getAll().map(content => `<option value="${content.id}" ${content.id === (item.contentId || selectedContent?.id) ? "selected" : ""}>${escapeHtml(content.title)}</option>`).join("")}</select></div>
+      <div><label>平台版本</label><select id="publishPlatform">${studioPlatformOptions(item.platform || selectedContent?.studioPlatform)}</select></div>
+      <div><label>内容类型</label><select id="publishContentType">${studioFormatOptions(item.contentType || selectedContent?.studioFormat)}</select></div>
+      <div><label>计划发布时间</label><input id="publishScheduledAt" type="datetime-local" value="${escapeHtml(item.scheduledAt || "")}" /></div>
+      <div><label>状态</label><select id="publishStatus">${Object.values(PUBLISH_STATUS).map(s => `<option value="${s}" ${s === item.status ? "selected" : ""}>${PUBLISH_STATUS_LABELS[s]}</option>`).join("")}</select></div>
+      <div><label>实际发布时间</label><input id="publishActualAt" type="datetime-local" value="${escapeHtml(item.actualPublishedAt || "")}" /></div>
+      <div><label>发布链接</label><input id="publishUrl" value="${escapeHtml(item.url || "")}" placeholder="发布后填入链接" /></div>
+      <div><label>发布备注</label><textarea id="publishNotes">${escapeHtml(item.notes || "")}</textarea></div>
+    </div>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="btn" data-save-publish>${editJob || !item.id ? "保存发布任务" : "更新任务"}</button>
+      ${item.id ? `<button class="btn ghost" data-edit-job="${item.id}">编辑</button><button class="btn ghost" data-mark-published="${item.id}">标记 Published</button>` : ""}
+      ${editJob ? `<button class="btn ghost" data-cancel-publish>取消编辑</button>` : ""}
+    </div>
+    <div class="divider"></div>
+    <strong>发布前检查</strong>
+    ${check.ok ? `<div class="chips"><span class="chip">检查通过</span></div>` : tagChips(check.missing)}
+    ${item.id ? `${kv("导出标题", escapeHtml(item.titleSnapshot || "—"))}${kv("导出正文/脚本", escapeHtml((item.bodySnapshot || "").slice(0, 500)))}${kv("导出标签", escapeHtml((item.tagsSnapshot || []).join("，")))}` : ""}
+    <div class="toolbar">
+      ${item.id ? `<button class="btn small ghost" data-copy-publish="${item.id}:title">复制标题</button><button class="btn small ghost" data-copy-publish="${item.id}:body">复制正文</button><button class="btn small ghost" data-copy-publish="${item.id}:tags">复制标签</button><button class="btn small ghost" data-export-publish="${item.id}:txt">导出 TXT</button><button class="btn small ghost" data-export-publish="${item.id}:md">导出 Markdown</button><button class="btn small ghost" data-open-workspace="${item.contentId}">打开来源内容</button><button class="btn small danger" data-remove-job="${item.id}">删除</button>` : ""}
+    </div>
+    ${item.url ? kv("线上链接", `<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.url)}</a>`) : ""}
+  </div>`;
 }
 
 function renderAnalytics() {
@@ -4970,7 +5173,8 @@ function bindScopedInputs() {
     ["radarQuery", "radarQuery"], ["radarPlatform", "radarPlatform"], ["radarScore", "radarScore"], ["radarSort", "radarSort"],
     ["libraryQuery", "libraryQuery"], ["libraryStatus", "libraryStatus"], ["libraryPlatform", "libraryPlatform"], ["libraryTag", "libraryTag"],
     ["researchSource", "researchSource"], ["researchSourceType", "researchSourceType"], ["researchCategory", "researchCategory"], ["researchSort", "researchSort"], ["researchDate", "researchDate"],
-    ["clusterSourceCount", "clusterSourceCount"], ["clusterCategory", "clusterCategory"], ["clusterStatus", "clusterStatus"], ["clusterOfficial", "clusterOfficial"], ["clusterDate", "clusterDate"], ["clusterSort", "clusterSort"]
+    ["clusterSourceCount", "clusterSourceCount"], ["clusterCategory", "clusterCategory"], ["clusterStatus", "clusterStatus"], ["clusterOfficial", "clusterOfficial"], ["clusterDate", "clusterDate"], ["clusterSort", "clusterSort"],
+    ["publishPlatformFilter", "publishPlatform"], ["publishStatusFilter", "publishStatus"], ["publishDateFilter", "publishDate"]
   ];
   bindings.forEach(([id, key]) => {
     const el = document.getElementById(id);
@@ -5311,6 +5515,21 @@ document.addEventListener("click", async event => {
     ContentStudioService.saveDraft(contentId, draft);
     return render();
   }
+  if (target.dataset.studioAddPublish) {
+    const contentId = target.dataset.studioAddPublish;
+    const draft = ContentStudioService.collectDraftFromForm(contentId);
+    const saved = ContentStudioService.saveDraft(contentId, draft);
+    const job = PublishingService.createOrUpdate({
+      contentId,
+      platform: saved.studioPlatform,
+      contentType: saved.studioFormat,
+      scheduledAt: document.getElementById("studioPublishAt")?.value || defaultScheduleTime(),
+      status: PUBLISH_STATUS.DRAFT,
+      notes: document.getElementById("studioPublishNotes")?.value.trim() || ""
+    });
+    appState.selectedPublishJobId = job.id;
+    return setPage("publish");
+  }
   if (target.dataset.generate) {
     const [id, platform] = target.dataset.generate.split(":");
     await WriterAgent.generate(id, platform);
@@ -5344,19 +5563,47 @@ document.addEventListener("click", async event => {
     const payload = {
       contentId: document.getElementById("publishContentId").value,
       platform: document.getElementById("publishPlatform").value,
+      contentType: document.getElementById("publishContentType").value,
       scheduledAt: document.getElementById("publishScheduledAt").value || new Date().toISOString().slice(0, 16),
       status: document.getElementById("publishStatus").value,
       url: document.getElementById("publishUrl").value.trim(),
-      notes: document.getElementById("publishNotes").value.trim()
+      notes: document.getElementById("publishNotes").value.trim(),
+      actualPublishedAt: document.getElementById("publishActualAt").value
     };
-    const job = appState.editPublishJobId ? PublishJobStore.update(appState.editPublishJobId, payload) : PublishJobStore.create(payload);
-    ContentStore.update(payload.contentId, { status: payload.status === PUBLISH_STATUS.PUBLISHED ? CONTENT_STATUS.PUBLISHED : CONTENT_STATUS.SCHEDULED });
+    const existingId = appState.editPublishJobId === "__new__" ? "" : (appState.editPublishJobId || appState.selectedPublishJobId || "");
+    const job = PublishingService.createOrUpdate(payload, existingId);
     appState.editPublishJobId = null;
+    appState.selectedPublishJobId = job.id;
     return render();
   }
-  if (target.dataset.editJob) { appState.editPublishJobId = target.dataset.editJob; return render(); }
+  if (target.dataset.publishView) { appState.publishView = target.dataset.publishView; return render(); }
+  if (target.dataset.newPublishJob !== undefined) { appState.editPublishJobId = "__new__"; appState.selectedPublishJobId = null; return render(); }
+  if (target.dataset.selectPublishJob) { appState.selectedPublishJobId = target.dataset.selectPublishJob; appState.editPublishJobId = null; return render(); }
+  if (target.dataset.editJob) { appState.editPublishJobId = target.dataset.editJob; appState.selectedPublishJobId = target.dataset.editJob; return render(); }
   if (target.dataset.cancelPublish !== undefined) { appState.editPublishJobId = null; return render(); }
   if (target.dataset.removeJob) { PublishJobStore.remove(target.dataset.removeJob); return render(); }
+  if (target.dataset.markPublished) {
+    PublishingService.markPublished(target.dataset.markPublished, {
+      actualPublishedAt: document.getElementById("publishActualAt")?.value || now(),
+      url: document.getElementById("publishUrl")?.value.trim() || "",
+      notes: document.getElementById("publishNotes")?.value.trim() || ""
+    });
+    return render();
+  }
+  if (target.dataset.copyPublish) {
+    const [jobId, part] = target.dataset.copyPublish.split(":");
+    const job = PublishJobStore.getById(jobId);
+    if (job) {
+      const text = part === "title" ? job.titleSnapshot : part === "tags" ? (job.tagsSnapshot || []).map(tag => `#${tag}`).join(" ") : job.bodySnapshot;
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text || "");
+    }
+    return render();
+  }
+  if (target.dataset.exportPublish) {
+    const [jobId, format] = target.dataset.exportPublish.split(":");
+    PublishingService.download(jobId, format);
+    return render();
+  }
   if (target.dataset.saveAnalytics !== undefined) {
     workflowPipeline.recordAnalytics(document.getElementById("analyticsContentId").value, {
       platform: document.getElementById("analyticsPlatform").value,

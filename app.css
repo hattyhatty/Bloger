@@ -248,7 +248,9 @@ label { display: block; margin-bottom: 7px; color: #735461; font-size: 13px; fon
 .status.reviewing { background: #c2415b; }
 .status.video_ready { background: #2f9b68; }
 .status.scheduled { background: #0f766e; }
+.status.ready { background: #2f9b68; }
 .status.published { background: #15803d; }
+.status.cancelled { background: #6b7280; }
 .status.tracking { background: #4f46e5; }
 .status.archived { background: #6b7280; }
 .status.normalized { background: #0ea5e9; }
