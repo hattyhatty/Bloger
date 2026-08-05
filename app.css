@@ -244,6 +244,11 @@ label { display: block; margin-bottom: 7px; color: #735461; font-size: 13px; fon
 .status.analyzing { background: #0ea5e9; }
 .status.analyzed { background: #3867d6; }
 .status.selected { background: #b98131; }
+.status.draft { background: #7c8aa0; }
+.status.in_review { background: #0ea5e9; }
+.status.changes_requested { background: #d97706; }
+.status.approved { background: #15803d; }
+.status.ready_to_publish { background: #0f766e; }
 .status.writing { background: #d97706; }
 .status.reviewing { background: #c2415b; }
 .status.video_ready { background: #2f9b68; }

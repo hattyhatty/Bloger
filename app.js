@@ -15,6 +15,11 @@ const CONTENT_STATUS = Object.freeze({
   ANALYZING: "ANALYZING",
   ANALYZED: "ANALYZED",
   SELECTED: "SELECTED",
+  DRAFT: "DRAFT",
+  IN_REVIEW: "IN_REVIEW",
+  CHANGES_REQUESTED: "CHANGES_REQUESTED",
+  APPROVED: "APPROVED",
+  READY_TO_PUBLISH: "READY_TO_PUBLISH",
   WRITING: "WRITING",
   REVIEWING: "REVIEWING",
   VIDEO_READY: "VIDEO_READY",
@@ -30,6 +35,11 @@ const STATUS_LABELS = Object.freeze({
   ANALYZING: "分析中",
   ANALYZED: "已分析",
   SELECTED: "已选中",
+  DRAFT: "Draft",
+  IN_REVIEW: "In Review",
+  CHANGES_REQUESTED: "Changes Requested",
+  APPROVED: "Approved",
+  READY_TO_PUBLISH: "Ready to Publish",
   WRITING: "创作中",
   REVIEWING: "待审核",
   VIDEO_READY: "视频就绪",
@@ -310,6 +320,14 @@ const isTargetPlatform = platform => TARGET_PLATFORMS.includes(platform);
 const safeTargetPlatforms = list => (Array.isArray(list) ? list : [list]).filter(isTargetPlatform);
 const statusClass = status => `status ${String(status || "").toLowerCase()}`;
 const statusPill = status => `<span class="${statusClass(status)}">${STATUS_LABELS[status] || status}</span>`;
+const APPROVAL_STATUS_LABELS = Object.freeze({
+  DRAFT: "Draft",
+  IN_REVIEW: "In Review",
+  CHANGES_REQUESTED: "Changes Requested",
+  APPROVED: "Approved",
+  READY_TO_PUBLISH: "Ready to Publish"
+});
+const approvalStatusPill = status => `<span class="${statusClass(status)}">${APPROVAL_STATUS_LABELS[status] || status || "Draft"}</span>`;
 const topicStatusPill = status => `<span class="${statusClass(status)}">${TOPIC_STATUS_LABELS[status] || status}</span>`;
 const clusterStatusPill = status => `<span class="${statusClass(status)}">${CLUSTER_STATUS_LABELS[status] || status}</span>`;
 const scoreBadge = score => `<span class="score">${clampScore(score)}分</span>`;
@@ -383,6 +401,13 @@ function normalizeContent(item = {}) {
     draftTags: Array.isArray(item.draftTags) ? item.draftTags : splitTags(item.draftTags),
     draftUpdatedAt: item.draftUpdatedAt || "",
     draftGenerationNote: item.draftGenerationNote || "",
+    approvalStatus: Object.keys(APPROVAL_STATUS_LABELS).includes(item.approvalStatus) ? item.approvalStatus : "DRAFT",
+    approvalReviewedAt: item.approvalReviewedAt || "",
+    approvalNotes: item.approvalNotes || "",
+    approvedAt: item.approvedAt || "",
+    approvalSnapshot: item.approvalSnapshot || null,
+    approvalInvalidatedAt: item.approvalInvalidatedAt || "",
+    approvalInvalidationReason: item.approvalInvalidationReason || "",
     publishedPlatforms: Array.isArray(item.publishedPlatforms) ? item.publishedPlatforms : [],
     copyrightStatus: item.copyrightStatus || "待检查",
     statusHistory: Array.isArray(item.statusHistory) ? item.statusHistory : [{ status: item.status || CONTENT_STATUS.DISCOVERED, at: createdAt, note: "初始化" }],
@@ -1957,6 +1982,7 @@ AI 分析：${content.aiAnalysis}
   saveDraft(contentId, draft) {
     const content = ContentStore.getById(contentId);
     if (!content) throw new Error("找不到当前 Content");
+    const wasApproved = ApprovalService.isApproved(content);
     const payload = {
       studioPlatform: draft.platform,
       studioFormat: draft.format,
@@ -1969,8 +1995,84 @@ AI 分析：${content.aiAnalysis}
       status: content.status === CONTENT_STATUS.DISCOVERED || content.status === CONTENT_STATUS.COLLECTED ? CONTENT_STATUS.WRITING : content.status
     };
     const saved = ContentStore.update(contentId, payload);
+    if (wasApproved) ApprovalService.ensureFreshApproval(contentId, "批准后草稿或平台版本发生修改，需要重新审核。");
     if (appState.studioDrafts) delete appState.studioDrafts[contentId];
-    return saved;
+    return ContentStore.getById(contentId) || saved;
+  }
+};
+
+const ApprovalService = {
+  snapshot(content) {
+    return {
+      title: content.draftTitle || content.title,
+      hook: content.draftHook || "",
+      body: content.draftBody || "",
+      tags: content.draftTags || [],
+      platform: content.studioPlatform,
+      format: content.studioFormat,
+      sourceUrl: content.sourceUrl,
+      capturedAt: now()
+    };
+  },
+  signature(snapshot) {
+    return simpleHash(JSON.stringify({
+      title: snapshot?.title || "",
+      hook: snapshot?.hook || "",
+      body: snapshot?.body || "",
+      tags: snapshot?.tags || [],
+      platform: snapshot?.platform || "",
+      format: snapshot?.format || "",
+      sourceUrl: snapshot?.sourceUrl || ""
+    }));
+  },
+  currentSignature(content) {
+    return this.signature(this.snapshot(content));
+  },
+  isApproved(content) {
+    return ["APPROVED", "READY_TO_PUBLISH"].includes(content?.approvalStatus);
+  },
+  isModifiedAfterApproval(content) {
+    if (!this.isApproved(content) || !content.approvalSnapshot) return false;
+    return this.signature(content.approvalSnapshot) !== this.currentSignature(content);
+  },
+  ensureFreshApproval(contentId, reason = "批准后内容已修改，需要重新审核。") {
+    const content = ContentStore.getById(contentId);
+    if (!content || !this.isModifiedAfterApproval(content)) return content;
+    return ContentStore.update(contentId, {
+      approvalStatus: "DRAFT",
+      approvalInvalidatedAt: now(),
+      approvalInvalidationReason: reason,
+      approvedAt: "",
+      approvalNotes: `${content.approvalNotes || ""}${content.approvalNotes ? "\n" : ""}${reason}`.trim()
+    });
+  },
+  submit(contentId, notes = "") {
+    return ContentStore.update(contentId, { approvalStatus: "IN_REVIEW", approvalReviewedAt: now(), approvalNotes: notes, status: CONTENT_STATUS.IN_REVIEW });
+  },
+  requestChanges(contentId, notes = "") {
+    return ContentStore.update(contentId, { approvalStatus: "CHANGES_REQUESTED", approvalReviewedAt: now(), approvalNotes: notes, approvedAt: "", status: CONTENT_STATUS.CHANGES_REQUESTED });
+  },
+  approve(contentId, notes = "") {
+    const content = ContentStore.getById(contentId);
+    if (!content) return null;
+    return ContentStore.update(contentId, {
+      approvalStatus: "APPROVED",
+      approvalReviewedAt: now(),
+      approvalNotes: notes,
+      approvedAt: now(),
+      approvalSnapshot: this.snapshot(content),
+      approvalInvalidatedAt: "",
+      approvalInvalidationReason: "",
+      status: CONTENT_STATUS.APPROVED
+    });
+  },
+  revoke(contentId, notes = "") {
+    return ContentStore.update(contentId, { approvalStatus: "DRAFT", approvalReviewedAt: now(), approvalNotes: notes || "已撤销批准。", approvedAt: "", approvalInvalidatedAt: now(), approvalInvalidationReason: "人工撤销批准", status: CONTENT_STATUS.DRAFT });
+  },
+  markReady(contentId) {
+    const content = ContentStore.getById(contentId);
+    if (!this.isApproved(content)) return content;
+    return ContentStore.update(contentId, { approvalStatus: "READY_TO_PUBLISH", status: CONTENT_STATUS.READY_TO_PUBLISH });
   }
 };
 
@@ -2652,14 +2754,17 @@ const PublishingService = {
     const contentId = jobOrPayload.contentId;
     const version = this.getPlatformVersion(contentId, jobOrPayload.platform, jobOrPayload.contentType);
     const missing = [];
+    const content = version?.content;
+    const freshContent = content ? ApprovalService.ensureFreshApproval(content.id) : null;
+    if (!ApprovalService.isApproved(freshContent)) missing.push("该内容尚未完成最终审核");
+    if (freshContent && ApprovalService.isModifiedAfterApproval(freshContent)) missing.push("内容在批准后发生修改，需要重新审核");
     if (!version?.title) missing.push("缺少标题");
     if (!version?.body) missing.push("缺少正文或脚本");
     if (!version?.reviewed) missing.push("尚未完成 Review");
     if (!version?.sourceUrl) missing.push("缺少来源链接");
     if (!jobOrPayload.platform) missing.push("缺少目标平台");
     if (!jobOrPayload.scheduledAt) missing.push("缺少计划发布时间");
-    const content = version?.content;
-    if (/high|严重|高风险/i.test(content?.reviewNotes || "")) missing.push("仍有未处理的严重 Review 问题");
+    if (/high|严重|高风险/i.test(freshContent?.reviewNotes || "")) missing.push("仍有未处理的严重 Review 问题");
     return { ok: missing.length === 0, missing, checkedAt: now() };
   },
   findDuplicate({ contentId, platform, contentType, scheduledAt }, ignoreId = "") {
@@ -2675,6 +2780,8 @@ const PublishingService = {
   createOrUpdate(payload, existingId = "") {
     const version = this.getPlatformVersion(payload.contentId, payload.platform, payload.contentType);
     if (!version) throw new Error("找不到来源 Content");
+    const check = this.preflight(payload);
+    if (!ApprovalService.isApproved(ContentStore.getById(payload.contentId))) throw new Error("该内容尚未完成最终审核。");
     const record = {
       ...payload,
       platform: version.platform,
@@ -2682,7 +2789,7 @@ const PublishingService = {
       titleSnapshot: version.title,
       bodySnapshot: version.body,
       tagsSnapshot: version.tags,
-      checklist: this.preflight(payload).missing,
+      checklist: check.missing,
       lastCheckAt: now()
     };
     const duplicate = this.findDuplicate(record, existingId);
@@ -2693,6 +2800,7 @@ const PublishingService = {
     }
     const job = existingId ? PublishJobStore.update(existingId, record) : PublishJobStore.create(record);
     appState.selectedPublishJobId = job.id;
+    if ([PUBLISH_STATUS.DRAFT, PUBLISH_STATUS.READY].includes(job.status)) ApprovalService.markReady(job.contentId);
     if ([PUBLISH_STATUS.READY, PUBLISH_STATUS.SCHEDULED].includes(job.status)) ContentStore.update(job.contentId, { status: CONTENT_STATUS.SCHEDULED });
     if (job.status === PUBLISH_STATUS.PUBLISHED) this.markPublished(job.id, { actualPublishedAt: job.actualPublishedAt, url: job.url, notes: job.notes });
     return PublishJobStore.getById(job.id);
@@ -3876,6 +3984,7 @@ window.ClusterPipeline = ClusterPipeline;
 window.DailyBriefStore = DailyBriefStore;
 window.DailyBriefService = DailyBriefService;
 window.ContentStudioService = ContentStudioService;
+window.ApprovalService = ApprovalService;
 window.SourceCacheStore = SourceCacheStore;
 window.FeedCacheStore = FeedCacheStore;
 window.FeedSourceStore = FeedSourceStore;
@@ -4814,7 +4923,7 @@ function renderWorkspace() {
       <div class="card content-editor-card">
         <div class="item-head">
           <h3>Content Studio 编辑器</h3>
-          <span class="chip">${escapeHtml(draft.platform)} · ${escapeHtml(draft.format)}</span>
+          <div class="chips"><span class="chip">${escapeHtml(draft.platform)} · ${escapeHtml(draft.format)}</span>${approvalStatusPill(content.approvalStatus)}</div>
         </div>
         <div class="form-grid single">
           <div><label>标题</label><input id="studioTitle" value="${escapeHtml(draft.title)}" /></div>
@@ -4827,6 +4936,19 @@ function renderWorkspace() {
           <button class="btn ghost" data-studio-generate="${content.id}">重新生成</button>
         </div>
         <div class="meta">${escapeHtml(draft.note || "重新生成会先放入编辑器预览，不会自动覆盖已保存草稿。")}${draft.generatedAt ? ` · ${new Date(draft.generatedAt).toLocaleString("zh-CN")}` : ""}</div>
+        <div class="divider"></div>
+        <h3>Approval Gate</h3>
+        <div class="form-grid single">
+          <div><label>审核备注</label><textarea id="approvalNotes">${escapeHtml(content.approvalNotes || "")}</textarea></div>
+        </div>
+        <div class="toolbar" style="margin-top:12px">
+          <button class="btn small ghost" data-submit-review="${content.id}">Submit for Review</button>
+          <button class="btn small ghost" data-request-changes="${content.id}">Request Changes</button>
+          <button class="btn small" data-approve-content="${content.id}">Approve</button>
+          <button class="btn small danger" data-revoke-approval="${content.id}">Revoke Approval</button>
+        </div>
+        <div class="meta">审核状态：${APPROVAL_STATUS_LABELS[content.approvalStatus] || "Draft"} · 审核时间：${content.approvalReviewedAt ? new Date(content.approvalReviewedAt).toLocaleString("zh-CN") : "—"} · 批准时间：${content.approvedAt ? new Date(content.approvedAt).toLocaleString("zh-CN") : "—"}</div>
+        ${content.approvalInvalidationReason ? `<div class="empty">${escapeHtml(content.approvalInvalidationReason)}</div>` : ""}
       </div>
       <div class="card">
         <h3>来源与生成设置</h3>
@@ -4849,6 +4971,8 @@ function renderWorkspace() {
         ${kv("标签", tagChips(content.tags))}
         ${kv("分数", `${scoreBadge(content.finalScore)} ${scoreBadge(content.hotScore)} ${scoreBadge(content.chinaFitScore)}`)}
         ${kv("状态", statusPill(content.status))}
+        ${kv("Approval Status", `${approvalStatusPill(content.approvalStatus)} ${ApprovalService.isModifiedAfterApproval(content) ? "<span class=\"chip\">批准后已修改</span>" : ""}`)}
+        ${kv("Approved At", content.approvedAt ? new Date(content.approvedAt).toLocaleString("zh-CN") : "—")}
         <div class="divider"></div>
         <h3>加入发布队列</h3>
         <div class="form-grid single">
@@ -4962,11 +5086,12 @@ function renderPublishCalendar(jobs) {
 
 function renderPublishJobCard(job) {
   const content = ContentStore.getById(job.contentId);
+  const modified = content ? ApprovalService.isModifiedAfterApproval(content) : false;
   return `<button class="topic-card ${job.id === appState.selectedPublishJobId ? "active" : ""}" data-select-publish-job="${job.id}">
     <div class="item-head"><span class="score">${escapeHtml(job.platform)}</span><span class="${statusClass(job.status)}">${PUBLISH_STATUS_LABELS[job.status] || job.status}</span></div>
     <h3 class="item-title">${escapeHtml(job.titleSnapshot || content?.draftTitle || content?.title || "内容已删除")}</h3>
     <div class="meta">${escapeHtml(job.contentType)} · ${escapeHtml(job.scheduledAt || "未设置时间")} · 更新 ${new Date(job.updatedAt).toLocaleString("zh-CN")}</div>
-    <div class="meta">来源 Content：${escapeHtml(content?.title || job.contentId)}</div>
+    <div class="meta">来源 Content：${escapeHtml(content?.title || job.contentId)} · Approval：${APPROVAL_STATUS_LABELS[content?.approvalStatus] || "—"}${modified ? " · 批准后已修改" : ""}</div>
   </button>`;
 }
 
@@ -4995,6 +5120,7 @@ function renderPublishDetail(job) {
     <div class="divider"></div>
     <strong>发布前检查</strong>
     ${check.ok ? `<div class="chips"><span class="chip">检查通过</span></div>` : tagChips(check.missing)}
+    ${selectedContent ? `${kv("Approval Status", `${approvalStatusPill(selectedContent.approvalStatus)} ${ApprovalService.isModifiedAfterApproval(selectedContent) ? "<span class=\"chip\">批准后已修改</span>" : ""}`)}${kv("Approved At", selectedContent.approvedAt ? new Date(selectedContent.approvedAt).toLocaleString("zh-CN") : "—")}` : ""}
     ${item.id ? `${kv("导出标题", escapeHtml(item.titleSnapshot || "—"))}${kv("导出正文/脚本", escapeHtml((item.bodySnapshot || "").slice(0, 500)))}${kv("导出标签", escapeHtml((item.tagsSnapshot || []).join("，")))}` : ""}
     <div class="toolbar">
       ${item.id ? `<button class="btn small ghost" data-copy-publish="${item.id}:title">复制标题</button><button class="btn small ghost" data-copy-publish="${item.id}:body">复制正文</button><button class="btn small ghost" data-copy-publish="${item.id}:tags">复制标签</button><button class="btn small ghost" data-export-publish="${item.id}:txt">导出 TXT</button><button class="btn small ghost" data-export-publish="${item.id}:md">导出 Markdown</button><button class="btn small ghost" data-open-workspace="${item.contentId}">打开来源内容</button><button class="btn small danger" data-remove-job="${item.id}">删除</button>` : ""}
@@ -5671,20 +5797,41 @@ document.addEventListener("click", async event => {
     ContentStudioService.saveDraft(contentId, draft);
     return render();
   }
+  if (target.dataset.submitReview) {
+    ApprovalService.submit(target.dataset.submitReview, document.getElementById("approvalNotes")?.value.trim() || "");
+    return render();
+  }
+  if (target.dataset.requestChanges) {
+    ApprovalService.requestChanges(target.dataset.requestChanges, document.getElementById("approvalNotes")?.value.trim() || "需要修改后重新提交。");
+    return render();
+  }
+  if (target.dataset.approveContent) {
+    ApprovalService.approve(target.dataset.approveContent, document.getElementById("approvalNotes")?.value.trim() || "人工审核通过。");
+    return render();
+  }
+  if (target.dataset.revokeApproval) {
+    ApprovalService.revoke(target.dataset.revokeApproval, document.getElementById("approvalNotes")?.value.trim() || "人工撤销批准。");
+    return render();
+  }
   if (target.dataset.studioAddPublish) {
     const contentId = target.dataset.studioAddPublish;
     const draft = ContentStudioService.collectDraftFromForm(contentId);
     const saved = ContentStudioService.saveDraft(contentId, draft);
-    const job = PublishingService.createOrUpdate({
-      contentId,
-      platform: saved.studioPlatform,
-      contentType: saved.studioFormat,
-      scheduledAt: document.getElementById("studioPublishAt")?.value || defaultScheduleTime(),
-      status: PUBLISH_STATUS.DRAFT,
-      notes: document.getElementById("studioPublishNotes")?.value.trim() || ""
-    });
-    appState.selectedPublishJobId = job.id;
-    return setPage("publish");
+    try {
+      const job = PublishingService.createOrUpdate({
+        contentId,
+        platform: saved.studioPlatform,
+        contentType: saved.studioFormat,
+        scheduledAt: document.getElementById("studioPublishAt")?.value || defaultScheduleTime(),
+        status: PUBLISH_STATUS.READY,
+        notes: document.getElementById("studioPublishNotes")?.value.trim() || ""
+      });
+      appState.selectedPublishJobId = job.id;
+      return setPage("publish");
+    } catch (error) {
+      ContentStore.update(contentId, { approvalInvalidationReason: error.message || "该内容尚未完成最终审核。" });
+      return render();
+    }
   }
   if (target.dataset.generate) {
     const [id, platform] = target.dataset.generate.split(":");
@@ -5727,7 +5874,14 @@ document.addEventListener("click", async event => {
       actualPublishedAt: document.getElementById("publishActualAt").value
     };
     const existingId = appState.editPublishJobId === "__new__" ? "" : (appState.editPublishJobId || appState.selectedPublishJobId || "");
-    const job = PublishingService.createOrUpdate(payload, existingId);
+    let job;
+    try {
+      job = PublishingService.createOrUpdate(payload, existingId);
+    } catch (error) {
+      const content = ContentStore.getById(payload.contentId);
+      if (content) ContentStore.update(content.id, { approvalInvalidationReason: error.message || "该内容尚未完成最终审核。" });
+      return render();
+    }
     appState.editPublishJobId = null;
     appState.selectedPublishJobId = job.id;
     return render();
