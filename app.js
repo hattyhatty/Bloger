@@ -40,9 +40,9 @@ const STATUS_LABELS = Object.freeze({
 });
 
 const SOURCE_PLATFORMS = Object.freeze(["Reddit", "X", "YouTube", "GitHub", "Hacker News", "Product Hunt", "Official Blog"]);
-const RESEARCH_SOURCES = Object.freeze(["Reddit", "X", "YouTube", "GitHub"]);
-const RESEARCH_SOURCE_TYPES = Object.freeze(["mock", "github"]);
-const RESEARCH_CATEGORIES = Object.freeze(["GPT", "Claude", "Gemini", "AI Coding", "AI Agent", "AI Video", "Open Source"]);
+const RESEARCH_SOURCES = Object.freeze(["Reddit", "X", "YouTube", "GitHub", "Official Blog"]);
+const RESEARCH_SOURCE_TYPES = Object.freeze(["mock", "github", "official_blog"]);
+const RESEARCH_CATEGORIES = Object.freeze(["GPT", "Claude", "Gemini", "AI Coding", "AI Agent", "AI Video", "Open Source", "AI Research", "AI Product"]);
 const RESEARCH_SORTS = Object.freeze(["Trending", "New", "Engagement"]);
 const RESEARCH_DATES = Object.freeze(["Today", "7 Days", "30 Days"]);
 const TOPIC_STATUS = Object.freeze({
@@ -97,7 +97,11 @@ const TASK_TYPES = Object.freeze({
   SAVE_TOPIC_TO_KNOWLEDGE: "SAVE_TOPIC_TO_KNOWLEDGE",
   FETCH_GITHUB_TOPICS: "FETCH_GITHUB_TOPICS",
   REFRESH_SOURCE: "REFRESH_SOURCE",
-  PROCESS_IMPORTED_TOPICS: "PROCESS_IMPORTED_TOPICS"
+  PROCESS_IMPORTED_TOPICS: "PROCESS_IMPORTED_TOPICS",
+  FETCH_FEED_SOURCE: "FETCH_FEED_SOURCE",
+  REFRESH_ALL_FEEDS: "REFRESH_ALL_FEEDS",
+  PROCESS_FEED_TOPICS: "PROCESS_FEED_TOPICS",
+  TEST_FEED_CONNECTION: "TEST_FEED_CONNECTION"
 });
 const TASK_TYPE_LABELS = Object.freeze({
   RECOMMEND_TODAY: "推荐今日内容",
@@ -119,7 +123,11 @@ const TASK_TYPE_LABELS = Object.freeze({
   SAVE_TOPIC_TO_KNOWLEDGE: "Topic 存知识",
   FETCH_GITHUB_TOPICS: "抓取 GitHub Topics",
   REFRESH_SOURCE: "刷新 Source",
-  PROCESS_IMPORTED_TOPICS: "处理导入 Topic"
+  PROCESS_IMPORTED_TOPICS: "处理导入 Topic",
+  FETCH_FEED_SOURCE: "抓取 Feed",
+  REFRESH_ALL_FEEDS: "刷新官方 Feeds",
+  PROCESS_FEED_TOPICS: "处理 Feed Topics",
+  TEST_FEED_CONNECTION: "测试 Feed"
 });
 const GITHUB_DEFAULT_KEYWORDS = Object.freeze([
   "artificial intelligence",
@@ -191,6 +199,7 @@ const appState = {
   selectedTopicId: null,
   editPromptId: null,
   editKnowledgeId: null,
+  editFeedSourceId: null,
   editPublishJobId: null,
   radarViewMode: "card",
   filters: {
@@ -285,7 +294,7 @@ function normalizeContent(item = {}) {
 
 function normalizeTopic(item = {}) {
   const createdAt = item.createdAt || now();
-  const source = RESEARCH_SOURCES.includes(item.source) ? item.source : "Reddit";
+  const source = SOURCE_PLATFORMS.includes(item.source) ? item.source : "Reddit";
   const canonicalUrl = stripUrlParams(item.canonicalUrl || item.url || "");
   const rawMetrics = {
     likes: Number(item.rawMetrics?.likes ?? item.engagement?.likes ?? item.likes) || 0,
@@ -305,6 +314,11 @@ function normalizeTopic(item = {}) {
     id: item.id || uid("topic"),
     source,
     sourceType: RESEARCH_SOURCE_TYPES.includes(item.sourceType) ? item.sourceType : (source === "GitHub" ? "github" : "mock"),
+    sourceProvider: item.sourceProvider || "",
+    sourceTrustLevel: item.sourceTrustLevel || (item.isOfficialSource ? "high" : "normal"),
+    isOfficialSource: Boolean(item.isOfficialSource),
+    feedSourceId: item.feedSourceId || "",
+    feedName: item.feedName || "",
     sourceExternalId: item.sourceExternalId || `${source}_${contentHash}`,
     title: item.title || "Untitled AI Topic",
     author: item.author || "",
@@ -508,6 +522,44 @@ function normalizeSourceCache(item = {}) {
   };
 }
 
+function normalizeFeedSource(item = {}) {
+  const createdAt = item.createdAt || now();
+  return {
+    id: item.id || uid("feed"),
+    name: item.name || "Untitled Feed",
+    feedUrl: item.feedUrl || "",
+    websiteUrl: item.websiteUrl || "",
+    enabled: Boolean(item.enabled),
+    sourceLabel: item.sourceLabel || item.name || "Official Blog",
+    category: RESEARCH_CATEGORIES.includes(item.category) ? item.category : "AI Product",
+    defaultTags: Array.isArray(item.defaultTags) ? item.defaultTags : splitTags(item.defaultTags),
+    fetchLimit: Math.max(1, Math.min(50, Number(item.fetchLimit) || 10)),
+    cacheMinutes: Math.max(1, Number(item.cacheMinutes) || 60),
+    lastFetchedAt: item.lastFetchedAt || "",
+    lastSuccess: Boolean(item.lastSuccess),
+    lastError: item.lastError || "",
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+}
+
+function normalizeFeedCache(item = {}) {
+  const createdAt = item.createdAt || now();
+  return {
+    id: item.id || uid("feedcache"),
+    feedSourceId: item.feedSourceId || "",
+    feedUrl: item.feedUrl || "",
+    rawData: item.rawData || "",
+    parsedItems: Array.isArray(item.parsedItems) ? item.parsedItems : [],
+    fetchedAt: item.fetchedAt || createdAt,
+    expiresAt: item.expiresAt || createdAt,
+    etag: item.etag || "",
+    lastModified: item.lastModified || "",
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+}
+
 function normalizePrompt(item = {}) {
   const createdAt = item.createdAt || now();
   return {
@@ -601,6 +653,7 @@ function migrateDatabase(raw) {
     analyticsRecords: [],
     tasks: [],
     sourceCache: [],
+    feedCache: [],
     promptTemplates: [],
     knowledgeItems: [],
     settings: {
@@ -613,8 +666,11 @@ function migrateDatabase(raw) {
   newDb.settings.aiApiConfig = normalizeAiApiConfig(source.settings?.aiApiConfig);
   newDb.settings.aiStatus = normalizeAiStatus(source.settings?.aiStatus);
   newDb.settings.githubSourceConfig = normalizeGithubSourceConfig(source.settings?.githubSourceConfig);
+  newDb.settings.feedSources = (Array.isArray(source.settings?.feedSources) && source.settings.feedSources.length ? source.settings.feedSources : createPresetFeedSources()).map(normalizeFeedSource);
+  newDb.settings.feedCorsProxyUrl = source.settings?.feedCorsProxyUrl || "";
   newDb.settings.sourceStatus = {
-    github: normalizeSourceStatus(source.settings?.sourceStatus?.github || { sourceId: "github" })
+    github: normalizeSourceStatus(source.settings?.sourceStatus?.github || { sourceId: "github" }),
+    feeds: normalizeSourceStatus(source.settings?.sourceStatus?.feeds || { sourceId: "feeds" })
   };
 
   const existingAssets = Array.isArray(source.generatedAssets) ? source.generatedAssets : [];
@@ -625,6 +681,7 @@ function migrateDatabase(raw) {
   const existingAnalytics = Array.isArray(source.analyticsRecords) ? source.analyticsRecords : [];
   const existingTasks = Array.isArray(source.tasks) ? source.tasks : [];
   const existingSourceCache = Array.isArray(source.sourceCache) ? source.sourceCache : [];
+  const existingFeedCache = Array.isArray(source.feedCache) ? source.feedCache : [];
 
   (source.contentItems || []).forEach(oldItem => {
     const content = normalizeContent(oldItem);
@@ -666,6 +723,7 @@ function migrateDatabase(raw) {
   existingAnalytics.forEach(item => newDb.analyticsRecords.push(normalizeAnalyticsRecord(item)));
   existingTasks.forEach(item => newDb.tasks.push(normalizeTask(item)));
   existingSourceCache.forEach(item => newDb.sourceCache.push(normalizeSourceCache(item)));
+  existingFeedCache.forEach(item => newDb.feedCache.push(normalizeFeedCache(item)));
   newDb.topics = existingTopics.map(normalizeTopic);
 
   newDb.promptTemplates = (source.promptTemplates || createMockPrompts()).map(normalizePrompt);
@@ -832,6 +890,199 @@ const SourceCacheStore = {
   }
 };
 
+const FeedCacheStore = {
+  getAll() { return (db.feedCache || []).map(normalizeFeedCache); },
+  get(feedSourceId, feedUrl) {
+    const item = (db.feedCache || []).find(cache => cache.feedSourceId === feedSourceId && cache.feedUrl === feedUrl);
+    return item ? normalizeFeedCache(item) : null;
+  },
+  getFresh(feedSourceId, feedUrl) {
+    const cache = this.get(feedSourceId, feedUrl);
+    return cache && new Date(cache.expiresAt).getTime() > Date.now() ? cache : null;
+  },
+  set(feedSourceId, feedUrl, rawData, parsedItems, cacheMinutes, headers = {}) {
+    db.feedCache = db.feedCache || [];
+    const existingIndex = db.feedCache.findIndex(cache => cache.feedSourceId === feedSourceId && cache.feedUrl === feedUrl);
+    const fetchedAt = now();
+    const expiresAt = new Date(Date.now() + Math.max(1, Number(cacheMinutes) || 60) * 60 * 1000).toISOString();
+    const record = normalizeFeedCache({
+      feedSourceId,
+      feedUrl,
+      rawData,
+      parsedItems,
+      fetchedAt,
+      expiresAt,
+      etag: headers.etag || "",
+      lastModified: headers.lastModified || "",
+      updatedAt: fetchedAt
+    });
+    if (existingIndex >= 0) db.feedCache[existingIndex] = { ...db.feedCache[existingIndex], ...record, id: db.feedCache[existingIndex].id };
+    else db.feedCache.unshift(record);
+    saveDb();
+    return existingIndex >= 0 ? db.feedCache[existingIndex] : db.feedCache[0];
+  }
+};
+
+function isValidHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function stripHtml(html = "") {
+  const withoutScripts = String(html).replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "");
+  return withoutScripts.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").replace(/&quot;/g, "\"").replace(/\s+/g, " ").trim();
+}
+
+function safeParseDate(value) {
+  const time = Date.parse(value || "");
+  return Number.isFinite(time) ? new Date(time).toISOString() : now();
+}
+
+function nodeText(node, selector) {
+  const found = node?.querySelector?.(selector);
+  return found?.textContent?.trim() || "";
+}
+
+function detectFeedType(document) {
+  const root = document?.documentElement?.nodeName?.toLowerCase() || "";
+  if (root.includes("rss")) return "rss";
+  if (root.includes("feed")) return "atom";
+  if (root.includes("rdf")) return "rss";
+  return "unknown";
+}
+
+function resolveFeedLink(entry) {
+  const atomLink = entry?.querySelector?.("link[href]");
+  if (atomLink) return atomLink.getAttribute("href") || "";
+  return nodeText(entry, "link");
+}
+
+function parseRssItems(document) {
+  return [...document.querySelectorAll("item")].map(item => ({
+    title: nodeText(item, "title"),
+    link: resolveFeedLink(item),
+    guid: nodeText(item, "guid") || resolveFeedLink(item),
+    publishedAt: safeParseDate(nodeText(item, "pubDate") || nodeText(item, "dc\\:date")),
+    summary: stripHtml(nodeText(item, "description")),
+    content: stripHtml(nodeText(item, "content\\:encoded") || nodeText(item, "description")),
+    author: nodeText(item, "author") || nodeText(item, "dc\\:creator"),
+    categories: [...item.querySelectorAll("category")].map(node => node.textContent.trim()).filter(Boolean)
+  })).filter(item => item.title || item.link);
+}
+
+function parseAtomEntries(document) {
+  return [...document.querySelectorAll("entry")].map(entry => ({
+    title: nodeText(entry, "title"),
+    link: resolveFeedLink(entry),
+    guid: nodeText(entry, "id") || resolveFeedLink(entry),
+    publishedAt: safeParseDate(nodeText(entry, "published") || nodeText(entry, "updated")),
+    summary: stripHtml(nodeText(entry, "summary") || nodeText(entry, "content")),
+    content: stripHtml(nodeText(entry, "content") || nodeText(entry, "summary")),
+    author: nodeText(entry, "author name") || nodeText(entry, "author"),
+    categories: [...entry.querySelectorAll("category")].map(node => node.getAttribute("term") || node.textContent.trim()).filter(Boolean)
+  })).filter(item => item.title || item.link);
+}
+
+function parseFeed(xmlText) {
+  const text = String(xmlText || "").trim();
+  if (!text) return { type: "empty", items: [] };
+  if (text.startsWith("{")) {
+    const json = JSON.parse(text);
+    const items = (json.items || []).map(item => ({
+      title: item.title || "",
+      link: item.url || item.external_url || "",
+      guid: item.id || item.url || "",
+      publishedAt: safeParseDate(item.date_published || item.date_modified),
+      summary: stripHtml(item.summary || item.content_text || item.content_html || ""),
+      content: stripHtml(item.content_text || item.content_html || item.summary || ""),
+      author: item.author?.name || "",
+      categories: item.tags || []
+    }));
+    return { type: "json", items };
+  }
+  if (typeof DOMParser !== "undefined") {
+    const document = new DOMParser().parseFromString(text, "application/xml");
+    if (document.querySelector("parsererror")) throw new Error("XML 格式错误");
+    const type = detectFeedType(document);
+    return { type, items: type === "atom" ? parseAtomEntries(document) : parseRssItems(document) };
+  }
+  return parseFeedFallback(text);
+}
+
+function extractTagText(block, tag) {
+  const match = String(block).match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  return match ? stripHtml(match[1]) : "";
+}
+
+function extractAttr(block, tag, attr) {
+  const match = String(block).match(new RegExp(`<${tag}[^>]*${attr}=["']([^"']+)["'][^>]*>`, "i"));
+  return match ? match[1] : "";
+}
+
+function parseFeedFallback(text) {
+  const isAtom = /<feed[\s>]/i.test(text);
+  const pattern = isAtom ? /<entry[\s\S]*?<\/entry>/gi : /<item[\s\S]*?<\/item>/gi;
+  const blocks = text.match(pattern) || [];
+  const items = blocks.map(block => ({
+    title: extractTagText(block, "title"),
+    link: isAtom ? (extractAttr(block, "link", "href") || extractTagText(block, "link")) : extractTagText(block, "link"),
+    guid: isAtom ? (extractTagText(block, "id") || extractAttr(block, "link", "href")) : (extractTagText(block, "guid") || extractTagText(block, "link")),
+    publishedAt: safeParseDate(isAtom ? (extractTagText(block, "published") || extractTagText(block, "updated")) : extractTagText(block, "pubDate")),
+    summary: isAtom ? (extractTagText(block, "summary") || extractTagText(block, "content")) : extractTagText(block, "description"),
+    content: isAtom ? (extractTagText(block, "content") || extractTagText(block, "summary")) : (extractTagText(block, "description") || extractTagText(block, "content:encoded")),
+    author: isAtom ? extractTagText(block, "name") : extractTagText(block, "author"),
+    categories: [...block.matchAll(/<category[^>]*(?:term=["']([^"']+)["'])?[^>]*>([^<]*)<\/category>|<category[^>]*term=["']([^"']+)["'][^>]*\/>/gi)].map(match => match[1] || match[2] || match[3]).filter(Boolean)
+  })).filter(item => item.title || item.link);
+  if (!items.length) throw new Error("Feed 内容为空或 XML 格式错误");
+  return { type: isAtom ? "atom" : "rss", items };
+}
+
+const DirectFetchAdapter = {
+  id: "direct",
+  async fetch(feedSource, cache) {
+    const headers = {};
+    if (cache?.etag) headers["If-None-Match"] = cache.etag;
+    if (cache?.lastModified) headers["If-Modified-Since"] = cache.lastModified;
+    try {
+      return await fetch(feedSource.feedUrl, { headers });
+    } catch (error) {
+      throw new Error(error?.message?.includes("Failed to fetch") ? "CORS blocked：该 Feed 不允许浏览器跨域访问，或网络不可用。" : (error.message || "Feed 请求失败"));
+    }
+  }
+};
+
+const CorsProxyAdapter = {
+  id: "cors_proxy",
+  async fetch(feedSource, cache) {
+    const proxyUrl = db.settings?.feedCorsProxyUrl || "";
+    if (!proxyUrl) throw new Error("CORS blocked：该 Feed 不允许浏览器跨域访问，且未配置自己的 CORS Proxy。");
+    if (!isValidHttpUrl(proxyUrl)) throw new Error("CORS Proxy URL 无效。");
+    const url = `${proxyUrl.replace(/\/$/, "")}?url=${encodeURIComponent(feedSource.feedUrl)}`;
+    const headers = {};
+    if (cache?.etag) headers["If-None-Match"] = cache.etag;
+    if (cache?.lastModified) headers["If-Modified-Since"] = cache.lastModified;
+    return fetch(url, { headers });
+  }
+};
+
+const MockFeedAdapter = {
+  id: "mock_feed",
+  async fetch(feedSource) {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get() { return ""; } },
+      async text() {
+        return `<?xml version="1.0"?><rss version="2.0"><channel><title>${feedSource.name}</title><item><title>${feedSource.name} mock AI update</title><link>${feedSource.websiteUrl || "https://example.com"}/mock-feed-item</link><guid>${feedSource.id}-mock-1</guid><pubDate>${new Date().toUTCString()}</pubDate><description>Official AI product and research update from ${feedSource.name}.</description><category>AI Product</category></item></channel></rss>`;
+      }
+    };
+  }
+};
+
 const SourceProvider = {
   id: "",
   name: "",
@@ -841,6 +1092,141 @@ const SourceProvider = {
   async fetchTopics() { return []; },
   normalizeItem(rawItem) { return rawItem; },
   async testConnection() { return { ok: true }; }
+};
+
+const FeedSourceStore = {
+  getAll() { return (db.settings?.feedSources || []).map(normalizeFeedSource); },
+  getById(id) { return this.getAll().find(item => item.id === id) || null; },
+  getEnabled() { return this.getAll().filter(item => item.enabled); },
+  create(config) {
+    db.settings.feedSources = db.settings.feedSources || [];
+    const record = normalizeFeedSource({ ...config, id: config.id || uid("feed"), createdAt: now(), updatedAt: now() });
+    db.settings.feedSources.unshift(record);
+    saveDb();
+    return record;
+  },
+  update(id, patch) {
+    db.settings.feedSources = db.settings.feedSources || [];
+    const index = db.settings.feedSources.findIndex(item => item.id === id);
+    if (index < 0) return null;
+    db.settings.feedSources[index] = normalizeFeedSource({ ...db.settings.feedSources[index], ...patch, updatedAt: now() });
+    saveDb();
+    return db.settings.feedSources[index];
+  },
+  remove(id) {
+    db.settings.feedSources = (db.settings.feedSources || []).filter(item => item.id !== id);
+    saveDb();
+  },
+  async test(id) {
+    return FeedSourceConnector.testConnection(id);
+  }
+};
+
+const FeedSourceConnector = {
+  ...SourceProvider,
+  id: "feeds",
+  name: "Official AI Feeds",
+  sourceType: "official_blog",
+  isEnabled() { return FeedSourceStore.getEnabled().length > 0; },
+  validateConfig(feedSource) {
+    const errors = [];
+    if (!feedSource?.name) errors.push("缺少 Feed 名称");
+    if (!isValidHttpUrl(feedSource?.feedUrl)) errors.push("Feed URL 无效，仅允许 http / https");
+    return { ok: errors.length === 0, errors };
+  },
+  async fetchTopics(options = {}) {
+    const feedSource = FeedSourceStore.getById(options.feedSourceId);
+    if (!feedSource) throw new Error("找不到 Feed Source");
+    if (!feedSource.enabled && !options.force) return [];
+    const result = await this.fetchFeed(feedSource, options);
+    return result.topics;
+  },
+  async fetchFeed(feedSource, options = {}) {
+    const validation = this.validateConfig(feedSource);
+    if (!validation.ok) throw new Error(validation.errors.join("；"));
+    const fresh = FeedCacheStore.getFresh(feedSource.id, feedSource.feedUrl);
+    if (fresh && !options.force) {
+      this.updateFeedStatus(feedSource.id, { lastSuccess: true, lastError: "", lastFetchedAt: fresh.fetchedAt });
+      return { feedName: feedSource.name, topics: fresh.parsedItems.map(item => this.normalizeItem(item, feedSource)), fetched: fresh.parsedItems.length, cacheHit: true, added: 0, updated: 0, duplicates: 0, errors: 0 };
+    }
+    const cache = FeedCacheStore.get(feedSource.id, feedSource.feedUrl);
+    let response;
+    try {
+      response = await DirectFetchAdapter.fetch(feedSource, cache);
+    } catch (error) {
+      if (!db.settings?.feedCorsProxyUrl) {
+        this.updateFeedStatus(feedSource.id, { lastSuccess: false, lastError: error.message || String(error) });
+        throw error;
+      }
+      response = await CorsProxyAdapter.fetch(feedSource, cache);
+    }
+    if (response.status === 304 && cache) {
+      this.updateFeedStatus(feedSource.id, { lastSuccess: true, lastError: "", lastFetchedAt: now() });
+      return { feedName: feedSource.name, topics: cache.parsedItems.map(item => this.normalizeItem(item, feedSource)), fetched: cache.parsedItems.length, cacheHit: true, added: 0, updated: 0, duplicates: 0, errors: 0 };
+    }
+    if ([403, 404, 429, 500].includes(response.status) || !response.ok) {
+      const message = `Feed HTTP ${response.status}`;
+      this.updateFeedStatus(feedSource.id, { lastSuccess: false, lastError: message });
+      throw new Error(message);
+    }
+    const rawData = await response.text();
+    const parsed = parseFeed(rawData);
+    const parsedItems = parsed.items.slice(0, feedSource.fetchLimit);
+    if (!parsedItems.length) throw new Error("Feed 内容为空");
+    FeedCacheStore.set(feedSource.id, feedSource.feedUrl, rawData, parsedItems, feedSource.cacheMinutes, {
+      etag: response.headers.get("etag") || "",
+      lastModified: response.headers.get("last-modified") || ""
+    });
+    this.updateFeedStatus(feedSource.id, { lastSuccess: true, lastError: "", lastFetchedAt: now() });
+    return { feedName: feedSource.name, topics: parsedItems.map(item => this.normalizeItem(item, feedSource)), fetched: parsedItems.length, cacheHit: false, added: 0, updated: 0, duplicates: 0, errors: 0 };
+  },
+  normalizeItem(rawItem, feedSource) {
+    const sourceExternalId = rawItem.guid || rawItem.link || `${feedSource.id}_${simpleHash(rawItem.title)}`;
+    const canonicalUrl = stripUrlParams(rawItem.link || feedSource.websiteUrl || feedSource.feedUrl);
+    const text = `${rawItem.title || ""} ${rawItem.summary || ""} ${rawItem.content || ""} ${(rawItem.categories || []).join(" ")}`.toLowerCase();
+    const category = feedSource.category || (text.includes("agent") ? "AI Agent" : text.includes("video") || text.includes("image") ? "AI Video" : text.includes("research") || text.includes("paper") ? "AI Research" : text.includes("product") || text.includes("release") ? "AI Product" : text.includes("coding") || text.includes("developer") ? "AI Coding" : text.includes("claude") ? "Claude" : text.includes("gemini") ? "Gemini" : text.includes("gpt") ? "GPT" : "AI Product");
+    const tags = [...new Set([...(rawItem.categories || []), ...(feedSource.defaultTags || []), feedSource.sourceLabel].filter(Boolean))];
+    return normalizeTopic({
+      id: `feed_${feedSource.id}_${simpleHash(sourceExternalId || canonicalUrl)}`,
+      source: "Official Blog",
+      sourceProvider: "RSS",
+      sourceType: "official_blog",
+      sourceExternalId,
+      canonicalUrl,
+      url: canonicalUrl,
+      title: rawItem.title || "Untitled Feed Item",
+      author: rawItem.author || feedSource.name,
+      publishedAt: rawItem.publishedAt || now(),
+      language: "en",
+      rawText: stripHtml(rawItem.content || rawItem.summary || ""),
+      summary: stripHtml(rawItem.summary || rawItem.content || ""),
+      rawMetrics: { likes: 0, comments: 0, shares: 0, views: 0, upvotes: 0 },
+      engagement: { likes: 0, comments: 0 },
+      tags,
+      category,
+      status: TOPIC_STATUS.DISCOVERED,
+      sourceTrustLevel: "high",
+      isOfficialSource: true,
+      feedSourceId: feedSource.id,
+      feedName: feedSource.name
+    });
+  },
+  async testConnection(feedSourceId) {
+    const feedSource = FeedSourceStore.getById(feedSourceId);
+    if (!feedSource) return { ok: false, error: "找不到 Feed Source" };
+    try {
+      const result = await this.fetchFeed(feedSource, { force: true });
+      return { ok: true, feedName: feedSource.name, count: result.topics.length };
+    } catch (error) {
+      this.updateFeedStatus(feedSource.id, { lastSuccess: false, lastError: error.message || String(error) });
+      return { ok: false, feedName: feedSource.name, error: error.message || String(error) };
+    }
+  },
+  updateFeedStatus(feedSourceId, patch) {
+    const current = FeedSourceStore.getById(feedSourceId);
+    if (!current) return null;
+    return FeedSourceStore.update(feedSourceId, { ...patch, updatedAt: now() });
+  }
 };
 
 const GitHubSourceConnector = {
@@ -1001,7 +1387,7 @@ const GitHubSourceConnector = {
   }
 };
 
-const SourceConnectors = { github: GitHubSourceConnector };
+const SourceConnectors = { github: GitHubSourceConnector, feeds: FeedSourceConnector };
 
 const SourceIngestionService = {
   async fetchFromSource(sourceId, options = {}) {
@@ -1009,8 +1395,9 @@ const SourceIngestionService = {
     if (!connector) throw new Error(`未知 Source：${sourceId}`);
     return connector.fetchTopics(options);
   },
-  ingestTopics(topics = []) {
+  ingestTopics(topics = [], options = {}) {
     const results = [];
+    const stats = { added: 0, updated: 0, duplicates: 0, errors: 0, topics: results };
     topics.map(normalizeTopic).forEach(topic => {
       const existingIndex = db.topics.findIndex(item => (item.source === topic.source && String(item.sourceExternalId) === String(topic.sourceExternalId)) || (item.canonicalUrl && item.canonicalUrl === topic.canonicalUrl));
       if (existingIndex >= 0) {
@@ -1019,6 +1406,11 @@ const SourceIngestionService = {
           ...existing,
           source: topic.source,
           sourceType: topic.sourceType,
+          sourceProvider: topic.sourceProvider,
+          sourceTrustLevel: topic.sourceTrustLevel,
+          isOfficialSource: topic.isOfficialSource,
+          feedSourceId: topic.feedSourceId,
+          feedName: topic.feedName,
           sourceExternalId: topic.sourceExternalId,
           canonicalUrl: topic.canonicalUrl,
           url: topic.url,
@@ -1033,6 +1425,7 @@ const SourceIngestionService = {
           category: existing.category || topic.category,
           summary: topic.summary || existing.summary,
           github: topic.github,
+          selectedAngle: existing.selectedAngle,
           aiAnalysis: existing.aiAnalysis,
           commentSummary: existing.commentSummary,
           whyTrending: existing.whyTrending,
@@ -1045,21 +1438,55 @@ const SourceIngestionService = {
           status: existing.status === TOPIC_STATUS.CONVERTED ? TOPIC_STATUS.CONVERTED : existing.status
         });
         results.push(db.topics[existingIndex]);
+        stats.updated += 1;
       } else {
-        db.topics.unshift(topic);
-        results.push(topic);
+        const duplicate = TopicDeduplicator.findDuplicate(topic);
+        const record = duplicate ? normalizeTopic({ ...topic, status: TOPIC_STATUS.DUPLICATE, duplicateOfTopicId: duplicate.id, analysisStatus: "duplicate" }) : topic;
+        db.topics.unshift(record);
+        results.push(record);
+        if (duplicate) stats.duplicates += 1;
+        else stats.added += 1;
       }
     });
     saveDb();
-    return results;
+    return options.withStats ? stats : results;
   },
   async refreshSource(sourceId, options = {}) {
     const topics = await this.fetchFromSource(sourceId, options);
     return this.ingestTopics(topics);
   },
+  async refreshFeedSource(feedSourceId, options = {}) {
+    const feedSource = FeedSourceStore.getById(feedSourceId);
+    if (!feedSource) throw new Error("找不到 Feed Source");
+    try {
+      const result = await FeedSourceConnector.fetchFeed(feedSource, options);
+      const stats = this.ingestTopics(result.topics, { withStats: true });
+      return { feedName: feedSource.name, fetched: result.fetched, ...stats };
+    } catch (error) {
+      FeedSourceConnector.updateFeedStatus(feedSourceId, { lastSuccess: false, lastError: error.message || String(error) });
+      return { feedName: feedSource.name, fetched: 0, added: 0, updated: 0, duplicates: 0, errors: 1, error: error.message || String(error), topics: [] };
+    }
+  },
+  async refreshAllEnabledFeedSources() {
+    const results = [];
+    for (const feedSource of FeedSourceStore.getEnabled()) results.push(await this.refreshFeedSource(feedSource.id));
+    db.settings.sourceStatus = db.settings.sourceStatus || {};
+    const errors = results.filter(item => item.errors).map(item => `${item.feedName}: ${item.error}`).join("；");
+    db.settings.sourceStatus.feeds = normalizeSourceStatus({
+      ...(db.settings.sourceStatus.feeds || { sourceId: "feeds" }),
+      sourceId: "feeds",
+      lastRefreshAt: now(),
+      lastRequestCount: results.length,
+      lastError: errors,
+      updatedAt: now()
+    });
+    saveDb();
+    return results;
+  },
   async refreshAllEnabledSources() {
     const results = [];
     for (const connector of Object.values(SourceConnectors)) {
+      if (connector.id === "feeds") continue;
       if (connector.isEnabled()) results.push(...await this.refreshSource(connector.id));
     }
     return results;
@@ -1160,7 +1587,8 @@ const TaskQueue = {
 function buildTaskTitle(type, payload = {}) {
   const content = payload.contentId ? ContentStore.getById(payload.contentId) : null;
   const topic = payload.topicId ? TopicStore.getById(payload.topicId) : null;
-  const suffix = content ? ` · ${content.title}` : topic ? ` · ${topic.title}` : "";
+  const feed = payload.feedSourceId ? FeedSourceStore.getById(payload.feedSourceId) : null;
+  const suffix = content ? ` · ${content.title}` : topic ? ` · ${topic.title}` : feed ? ` · ${feed.name}` : "";
   return `${TASK_TYPE_LABELS[type] || type}${suffix}`;
 }
 
@@ -1495,6 +1923,7 @@ const TopicScoringService = {
     const controversyScore = clampScore((/replace|fail|risk|debate|weaker|取代|失败|风险|争议/i.test(`${item.title} ${item.summary}`) ? 84 : 56) + (item.engagement.comments > 350 ? 8 : 0));
     const commercialScore = clampScore((/workflow|tool|builder|studio|coding|agent|automation|creator/i.test(`${item.title} ${item.summary}`) ? 82 : 60) + (item.category === "AI Coding" ? 8 : 0));
     const difficultyScore = clampScore(item.category === "Open Source" ? 66 : item.category === "AI Coding" ? 58 : item.category === "AI Video" ? 62 : 45);
+    const trustBoost = item.isOfficialSource && item.sourceTrustLevel === "high" ? 3 : 0;
     const finalScore = clampScore(Math.round(
       trendScore * 0.22 +
       freshnessScore * 0.15 +
@@ -1502,7 +1931,8 @@ const TopicScoringService = {
       chinaFitScore * 0.22 +
       controversyScore * 0.08 +
       commercialScore * 0.1 +
-      (100 - difficultyScore) * 0.05
+      (100 - difficultyScore) * 0.05 +
+      trustBoost
     ));
     return {
       trendScore,
@@ -1513,7 +1943,7 @@ const TopicScoringService = {
       commercialScore,
       difficultyScore,
       finalScore,
-      scoreReason: `趋势 ${trendScore}、新鲜度 ${freshnessScore}、互动 ${engagementScore}、中文适配 ${chinaFitScore}，综合推荐分 ${finalScore}。`
+      scoreReason: `趋势 ${trendScore}、新鲜度 ${freshnessScore}、互动 ${engagementScore}、中文适配 ${chinaFitScore}${trustBoost ? `、官方来源可信度 +${trustBoost}` : ""}，综合推荐分 ${finalScore}。`
     };
   }
 };
@@ -2077,6 +2507,14 @@ const TaskExecutor = {
         return SourceIngestionService.refreshSource(payload.sourceId || "github");
       case TASK_TYPES.PROCESS_IMPORTED_TOPICS:
         return ResearchPipeline.processAllPending();
+      case TASK_TYPES.FETCH_FEED_SOURCE:
+        return SourceIngestionService.refreshFeedSource(payload.feedSourceId, { force: true });
+      case TASK_TYPES.REFRESH_ALL_FEEDS:
+        return SourceIngestionService.refreshAllEnabledFeedSources();
+      case TASK_TYPES.PROCESS_FEED_TOPICS:
+        return ResearchPipeline.processAllPending();
+      case TASK_TYPES.TEST_FEED_CONNECTION:
+        return FeedSourceConnector.testConnection(payload.feedSourceId);
       default:
         throw new Error(`未知任务类型：${task.type}`);
     }
@@ -2102,9 +2540,14 @@ window.TopicDeduplicator = TopicDeduplicator;
 window.TopicScoringService = TopicScoringService;
 window.ResearchPipeline = ResearchPipeline;
 window.SourceCacheStore = SourceCacheStore;
+window.FeedCacheStore = FeedCacheStore;
+window.FeedSourceStore = FeedSourceStore;
 window.SourceProvider = SourceProvider;
+window.FeedSourceConnector = FeedSourceConnector;
 window.GitHubSourceConnector = GitHubSourceConnector;
 window.SourceIngestionService = SourceIngestionService;
+window.parseFeed = parseFeed;
+window.stripHtml = stripHtml;
 window.GeneratedAssetStore = GeneratedAssetStore;
 window.VideoProjectStore = VideoProjectStore;
 window.PublishJobStore = PublishJobStore;
@@ -2143,9 +2586,10 @@ function createInitialData() {
     analyticsRecords: [],
     tasks: [],
     sourceCache: [],
+    feedCache: [],
     promptTemplates: createMockPrompts(),
     knowledgeItems: createMockKnowledge(),
-    settings: { provider: "LocalStorageProvider" }
+    settings: { provider: "LocalStorageProvider", feedSources: createPresetFeedSources() }
   };
 }
 
@@ -2232,6 +2676,32 @@ function createMockTopics() {
     suggestedAngles,
     recommendedPlatforms,
     status: index < 4 ? "TRENDING" : "NEW"
+  }));
+}
+
+function createPresetFeedSources() {
+  return [
+    ["OpenAI", "", "https://openai.com", "OpenAI", "GPT", ["OpenAI", "Official Blog"]],
+    ["Anthropic", "", "https://www.anthropic.com", "Anthropic", "Claude", ["Anthropic", "Claude", "Official Blog"]],
+    ["Google DeepMind", "", "https://deepmind.google", "Google DeepMind", "AI Research", ["DeepMind", "Google AI", "Official Blog"]],
+    ["Google AI", "", "https://ai.google", "Google AI", "Gemini", ["Google AI", "Gemini", "Official Blog"]],
+    ["DeepSeek", "", "https://www.deepseek.com", "DeepSeek", "Open Source", ["DeepSeek", "Official Blog"]],
+    ["GitHub Blog", "", "https://github.blog", "GitHub Blog", "AI Coding", ["GitHub", "Official Blog"]],
+    ["Hugging Face", "", "https://huggingface.co", "Hugging Face", "Open Source", ["Hugging Face", "Open Source", "Official Blog"]],
+    ["Microsoft AI", "", "https://www.microsoft.com/ai", "Microsoft AI", "AI Product", ["Microsoft AI", "Official Blog"]],
+    ["Meta AI", "", "https://ai.meta.com", "Meta AI", "AI Research", ["Meta AI", "Official Blog"]],
+    ["NVIDIA AI", "", "https://www.nvidia.com/en-us/ai-data-science/", "NVIDIA AI", "AI Product", ["NVIDIA AI", "Official Blog"]]
+  ].map(([name, feedUrl, websiteUrl, sourceLabel, category, defaultTags]) => normalizeFeedSource({
+    id: `feed_${simpleHash(name).slice(0, 8)}`,
+    name,
+    feedUrl,
+    websiteUrl,
+    enabled: false,
+    sourceLabel,
+    category,
+    defaultTags,
+    fetchLimit: 10,
+    cacheMinutes: 60
   }));
 }
 
@@ -2425,17 +2895,25 @@ function renderResearch() {
 
 function renderSourceToolbar() {
   const status = normalizeSourceStatus(db.settings?.sourceStatus?.github || { sourceId: "github" });
+  const feedStatus = normalizeSourceStatus(db.settings?.sourceStatus?.feeds || { sourceId: "feeds" });
   const config = normalizeGithubSourceConfig(db.settings?.githubSourceConfig);
   const remainingMs = SourceCacheStore.getRemainingMs("github");
   const cacheText = remainingMs ? `${Math.ceil(remainingMs / 60000)} 分钟` : "无有效缓存";
+  const feeds = FeedSourceStore.getAll();
   return `<div class="card toolbar">
     <span class="chip">Source 状态：Mock ${TopicStore.getAll().filter(topic => topic.sourceType === "mock").length}</span>
     <span class="chip">GitHub ${config.enabled ? "Enabled" : "Disabled"} · ${TopicStore.getAll().filter(topic => topic.sourceType === "github").length}</span>
+    <span class="chip">Official Blog ${TopicStore.getAll().filter(topic => topic.sourceType === "official_blog").length}</span>
     <button class="btn small" data-refresh-github>Refresh GitHub</button>
+    <button class="btn small ghost" data-refresh-feeds>Refresh Official Feeds</button>
     <button class="btn small ghost" data-process-imported-topics>Process Imported Topics</button>
+    <span class="chip">Feed Source: ${feeds.length}</span>
+    <span class="chip">Enabled Feed: ${feeds.filter(feed => feed.enabled).length}</span>
     <span class="chip">Last Refresh: ${status.lastRefreshAt ? new Date(status.lastRefreshAt).toLocaleString("zh-CN") : "—"}</span>
+    <span class="chip">Last Feed Refresh: ${feedStatus.lastRefreshAt ? new Date(feedStatus.lastRefreshAt).toLocaleString("zh-CN") : "—"}</span>
     <span class="chip">Cache: ${cacheText}</span>
     <span class="chip">Rate Limit Remaining: ${escapeHtml(status.rateLimitRemaining || "—")}</span>
+    ${feedStatus.lastError ? `<span class="chip">Feed Errors: ${escapeHtml(feedStatus.lastError)}</span>` : ""}
     ${status.lastError ? `<span class="chip">Error: ${escapeHtml(status.lastError)}</span>` : ""}
   </div>`;
 }
@@ -2451,6 +2929,7 @@ function renderTopicCard(topic) {
     <div class="meta">${topic.source} · ${escapeHtml(topic.author)} · ${new Date(topic.publishedAt).toLocaleString("zh-CN")}</div>
     <div class="meta">评论 ${topic.engagement.comments} · 点赞 ${topic.engagement.likes}</div>
     ${topic.sourceType === "github" ? `<div class="meta">Star ${topic.rawMetrics.likes} · Fork ${topic.rawMetrics.shares} · Open Issues ${topic.rawMetrics.comments} · ${escapeHtml(topic.github?.language || "Unknown")} · 更新 ${topic.github?.updatedAt ? new Date(topic.github.updatedAt).toLocaleDateString("zh-CN") : "—"}</div>` : ""}
+    ${topic.isOfficialSource ? `<div class="meta">官方来源 · ${escapeHtml(topic.feedName || topic.sourceProvider || "Official Blog")} · ${new Date(topic.publishedAt).toLocaleDateString("zh-CN")} · Trust ${escapeHtml(topic.sourceTrustLevel)}</div>` : ""}
     <div class="chips">
       <span class="chip">${escapeHtml(topic.category)}</span>
       <span class="chip">Trend ${topic.trendScore}</span>
@@ -2476,6 +2955,7 @@ function renderTopicDetail(topic) {
     </div>
     <div class="meta">${topic.source} · ${escapeHtml(topic.author)} · ${new Date(topic.publishedAt).toLocaleString("zh-CN")} · ${topicStatusPill(topic.status)}</div>
     ${kv("原文摘要（Mock）", escapeHtml(topic.summary))}
+    ${topic.isOfficialSource ? `${kv("Official Source", "是")}${kv("Feed Name", escapeHtml(topic.feedName))}${kv("Original URL", escapeHtml(topic.url))}${kv("Published At", new Date(topic.publishedAt).toLocaleString("zh-CN"))}${kv("Raw Summary", escapeHtml(topic.rawText || topic.summary))}${kv("sourceTrustLevel", escapeHtml(topic.sourceTrustLevel))}` : ""}
     ${kv("AI Summary", escapeHtml(topic.aiAnalysis))}
     ${kv("Comment Summary", escapeHtml(topic.commentSummary))}
     ${kv("Why Trending", escapeHtml(topic.whyTrending))}
@@ -2886,6 +3366,7 @@ function renderSettingsV2() {
       ${kv("Rate Limit Reset", githubStatus.rateLimitReset ? new Date(Number(githubStatus.rateLimitReset) * 1000).toLocaleString("zh-CN") : "—")}
       ${kv("最近错误", githubStatus.lastError || "—")}
     </div>
+    ${renderFeedManager()}
     <div class="card"><h3>Storage Providers</h3><p>当前启用：<strong>${db.settings.provider}</strong></p><div class="mini-stack"><span class="chip">StorageProvider</span><span class="chip">LocalStorageProvider 已实现</span><span class="chip">SupabaseProvider placeholder</span></div></div>
     <div class="card"><h3>AI Capabilities</h3><p>所有生成行为通过统一 aiRouter；真实调用仅预留给 openai / zai / deepseek / custom。</p><div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>
     <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
@@ -2907,6 +3388,62 @@ function collectGithubSourceConfig() {
     createdWithinDays: document.getElementById("githubCreatedWithinDays").value,
     cacheMinutes: document.getElementById("githubCacheMinutes").value,
     sort: document.getElementById("githubSort").value,
+    updatedAt: now()
+  });
+}
+
+function renderFeedManager() {
+  const item = appState.editFeedSourceId ? FeedSourceStore.getById(appState.editFeedSourceId) : null;
+  const feeds = FeedSourceStore.getAll();
+  return `<div class="card span-all">
+    <h3>Official Feeds</h3>
+    <p>生产环境建议通过后端代理抓取 RSS，不建议依赖公共 CORS Proxy。浏览器直连遇到 CORS 时，可配置你自己的代理 URL。</p>
+    <div class="form-grid">
+      <div><label>Name</label><input id="feedName" value="${escapeHtml(item?.name)}" placeholder="OpenAI" /></div>
+      <div class="span-2"><label>Feed URL</label><input id="feedUrl" value="${escapeHtml(item?.feedUrl)}" placeholder="https://example.com/feed.xml" /></div>
+      <div class="span-2"><label>Website URL</label><input id="feedWebsiteUrl" value="${escapeHtml(item?.websiteUrl)}" placeholder="https://example.com" /></div>
+      <div><label>Source Label</label><input id="feedSourceLabel" value="${escapeHtml(item?.sourceLabel)}" placeholder="OpenAI" /></div>
+      <div><label>Default Category</label><select id="feedCategory">${RESEARCH_CATEGORIES.map(category => `<option value="${category}" ${category === item?.category ? "selected" : ""}>${category}</option>`).join("")}</select></div>
+      <div><label>Fetch Limit</label><input id="feedFetchLimit" type="number" min="1" max="50" value="${escapeHtml(item?.fetchLimit ?? 10)}" /></div>
+      <div><label>Cache Minutes</label><input id="feedCacheMinutes" type="number" min="1" value="${escapeHtml(item?.cacheMinutes ?? 60)}" /></div>
+      <div><label>Enabled</label><select id="feedEnabled"><option value="false" ${!item?.enabled ? "selected" : ""}>Disabled</option><option value="true" ${item?.enabled ? "selected" : ""}>Enabled</option></select></div>
+      <div class="span-all"><label>Default Tags</label><input id="feedDefaultTags" value="${escapeHtml((item?.defaultTags || []).join('，'))}" placeholder="Official Blog, AI Product" /></div>
+      <div class="span-all"><label>CORS Proxy URL（可选，自有代理）</label><input id="feedCorsProxyUrl" value="${escapeHtml(db.settings?.feedCorsProxyUrl || "")}" placeholder="https://your-proxy.example.com/rss" /></div>
+    </div>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="btn" data-save-feed-source>${item ? "保存 Feed" : "新增 Feed"}</button>
+      ${item ? `<button class="btn ghost" data-cancel-feed-source>取消编辑</button>` : ""}
+    </div>
+    <div class="divider"></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Name</th><th>Feed URL</th><th>Enabled</th><th>Category</th><th>Default Tags</th><th>Cache</th><th>Last Fetch</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>${feeds.map(feed => `<tr>
+        <td><strong>${escapeHtml(feed.name)}</strong></td>
+        <td>${escapeHtml(feed.feedUrl || "未配置")}</td>
+        <td>${feed.enabled ? "Enabled" : "Disabled"}</td>
+        <td>${escapeHtml(feed.category)}</td>
+        <td>${escapeHtml(feed.defaultTags.join(", "))}</td>
+        <td>${feed.cacheMinutes}m</td>
+        <td>${feed.lastFetchedAt ? new Date(feed.lastFetchedAt).toLocaleString("zh-CN") : "—"}</td>
+        <td>${feed.lastSuccess ? "OK" : escapeHtml(feed.lastError || "—")}</td>
+        <td><div class="toolbar"><button class="btn small ghost" data-edit-feed-source="${feed.id}">Edit</button><button class="btn small ghost" data-test-feed-source="${feed.id}">Test</button><button class="btn small ghost" data-refresh-feed-source="${feed.id}">Refresh</button><button class="btn small danger" data-remove-feed-source="${feed.id}">Delete</button></div></td>
+      </tr>`).join("")}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function collectFeedSourceForm() {
+  return normalizeFeedSource({
+    id: appState.editFeedSourceId || undefined,
+    name: document.getElementById("feedName").value.trim(),
+    feedUrl: document.getElementById("feedUrl").value.trim(),
+    websiteUrl: document.getElementById("feedWebsiteUrl").value.trim(),
+    sourceLabel: document.getElementById("feedSourceLabel").value.trim(),
+    category: document.getElementById("feedCategory").value,
+    defaultTags: splitTags(document.getElementById("feedDefaultTags").value),
+    fetchLimit: document.getElementById("feedFetchLimit").value,
+    cacheMinutes: document.getElementById("feedCacheMinutes").value,
+    enabled: document.getElementById("feedEnabled").value === "true",
     updatedAt: now()
   });
 }
@@ -3047,6 +3584,12 @@ document.addEventListener("click", async event => {
     const task = TaskQueue.add(TASK_TYPES.FETCH_GITHUB_TOPICS, {});
     await TaskQueue.retry(task.id);
     appState.filters.researchSourceType = "github";
+    return render();
+  }
+  if (target.dataset.refreshFeeds !== undefined) {
+    const task = TaskQueue.add(TASK_TYPES.REFRESH_ALL_FEEDS, {});
+    await TaskQueue.retry(task.id);
+    appState.filters.researchSourceType = "official_blog";
     return render();
   }
   if (target.dataset.processImportedTopics !== undefined) {
@@ -3193,6 +3736,30 @@ document.addEventListener("click", async event => {
   if (target.dataset.editKnowledge) { appState.editKnowledgeId = target.dataset.editKnowledge; return render(); }
   if (target.dataset.cancelKnowledge !== undefined) { appState.editKnowledgeId = null; return render(); }
   if (target.dataset.removeKnowledge) { KnowledgeStore.remove(target.dataset.removeKnowledge); return render(); }
+  if (target.dataset.saveFeedSource !== undefined) {
+    db.settings.feedCorsProxyUrl = document.getElementById("feedCorsProxyUrl").value.trim();
+    const payload = collectFeedSourceForm();
+    if (!payload.name) return alert("请填写 Feed 名称。");
+    if (payload.feedUrl && !isValidHttpUrl(payload.feedUrl)) return alert("Feed URL 仅允许 http / https。");
+    appState.editFeedSourceId ? FeedSourceStore.update(appState.editFeedSourceId, payload) : FeedSourceStore.create(payload);
+    appState.editFeedSourceId = null;
+    saveDb();
+    return render();
+  }
+  if (target.dataset.editFeedSource) { appState.editFeedSourceId = target.dataset.editFeedSource; return render(); }
+  if (target.dataset.cancelFeedSource !== undefined) { appState.editFeedSourceId = null; return render(); }
+  if (target.dataset.removeFeedSource) { FeedSourceStore.remove(target.dataset.removeFeedSource); if (appState.editFeedSourceId === target.dataset.removeFeedSource) appState.editFeedSourceId = null; return render(); }
+  if (target.dataset.testFeedSource) {
+    const task = TaskQueue.add(TASK_TYPES.TEST_FEED_CONNECTION, { feedSourceId: target.dataset.testFeedSource });
+    await TaskQueue.retry(task.id);
+    return render();
+  }
+  if (target.dataset.refreshFeedSource) {
+    const task = TaskQueue.add(TASK_TYPES.FETCH_FEED_SOURCE, { feedSourceId: target.dataset.refreshFeedSource });
+    await TaskQueue.retry(task.id);
+    appState.filters.researchSourceType = "official_blog";
+    return render();
+  }
   if (target.dataset.saveAiSettings !== undefined) {
     const currentConfig = normalizeAiApiConfig(db.settings?.aiApiConfig);
     db.settings.aiApiConfig = normalizeAiApiConfig({
