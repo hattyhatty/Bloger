@@ -1060,16 +1060,39 @@ class ApiClient {
       knowledgeItems: data.knowledgeItems || []
     };
   }
+  businessPayload(data = db) {
+    return {
+      contentItems: data.contentItems || [],
+      generatedAssets: data.generatedAssets || [],
+      publishJobs: data.publishJobs || [],
+      analyticsRecords: data.analyticsRecords || [],
+      experienceItems: data.experienceItems || []
+    };
+  }
   importLocalStorage(data) {
     return this.request("/api/import/localstorage-core", { method: "POST", body: JSON.stringify(this.corePayload(data)) });
   }
+  importBusinessData(data) {
+    return this.request("/api/import/localstorage-business", { method: "POST", body: JSON.stringify(this.businessPayload(data)) });
+  }
+  async importAllLocalStorage(data) {
+    const core = await this.importLocalStorage(data);
+    const business = await this.importBusinessData(data);
+    return { core, business };
+  }
   async pullCoreData() {
-    const [topics, contents, knowledgeItems] = await Promise.all([
+    const [topics, contents, knowledgeItems, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords] = await Promise.all([
       this.request("/api/topics?limit=500"),
       this.request("/api/contents?limit=500"),
-      this.request("/api/knowledge?limit=500")
+      this.request("/api/knowledge?limit=500"),
+      this.request("/api/platform-versions?limit=500"),
+      this.request("/api/approvals?limit=500"),
+      this.request("/api/publishing-tasks?limit=500"),
+      this.request("/api/tracking-snapshots?limit=500"),
+      this.request("/api/analytics-records?limit=500"),
+      this.request("/api/experience-records?limit=500")
     ]);
-    return { topics, contents, knowledgeItems };
+    return { topics, contents, knowledgeItems, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords };
   }
   exportKnowledgeMarkdown(ids = []) {
     return this.request("/api/knowledge/export/markdown", { method: "POST", body: JSON.stringify({ ids }) });
@@ -1102,7 +1125,7 @@ function scheduleBackendSync() {
   if (!config.enabled || !config.syncOnSave) return;
   clearTimeout(backendSyncTimer);
   backendSyncTimer = setTimeout(() => {
-    backendApiProvider.importLocalStorage(db)
+    backendApiProvider.importAllLocalStorage(db)
       .then(summary => updateBackendStatus({ lastSuccess: true, lastAction: "syncOnSave", lastError: "", lastSummary: JSON.stringify(summary) }))
       .catch(error => updateBackendStatus({ lastSuccess: false, lastAction: "syncOnSave", lastError: error.message || String(error), lastSummary: "已保留 localStorage 本地备份" }));
   }, 800);
@@ -1118,6 +1141,69 @@ function mergeBackendCoreData(snapshot = {}) {
   (snapshot.topics || []).forEach(item => upsertById(db.topics, normalizeTopic({ ...(item.raw || {}), id: item.id, source: item.source, title: item.title, url: item.url, author: item.author, category: item.category, status: item.status, score: item.score })));
   (snapshot.contents || []).forEach(item => upsertById(db.contentItems, normalizeContent({ ...(item.raw || {}), id: item.id, sourceTopicId: item.topic_id || item.raw?.sourceTopicId, title: item.title, status: item.status, studioPlatform: item.platform, studioFormat: item.content_type, sourceUrl: item.source_url })));
   (snapshot.knowledgeItems || []).forEach(item => upsertById(db.knowledgeItems, normalizeKnowledge({ ...(item.raw || {}), id: item.id, linkedTopicId: item.topic_id || item.raw?.linkedTopicId, linkedContentIds: item.content_id ? [item.content_id] : item.raw?.linkedContentIds, title: item.title, source: item.source_url || item.raw?.source, tags: item.tags, summary: item.body })));
+  (snapshot.approvals || []).forEach(item => {
+    const content = db.contentItems.find(existing => existing.id === item.content_id);
+    if (!content) return;
+    Object.assign(content, normalizeContent({
+      ...content,
+      approvalStatus: item.status,
+      approvalNotes: item.notes,
+      approvalReviewedAt: item.reviewed_at || item.raw?.approvalReviewedAt || "",
+      approvedAt: item.approved_at || item.raw?.approvedAt || "",
+      approvalInvalidatedAt: item.invalidated_at || item.raw?.approvalInvalidatedAt || "",
+      approvalInvalidationReason: item.invalidation_reason || item.raw?.approvalInvalidationReason || "",
+      approvalSnapshot: item.snapshot || item.raw?.approvalSnapshot || null
+    }));
+  });
+  (snapshot.publishingTasks || []).forEach(item => upsertById(db.publishJobs, normalizePublishJob({ ...(item.raw || {}), id: item.id, contentId: item.content_id, platform: item.platform, contentType: item.content_type, scheduledAt: item.scheduled_at, actualPublishedAt: item.actual_published_at, status: item.status, url: item.url, notes: item.notes })));
+  const trackingByAnalytics = (snapshot.trackingSnapshots || []).reduce((acc, item) => {
+    const analyticsId = item.analytics_record_id;
+    if (!analyticsId) return acc;
+    acc[analyticsId] = acc[analyticsId] || [];
+    acc[analyticsId].push({
+      id: item.checkpoint_id,
+      label: item.label,
+      dueAt: item.due_at,
+      status: item.status,
+      metrics: item.metrics || null,
+      updatedAt: item.updated_at || ""
+    });
+    return acc;
+  }, {});
+  (snapshot.analyticsRecords || []).forEach(item => upsertById(db.analyticsRecords, normalizeAnalyticsRecord({
+    ...(item.raw || {}),
+    id: item.id,
+    publishJobId: item.publishing_task_id || item.raw?.publishJobId,
+    contentId: item.content_id || item.raw?.contentId,
+    platform: item.platform,
+    contentType: item.content_type,
+    statsDate: item.stats_date,
+    views: item.views,
+    likes: item.likes,
+    comments: item.comments,
+    shares: item.shares,
+    saves: item.saves,
+    followersGained: item.followers_gained,
+    trackingStatus: item.tracking_status,
+    performanceAnalysis: item.performance_analysis,
+    checkpoints: trackingByAnalytics[item.id] || item.raw?.checkpoints || []
+  })));
+  (snapshot.experienceRecords || []).forEach(item => upsertById(db.experienceItems, normalizeExperience({
+    ...(item.raw || {}),
+    id: item.id,
+    contentId: item.content_id || item.raw?.contentId,
+    topicId: item.topic_id || item.raw?.topicId,
+    publishJobId: item.publishing_task_id || item.raw?.publishJobId,
+    analyticsRecordId: item.analytics_record_id || item.raw?.analyticsRecordId,
+    platform: item.platform,
+    contentType: item.content_type,
+    topicCategory: item.topic_category,
+    performanceResult: item.performance_result,
+    effectivePractices: item.effective_practices || [],
+    improvements: item.improvements || [],
+    reviewSummary: item.review_summary,
+    reviewedAt: item.reviewed_at
+  })));
   storageProvider.save(db);
   render();
   return snapshot;
@@ -1130,7 +1216,7 @@ async function bootstrapBackendCoreData() {
   try {
     const snapshot = await apiClient.pullCoreData();
     mergeBackendCoreData(snapshot);
-    updateBackendStatus({ lastSuccess: true, lastAction: "bootstrapPull", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Contents ${snapshot.contents.length} · Knowledge ${snapshot.knowledgeItems.length}` });
+    updateBackendStatus({ lastSuccess: true, lastAction: "bootstrapPull", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Contents ${snapshot.contents.length} · Publishing ${snapshot.publishingTasks?.length || 0} · Analytics ${snapshot.analyticsRecords?.length || 0}` });
   } catch (error) {
     updateBackendStatus({ lastSuccess: false, lastAction: "bootstrapPull", lastError: error.message || String(error), lastSummary: "后端不可用，继续使用 localStorage" });
   }
@@ -5970,6 +6056,7 @@ function renderSettingsV2() {
         <button class="btn" data-save-backend-settings>保存后端设置</button>
         <button class="btn ghost" data-test-backend-api>测试后端</button>
         <button class="btn ghost" data-import-localstorage-backend>导入 localStorage 到数据库</button>
+        <button class="btn ghost" data-migrate-business-data>Migrate Business Data</button>
         <button class="btn ghost" data-pull-backend-core>从数据库读取核心数据</button>
         <button class="btn ghost" data-export-knowledge-markdown>导出 Knowledge Markdown</button>
       </div>
@@ -6821,11 +6908,20 @@ document.addEventListener("click", async event => {
     }
     return render();
   }
+  if (target.dataset.migrateBusinessData !== undefined) {
+    try {
+      const summary = await backendApiProvider.importAllLocalStorage(db);
+      updateBackendStatus({ lastSuccess: true, lastAction: "migrateBusinessData", lastError: "", lastSummary: JSON.stringify(summary) });
+    } catch (error) {
+      updateBackendStatus({ lastSuccess: false, lastAction: "migrateBusinessData", lastError: error.message || String(error), lastSummary: "业务数据迁移失败，localStorage 未丢失" });
+    }
+    return render();
+  }
   if (target.dataset.pullBackendCore !== undefined) {
     try {
       const snapshot = await backendApiProvider.pullCoreData();
       mergeBackendCoreData(snapshot);
-      updateBackendStatus({ lastSuccess: true, lastAction: "pullCoreData", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Contents ${snapshot.contents.length}` });
+      updateBackendStatus({ lastSuccess: true, lastAction: "pullCoreData", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Contents ${snapshot.contents.length} · Publishing ${snapshot.publishingTasks?.length || 0} · Analytics ${snapshot.analyticsRecords?.length || 0}` });
     } catch (error) {
       updateBackendStatus({ lastSuccess: false, lastAction: "pullCoreData", lastError: error.message || String(error), lastSummary: "读取失败，继续使用本地数据" });
     }
