@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -50,12 +50,35 @@ class KnowledgeEntryIn(BaseModel):
     content_id: str | None = None
     title: str
     body: str = ""
+    knowledge_type: Literal["Fact", "Source / Research", "Inference", "Creator Preference", "Learning", "Playbook"] = "Source / Research"
+    source: str = ""
     source_url: str = ""
     tags: list[str] = Field(default_factory=list)
+    confidence: int = Field(default=70, ge=0, le=100)
+    status: Literal["DRAFT", "ACTIVE", "ARCHIVED"] = "ACTIVE"
     raw: JsonDict = Field(default_factory=dict)
 
 
 class KnowledgeEntryOut(KnowledgeEntryIn):
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CreatorProfileIn(BaseModel):
+    id: str = "default"
+    account_positioning: str = ""
+    target_audience: str = ""
+    content_pillars: list[str] = Field(default_factory=list)
+    tone_style: str = ""
+    preferred_formats: list[str] = Field(default_factory=list)
+    topics_to_avoid: list[str] = Field(default_factory=list)
+    platform_preferences: list[str] = Field(default_factory=list)
+    raw: JsonDict = Field(default_factory=dict)
+
+
+class CreatorProfileOut(CreatorProfileIn):
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -77,6 +100,7 @@ class LocalStorageCoreImportIn(BaseModel):
     topics: list[JsonDict] = Field(default_factory=list)
     contentItems: list[JsonDict] = Field(default_factory=list)
     knowledgeItems: list[JsonDict] = Field(default_factory=list)
+    creatorMemory: JsonDict | None = None
 
 
 class ImportBucketSummary(BaseModel):
@@ -90,6 +114,7 @@ class ImportSummary(BaseModel):
     topics: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
     contents: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
     knowledge: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
+    creator_memory: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
 
 
 class PlatformVersionIn(BaseModel):

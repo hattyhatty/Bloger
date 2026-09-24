@@ -64,12 +64,30 @@ class KnowledgeEntry(Base, TimestampMixin):
     content_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("contents.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(512), index=True)
     body: Mapped[str] = mapped_column(Text, default="")
+    knowledge_type: Mapped[str] = mapped_column(String(64), index=True, default="Source / Research")
+    source: Mapped[str] = mapped_column(String(255), index=True, default="")
     source_url: Mapped[str] = mapped_column(Text, default="")
     tags: Mapped[list] = mapped_column(JsonType, default=list)
+    confidence: Mapped[int] = mapped_column(Integer, default=70)
+    status: Mapped[str] = mapped_column(String(64), index=True, default="ACTIVE")
     raw: Mapped[dict] = mapped_column(JsonType, default=dict)
 
     topic: Mapped[Topic | None] = relationship(back_populates="knowledge_entries")
     content: Mapped[Content | None] = relationship(back_populates="knowledge_entries")
+
+
+class CreatorProfile(Base, TimestampMixin):
+    __tablename__ = "creator_profiles"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default="default")
+    account_positioning: Mapped[str] = mapped_column(Text, default="")
+    target_audience: Mapped[str] = mapped_column(Text, default="")
+    content_pillars: Mapped[list] = mapped_column(JsonType, default=list)
+    tone_style: Mapped[str] = mapped_column(Text, default="")
+    preferred_formats: Mapped[list] = mapped_column(JsonType, default=list)
+    topics_to_avoid: Mapped[list] = mapped_column(JsonType, default=list)
+    platform_preferences: Mapped[list] = mapped_column(JsonType, default=list)
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
 
 
 class PlatformVersion(Base, TimestampMixin):

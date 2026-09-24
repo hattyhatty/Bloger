@@ -1,3 +1,4 @@
+import json
 import re
 
 from .models import KnowledgeEntry
@@ -16,23 +17,31 @@ def knowledge_to_markdown(item: KnowledgeEntry) -> str:
     linked_content = item.content_id or (linked_content_ids[0] if linked_content_ids else "")
     frontmatter = [
         "---",
-        f'title: "{item.title}"',
-        f"source_url: \"{source_link or ''}\"",
-        f"topic_id: \"{linked_topic}\"",
-        f"content_id: \"{linked_content}\"",
-        f"tags: [{', '.join(tags)}]",
+        f"title: {json.dumps(item.title, ensure_ascii=False)}",
+        f"knowledge_type: {json.dumps(item.knowledge_type, ensure_ascii=False)}",
+        f"source: {json.dumps(item.source, ensure_ascii=False)}",
+        f"source_url: {json.dumps(source_link or '', ensure_ascii=False)}",
+        f"confidence: {item.confidence}",
+        f"status: {json.dumps(item.status, ensure_ascii=False)}",
+        f"topic_id: {json.dumps(linked_topic, ensure_ascii=False)}",
+        f"content_id: {json.dumps(linked_content, ensure_ascii=False)}",
+        f"tags: {json.dumps(tags, ensure_ascii=False)}",
         f"created_at: \"{item.created_at.isoformat() if item.created_at else ''}\"",
         f"updated_at: \"{item.updated_at.isoformat() if item.updated_at else ''}\"",
         "---",
         ""
     ]
+    trust_note = ["> ⚠️ This entry is an inference, not a verified fact.", ""] if item.knowledge_type == "Inference" else [""]
     body = [
         f"# {item.title}",
         "",
+        f"> Type: {item.knowledge_type} · Confidence: {item.confidence}/100 · Status: {item.status}",
+        *trust_note,
         item.body or item.raw.get("summary") or item.raw.get("eventSummary") or "",
         "",
         "## Source",
-        f"- {source_link or 'N/A'}",
+        f"- Name: {item.source or 'N/A'}",
+        f"- URL: {source_link or 'N/A'}",
         "",
         "## Links",
         f"- Topic: {linked_topic or 'N/A'}",

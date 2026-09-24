@@ -62,11 +62,69 @@ def test_topic_content_knowledge_crud_and_activity(client):
     assert any(item["entity_type"] == "KnowledgeEntry" for item in activity)
 
 
+def test_knowledge_brain_retrieval_archive_and_creator_memory(client):
+    client.post("/api/topics", json={"id": "topic_memory", "title": "Agent Memory", "category": "AI Agent"})
+    client.post("/api/contents", json={"id": "content_memory", "topic_id": "topic_memory", "title": "Memory Content"})
+    fact = {
+        "id": "knowledge_fact",
+        "topic_id": "topic_memory",
+        "content_id": "content_memory",
+        "title": "Agent memory needs evaluation",
+        "body": "A verified research note about evaluation.",
+        "knowledge_type": "Fact",
+        "source": "Official research",
+        "source_url": "https://example.com/research",
+        "tags": ["Agent", "Memory"],
+        "confidence": 94,
+        "status": "ACTIVE",
+    }
+    inference = {
+        **fact,
+        "id": "knowledge_inference",
+        "title": "Memory may improve retention",
+        "body": "A hypothesis that still needs verification.",
+        "knowledge_type": "Inference",
+        "confidence": 58,
+    }
+    assert client.post("/api/knowledge", json=fact).status_code == 200
+    assert client.post("/api/knowledge", json=inference).status_code == 200
+    updated_inference = {**inference, "confidence": 61}
+    assert client.put("/api/knowledge/knowledge_inference", json=updated_inference).json()["confidence"] == 61
+
+    by_type = client.get("/api/knowledge", params={"type": "Fact", "tag": "Memory", "status": "ACTIVE"}).json()
+    assert [item["id"] for item in by_type] == ["knowledge_fact"]
+    related = client.get("/api/knowledge", params={"topic_id": "topic_memory", "q": "evaluation"}).json()
+    assert [item["id"] for item in related] == ["knowledge_fact"]
+
+    archived = client.post("/api/knowledge/knowledge_fact/archive").json()
+    assert archived["status"] == "ARCHIVED"
+    assert client.get("/api/knowledge", params={"status": "ACTIVE", "type": "Fact"}).json() == []
+
+    creator_memory = {
+        "account_positioning": "面向中文创作者的 AI 工作流账号",
+        "target_audience": "独立创作者和 AI 产品从业者",
+        "content_pillars": ["AI Agent", "AI Coding"],
+        "tone_style": "清晰、克制、有实操细节",
+        "preferred_formats": ["小红书图文", "B站长视频"],
+        "topics_to_avoid": ["未经验证的模型传闻"],
+        "platform_preferences": ["小红书", "B站"],
+    }
+    saved_memory = client.put("/api/creator-memory", json=creator_memory).json()
+    assert saved_memory["id"] == "default"
+    assert client.get("/api/creator-memory").json()["content_pillars"] == ["AI Agent", "AI Coding"]
+
+    markdown = client.get("/api/knowledge/knowledge_inference/export.md").text
+    assert "not a verified fact" in markdown
+    activity_actions = {item["action"] for item in client.get("/api/activity-logs").json()}
+    assert {"knowledge_created", "knowledge_updated", "knowledge_archived", "creator_memory_updated"} <= activity_actions
+
+
 def test_localstorage_import_is_idempotent(client):
     payload = {
         "topics": [{"id": "topic_1", "title": "Topic", "category": "GPT"}],
         "contentItems": [{"id": "content_1", "title": "Content", "sourceTopicId": "topic_1"}],
         "knowledgeItems": [{"id": "knowledge_1", "title": "Knowledge", "summary": "Body", "linkedTopicId": "topic_1", "linkedContentIds": ["content_1"]}],
+        "creatorMemory": {"accountPositioning": "AI 创作者", "contentPillars": ["AI Agent"]},
     }
     first = client.post("/api/import/localstorage-core", json=payload).json()
     second = client.post("/api/import/localstorage-core", json=payload).json()
@@ -74,6 +132,8 @@ def test_localstorage_import_is_idempotent(client):
     assert second["topics"]["skipped"] == 1
     assert second["contents"]["skipped"] == 1
     assert second["knowledge"]["skipped"] == 1
+    assert first["creator_memory"]["added"] == 1
+    assert second["creator_memory"]["skipped"] == 1
 
 
 def test_business_workflow_crud_and_activity(client):

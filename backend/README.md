@@ -1,15 +1,18 @@
-# AI Content OS Backend — Phase 7A
+# AI Content OS Backend — Phase 7C
 
-FastAPI + PostgreSQL backend skeleton for the first core database layer.
+FastAPI + PostgreSQL backend for the AI Content OS core workflow and Knowledge Brain.
 
-Phase 7A only persists:
+The database persists:
 
 - Topic
 - Content
 - KnowledgeEntry
+- CreatorProfile (single creator memory)
 - ActivityLog
+- PlatformVersion / ApprovalRecord / PublishingTask
+- TrackingSnapshot / AnalyticsRecord / ExperienceRecord
 
-Publishing, Analytics, Settings, real platform APIs, auth, and cloud deployment are intentionally out of scope for this step.
+Real platform APIs, auth, multi-user SaaS, schedulers, vector databases, and cloud deployment remain intentionally out of scope.
 
 ## Local setup
 
@@ -41,15 +44,19 @@ Open:
 - `GET /api/knowledge`
 - `POST /api/knowledge`
 - `PUT /api/knowledge/{knowledge_id}`
+- `POST /api/knowledge/{knowledge_id}/archive`
 - `DELETE /api/knowledge/{knowledge_id}`
+- `GET /api/creator-memory`
+- `PUT /api/creator-memory`
 - `GET /api/activity-logs`
 - `POST /api/import/localstorage-core`
+- `POST /api/import/localstorage-business`
 - `GET /api/knowledge/{knowledge_id}/export.md`
 - `POST /api/knowledge/export/markdown`
 
 ## localStorage import
 
-The frontend Settings page can import existing localStorage Topic, Content, and Knowledge data into PostgreSQL.
+The frontend Settings page can import existing localStorage Topic, Content, Knowledge, Creator Memory, and business workflow data into PostgreSQL.
 
 Import is idempotent by original ID:
 

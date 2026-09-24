@@ -5,7 +5,7 @@ from typing import Any, TypeVar
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import Select, select
+from sqlalchemy import Select, or_, select
 from sqlalchemy.orm import Session
 
 from .activity import log_activity
@@ -16,6 +16,7 @@ from .models import (
     AnalyticsRecord,
     ApprovalRecord,
     Content,
+    CreatorProfile,
     ExperienceRecord,
     KnowledgeEntry,
     PlatformVersion,
@@ -33,6 +34,8 @@ from .schemas import (
     BusinessImportSummary,
     ContentIn,
     ContentOut,
+    CreatorProfileIn,
+    CreatorProfileOut,
     ExperienceRecordIn,
     ExperienceRecordOut,
     ImportBucketSummary,
@@ -56,7 +59,7 @@ from .schemas import (
 
 
 settings = get_settings()
-app = FastAPI(title="AI Content OS Backend", version="0.7.0")
+app = FastAPI(title="AI Content OS Backend", version="0.7.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins or ["*"],
@@ -70,7 +73,7 @@ ModelT = TypeVar("ModelT")
 
 @app.get("/api/health")
 def api_health() -> dict[str, str]:
-    return {"status": "ok", "service": "ai-content-os-backend", "phase": "7B"}
+    return {"status": "ok", "service": "ai-content-os-backend", "phase": "7C"}
 
 
 @app.get("/health")
@@ -98,7 +101,16 @@ def comparable_values(values: dict[str, Any]) -> str:
     return json.dumps(normalize_for_compare(values), sort_keys=True, default=str, ensure_ascii=False)
 
 
-def upsert(db: Session, model: type[ModelT], record_id: str, values: dict[str, Any], entity_type: str) -> tuple[ModelT, bool, bool]:
+def upsert(
+    db: Session,
+    model: type[ModelT],
+    record_id: str,
+    values: dict[str, Any],
+    entity_type: str,
+    *,
+    create_action: str = "create",
+    update_action: str = "update",
+) -> tuple[ModelT, bool, bool]:
     existing = db.get(model, record_id)
     created = existing is None
     changed = True
@@ -112,7 +124,7 @@ def upsert(db: Session, model: type[ModelT], record_id: str, values: dict[str, A
         item = model(id=record_id, **values)
         db.add(item)
     if created or changed:
-        log_activity(db, "create" if created else "update", entity_type, record_id, {"fields": sorted(values.keys())})
+        log_activity(db, create_action if created else update_action, entity_type, record_id, {"fields": sorted(values.keys())})
     db.commit()
     db.refresh(item)
     return item, created, changed
@@ -154,19 +166,77 @@ def update_content(content_id: str, payload: ContentIn, db: Session = Depends(ge
 
 
 @app.get("/api/knowledge", response_model=list[KnowledgeEntryOut])
-def list_knowledge(limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    return list_records(db, select(KnowledgeEntry).order_by(KnowledgeEntry.updated_at.desc()), limit, offset)
+def list_knowledge(
+    q: str = "",
+    knowledge_type: str = Query("", alias="type"),
+    tag: str = "",
+    status: str = "",
+    source: str = "",
+    topic_id: str = "",
+    content_id: str = "",
+    limit: int = Query(100, le=500),
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    statement = select(KnowledgeEntry)
+    if q.strip():
+        pattern = f"%{q.strip()}%"
+        statement = statement.where(or_(KnowledgeEntry.title.ilike(pattern), KnowledgeEntry.body.ilike(pattern), KnowledgeEntry.source.ilike(pattern)))
+    if knowledge_type:
+        statement = statement.where(KnowledgeEntry.knowledge_type == knowledge_type)
+    if status:
+        statement = statement.where(KnowledgeEntry.status == status)
+    if source:
+        statement = statement.where(KnowledgeEntry.source.ilike(f"%{source.strip()}%"))
+    if topic_id:
+        statement = statement.where(KnowledgeEntry.topic_id == topic_id)
+    if content_id:
+        statement = statement.where(KnowledgeEntry.content_id == content_id)
+    items = list(db.scalars(statement.order_by(KnowledgeEntry.updated_at.desc())).all())
+    if tag.strip():
+        expected = tag.strip().casefold()
+        items = [item for item in items if any(str(value).casefold() == expected for value in (item.tags or []))]
+    return items[offset:offset + limit]
 
 
 @app.post("/api/knowledge", response_model=KnowledgeEntryOut)
 def create_knowledge(payload: KnowledgeEntryIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, KnowledgeEntry, payload.id, payload.model_dump(exclude={"id"}), "KnowledgeEntry")
+    item, _, _ = upsert(
+        db,
+        KnowledgeEntry,
+        payload.id,
+        payload.model_dump(exclude={"id"}),
+        "KnowledgeEntry",
+        create_action="knowledge_created",
+        update_action="knowledge_updated",
+    )
     return item
 
 
 @app.put("/api/knowledge/{knowledge_id}", response_model=KnowledgeEntryOut)
 def update_knowledge(knowledge_id: str, payload: KnowledgeEntryIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, KnowledgeEntry, knowledge_id, payload.model_dump(exclude={"id"}), "KnowledgeEntry")
+    item, _, _ = upsert(
+        db,
+        KnowledgeEntry,
+        knowledge_id,
+        payload.model_dump(exclude={"id"}),
+        "KnowledgeEntry",
+        create_action="knowledge_created",
+        update_action="knowledge_updated",
+    )
+    return item
+
+
+@app.post("/api/knowledge/{knowledge_id}/archive", response_model=KnowledgeEntryOut)
+def archive_knowledge(knowledge_id: str, db: Session = Depends(get_db)):
+    item = db.get(KnowledgeEntry, knowledge_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Knowledge entry not found")
+    if item.status != "ARCHIVED":
+        item.status = "ARCHIVED"
+        log_activity(db, "knowledge_archived", "KnowledgeEntry", knowledge_id, {})
+        db.commit()
+        db.refresh(item)
     return item
 
 
@@ -179,6 +249,25 @@ def delete_knowledge(knowledge_id: str, db: Session = Depends(get_db)):
     log_activity(db, "delete", "KnowledgeEntry", knowledge_id, {})
     db.commit()
     return {"ok": True}
+
+
+@app.get("/api/creator-memory", response_model=CreatorProfileOut | None)
+def get_creator_memory(db: Session = Depends(get_db)):
+    return db.get(CreatorProfile, "default")
+
+
+@app.put("/api/creator-memory", response_model=CreatorProfileOut)
+def update_creator_memory(payload: CreatorProfileIn, db: Session = Depends(get_db)):
+    item, _, _ = upsert(
+        db,
+        CreatorProfile,
+        "default",
+        payload.model_dump(exclude={"id"}),
+        "CreatorProfile",
+        create_action="creator_memory_updated",
+        update_action="creator_memory_updated",
+    )
+    return item
 
 
 @app.get("/api/activity-logs", response_model=list[ActivityLogOut])
@@ -324,15 +413,41 @@ def knowledge_from_local(item: dict[str, Any]) -> KnowledgeEntryIn | None:
     if not item.get("id"):
         return None
     linked_content_ids = item.get("linkedContentIds") if isinstance(item.get("linkedContentIds"), list) else []
-    source_url = item.get("sourceUrl") or item.get("source") or ""
+    source_url = item.get("sourceUrl") or ""
+    knowledge_type = item.get("knowledgeType") or "Source / Research"
+    if knowledge_type not in {"Fact", "Source / Research", "Inference", "Creator Preference", "Learning", "Playbook"}:
+        knowledge_type = "Source / Research"
+    status = item.get("status") or "ACTIVE"
+    if status not in {"DRAFT", "ACTIVE", "ARCHIVED"}:
+        status = "ACTIVE"
     return KnowledgeEntryIn(
         id=item["id"],
         topic_id=item.get("linkedTopicId") or item.get("primaryTopicId") or None,
-        content_id=linked_content_ids[0] if linked_content_ids else None,
+        content_id=item.get("linkedContentId") or (linked_content_ids[0] if linked_content_ids else None),
         title=item.get("title") or "Untitled Knowledge",
         body=item.get("summary") or item.get("eventSummary") or "",
+        knowledge_type=knowledge_type,
+        source=item.get("source") or "",
         source_url=source_url,
         tags=item.get("tags") if isinstance(item.get("tags"), list) else [],
+        confidence=max(0, min(100, int(item.get("confidence") or 70))),
+        status=status,
+        raw=item,
+    )
+
+
+def creator_profile_from_local(item: dict[str, Any] | None) -> CreatorProfileIn | None:
+    if not item:
+        return None
+    return CreatorProfileIn(
+        id="default",
+        account_positioning=item.get("accountPositioning") or "",
+        target_audience=item.get("targetAudience") or "",
+        content_pillars=item.get("contentPillars") if isinstance(item.get("contentPillars"), list) else [],
+        tone_style=item.get("toneStyle") or "",
+        preferred_formats=item.get("preferredFormats") if isinstance(item.get("preferredFormats"), list) else [],
+        topics_to_avoid=item.get("topicsToAvoid") if isinstance(item.get("topicsToAvoid"), list) else [],
+        platform_preferences=item.get("platformPreferences") if isinstance(item.get("platformPreferences"), list) else [],
         raw=item,
     )
 
@@ -543,10 +658,12 @@ def import_records(db: Session, records: list[Any], model, entity_type: str) -> 
 
 @app.post("/api/import/localstorage-core", response_model=ImportSummary)
 def import_localstorage_core(payload: LocalStorageCoreImportIn, db: Session = Depends(get_db)):
+    creator_records = [record for record in [creator_profile_from_local(payload.creatorMemory)] if record]
     summary = ImportSummary(
         topics=import_bucket(db, payload.topics, topic_from_local, Topic, "Topic"),
         contents=import_bucket(db, payload.contentItems, content_from_local, Content, "Content"),
         knowledge=import_bucket(db, payload.knowledgeItems, knowledge_from_local, KnowledgeEntry, "KnowledgeEntry"),
+        creator_memory=import_records(db, creator_records, CreatorProfile, "CreatorProfile"),
     )
     log_activity(db, "import_localstorage_core", "Database", "localStorage", summary.model_dump())
     db.commit()

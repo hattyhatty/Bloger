@@ -116,6 +116,9 @@ const TRACKING_CHECKPOINTS = Object.freeze([
 ]);
 const CHECKPOINT_STATUS = Object.freeze({ PENDING: "PENDING", DONE: "DONE", SKIPPED: "SKIPPED" });
 const CHECKPOINT_STATUS_LABELS = Object.freeze({ PENDING: "待更新", DONE: "已完成", SKIPPED: "已跳过" });
+const KNOWLEDGE_TYPES = Object.freeze(["Fact", "Source / Research", "Inference", "Creator Preference", "Learning", "Playbook"]);
+const KNOWLEDGE_STATUS = Object.freeze({ DRAFT: "DRAFT", ACTIVE: "ACTIVE", ARCHIVED: "ARCHIVED" });
+const KNOWLEDGE_STATUS_LABELS = Object.freeze({ DRAFT: "草稿", ACTIVE: "有效", ARCHIVED: "已归档" });
 const LEGACY_LONG_FORM_PLATFORM = ["公", "众", "号"].join("");
 const TASK_STATUS = Object.freeze({ PENDING: "PENDING", RUNNING: "RUNNING", SUCCESS: "SUCCESS", FAILED: "FAILED" });
 const TASK_TYPES = Object.freeze({
@@ -244,7 +247,7 @@ const NAV_ITEMS = [
   ["publish", "□", "Publishing Center 发布中心", "Publishing Center", "管理平台版本、发布队列、排期和导出。"],
   ["analytics", "↗", "Analytics 数据复盘", "Analytics", "录入小红书、抖音、B站发布数据，并生成 mock 复盘建议。"],
   ["prompts", "#", "Prompt Library 提示词库", "Prompt Library", "把提示词作为可维护的数据对象管理。"],
-  ["knowledge", "◈", "Knowledge Base 知识库", "Knowledge Base", "沉淀知识条目和关联内容。"],
+  ["knowledge", "◈", "Knowledge Brain 知识大脑", "Knowledge Brain", "沉淀事实、来源、推断、偏好与创作经验。"],
   ["settings", "⚙", "Settings 设置", "Settings", "AI Capabilities、存储 Provider 和后台配置占位。"]
 ];
 
@@ -297,7 +300,12 @@ const appState = {
     publishDate: "",
     analyticsRange: "30",
     analyticsPlatform: "",
-    analyticsContentType: ""
+    analyticsContentType: "",
+    knowledgeQuery: "",
+    knowledgeType: "",
+    knowledgeTag: "",
+    knowledgeSource: "",
+    knowledgeStatus: "ACTIVE"
   }
 };
 
@@ -970,15 +978,48 @@ function normalizePrompt(item = {}) {
   };
 }
 
+function normalizeKnowledgeType(value, source = "") {
+  if (KNOWLEDGE_TYPES.includes(value)) return value;
+  if (/sop|playbook|流程|模板/i.test(source)) return "Playbook";
+  return "Source / Research";
+}
+
+function normalizeKnowledgeStatus(value) {
+  return Object.values(KNOWLEDGE_STATUS).includes(value) ? value : KNOWLEDGE_STATUS.ACTIVE;
+}
+
+function normalizeCreatorMemory(item = {}) {
+  const createdAt = item.createdAt || item.created_at || now();
+  return {
+    id: "default",
+    accountPositioning: item.accountPositioning || item.account_positioning || "",
+    targetAudience: item.targetAudience || item.target_audience || "",
+    contentPillars: Array.isArray(item.contentPillars) ? item.contentPillars : Array.isArray(item.content_pillars) ? item.content_pillars : splitTags(item.contentPillars),
+    toneStyle: item.toneStyle || item.tone_style || "",
+    preferredFormats: Array.isArray(item.preferredFormats) ? item.preferredFormats : Array.isArray(item.preferred_formats) ? item.preferred_formats : splitTags(item.preferredFormats),
+    topicsToAvoid: Array.isArray(item.topicsToAvoid) ? item.topicsToAvoid : Array.isArray(item.topics_to_avoid) ? item.topics_to_avoid : splitTags(item.topicsToAvoid),
+    platformPreferences: Array.isArray(item.platformPreferences) ? item.platformPreferences : Array.isArray(item.platform_preferences) ? item.platform_preferences : splitTags(item.platformPreferences),
+    createdAt,
+    updatedAt: item.updatedAt || item.updated_at || createdAt
+  };
+}
+
 function normalizeKnowledge(item = {}) {
+  const createdAt = item.createdAt || item.created_at || now();
+  const source = item.source || "手动录入";
+  const linkedContentIds = Array.isArray(item.linkedContentIds) ? item.linkedContentIds : item.linkedContentId ? [item.linkedContentId] : [];
   return {
     id: item.id || uid("knowledge"),
     title: item.title || "未命名知识",
-    source: item.source || "手动录入",
+    knowledgeType: normalizeKnowledgeType(item.knowledgeType || item.knowledge_type, source),
+    source,
+    sourceUrl: item.sourceUrl || item.source_url || "",
     topic: item.topic || "AI 内容",
     tags: Array.isArray(item.tags) ? item.tags : splitTags(item.tags),
     summary: item.summary || "",
-    linkedContentIds: Array.isArray(item.linkedContentIds) ? item.linkedContentIds : [],
+    confidence: clampScore(item.confidence ?? 70),
+    status: normalizeKnowledgeStatus(item.status),
+    linkedContentIds: [...new Set(linkedContentIds.filter(Boolean))],
     linkedTopicId: item.linkedTopicId || "",
     linkedClusterId: item.linkedClusterId || "",
     linkedTopicIds: Array.isArray(item.linkedTopicIds) ? item.linkedTopicIds : [],
@@ -988,7 +1029,8 @@ function normalizeKnowledge(item = {}) {
     uncertainClaims: Array.isArray(item.uncertainClaims) ? item.uncertainClaims : [],
     eventSummary: item.eventSummary || "",
     timeline: Array.isArray(item.timeline) ? item.timeline : [],
-    createdAt: item.createdAt || now()
+    createdAt,
+    updatedAt: item.updatedAt || item.updated_at || createdAt
   };
 }
 
@@ -1057,7 +1099,8 @@ class ApiClient {
     return {
       topics: data.topics || [],
       contentItems: data.contentItems || [],
-      knowledgeItems: data.knowledgeItems || []
+      knowledgeItems: data.knowledgeItems || [],
+      creatorMemory: normalizeCreatorMemory(data.settings?.creatorMemory)
     };
   }
   businessPayload(data = db) {
@@ -1081,10 +1124,11 @@ class ApiClient {
     return { core, business };
   }
   async pullCoreData() {
-    const [topics, contents, knowledgeItems, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords] = await Promise.all([
+    const [topics, contents, knowledgeItems, creatorMemory, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords] = await Promise.all([
       this.request("/api/topics?limit=500"),
       this.request("/api/contents?limit=500"),
       this.request("/api/knowledge?limit=500"),
+      this.request("/api/creator-memory"),
       this.request("/api/platform-versions?limit=500"),
       this.request("/api/approvals?limit=500"),
       this.request("/api/publishing-tasks?limit=500"),
@@ -1092,7 +1136,47 @@ class ApiClient {
       this.request("/api/analytics-records?limit=500"),
       this.request("/api/experience-records?limit=500")
     ]);
-    return { topics, contents, knowledgeItems, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords };
+    return { topics, contents, knowledgeItems, creatorMemory, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords };
+  }
+  knowledgePayload(item) {
+    const record = normalizeKnowledge(item);
+    return {
+      id: record.id,
+      topic_id: record.linkedTopicId || null,
+      content_id: record.linkedContentIds[0] || null,
+      title: record.title,
+      body: record.summary,
+      knowledge_type: record.knowledgeType,
+      source: record.source,
+      source_url: record.sourceUrl,
+      tags: record.tags,
+      confidence: record.confidence,
+      status: record.status,
+      raw: record
+    };
+  }
+  saveKnowledge(item) {
+    return this.request("/api/knowledge", { method: "POST", body: JSON.stringify(this.knowledgePayload(item)) });
+  }
+  archiveKnowledge(id) {
+    return this.request(`/api/knowledge/${encodeURIComponent(id)}/archive`, { method: "POST" });
+  }
+  saveCreatorMemory(item) {
+    const memory = normalizeCreatorMemory(item);
+    return this.request("/api/creator-memory", {
+      method: "PUT",
+      body: JSON.stringify({
+        id: "default",
+        account_positioning: memory.accountPositioning,
+        target_audience: memory.targetAudience,
+        content_pillars: memory.contentPillars,
+        tone_style: memory.toneStyle,
+        preferred_formats: memory.preferredFormats,
+        topics_to_avoid: memory.topicsToAvoid,
+        platform_preferences: memory.platformPreferences,
+        raw: memory
+      })
+    });
   }
   exportKnowledgeMarkdown(ids = []) {
     return this.request("/api/knowledge/export/markdown", { method: "POST", body: JSON.stringify({ ids }) });
@@ -1140,7 +1224,23 @@ function upsertById(list, item) {
 function mergeBackendCoreData(snapshot = {}) {
   (snapshot.topics || []).forEach(item => upsertById(db.topics, normalizeTopic({ ...(item.raw || {}), id: item.id, source: item.source, title: item.title, url: item.url, author: item.author, category: item.category, status: item.status, score: item.score })));
   (snapshot.contents || []).forEach(item => upsertById(db.contentItems, normalizeContent({ ...(item.raw || {}), id: item.id, sourceTopicId: item.topic_id || item.raw?.sourceTopicId, title: item.title, status: item.status, studioPlatform: item.platform, studioFormat: item.content_type, sourceUrl: item.source_url })));
-  (snapshot.knowledgeItems || []).forEach(item => upsertById(db.knowledgeItems, normalizeKnowledge({ ...(item.raw || {}), id: item.id, linkedTopicId: item.topic_id || item.raw?.linkedTopicId, linkedContentIds: item.content_id ? [item.content_id] : item.raw?.linkedContentIds, title: item.title, source: item.source_url || item.raw?.source, tags: item.tags, summary: item.body })));
+  (snapshot.knowledgeItems || []).forEach(item => upsertById(db.knowledgeItems, normalizeKnowledge({
+    ...(item.raw || {}),
+    id: item.id,
+    linkedTopicId: item.topic_id || item.raw?.linkedTopicId,
+    linkedContentIds: item.content_id ? [item.content_id] : item.raw?.linkedContentIds,
+    title: item.title,
+    knowledgeType: item.knowledge_type,
+    source: item.source || item.raw?.source,
+    sourceUrl: item.source_url || item.raw?.sourceUrl,
+    tags: item.tags,
+    confidence: item.confidence,
+    status: item.status,
+    summary: item.body,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at
+  })));
+  if (snapshot.creatorMemory) db.settings.creatorMemory = normalizeCreatorMemory(snapshot.creatorMemory);
   (snapshot.approvals || []).forEach(item => {
     const content = db.contentItems.find(existing => existing.id === item.content_id);
     if (!content) return;
@@ -1225,7 +1325,7 @@ async function bootstrapBackendCoreData() {
 function migrateDatabase(raw) {
   const source = raw && raw.contentItems ? raw : createInitialData();
   const newDb = {
-    schemaVersion: 5,
+    schemaVersion: 6,
     contentItems: [],
     topics: [],
     topicClusters: [],
@@ -1256,6 +1356,7 @@ function migrateDatabase(raw) {
   newDb.settings.feedSources = (Array.isArray(source.settings?.feedSources) && source.settings.feedSources.length ? source.settings.feedSources : createPresetFeedSources()).map(normalizeFeedSource);
   newDb.settings.feedCorsProxyUrl = source.settings?.feedCorsProxyUrl || "";
   newDb.settings.clusteringConfig = normalizeClusteringConfig(source.settings?.clusteringConfig);
+  newDb.settings.creatorMemory = normalizeCreatorMemory(source.settings?.creatorMemory);
   newDb.settings.sourceStatus = {
     github: normalizeSourceStatus(source.settings?.sourceStatus?.github || { sourceId: "github" }),
     feeds: normalizeSourceStatus(source.settings?.sourceStatus?.feeds || { sourceId: "feeds" })
@@ -1820,7 +1921,7 @@ const ClusterContentService = {
 };
 
 const ClusterKnowledgeService = {
-  saveToKnowledge(clusterId) {
+  async saveToKnowledge(clusterId) {
     const cluster = TopicClusterStore.getById(clusterId);
     if (!cluster) throw new Error("找不到 Cluster");
     if (cluster.savedKnowledgeId && KnowledgeStore.getById(cluster.savedKnowledgeId)) return KnowledgeStore.getById(cluster.savedKnowledgeId);
@@ -1831,9 +1932,13 @@ const ClusterKnowledgeService = {
     }
     const topics = cluster.topicIds.map(id => TopicStore.getById(id)).filter(Boolean);
     const timeline = topics.sort((a, b) => new Date(a.publishedAt) - new Date(b.publishedAt)).map(topic => `${new Date(topic.publishedAt).toLocaleDateString("zh-CN")} ${topic.source}: ${topic.title}`);
-    const knowledge = KnowledgeStore.create({
+    const knowledge = await KnowledgeBrainService.save({
       title: cluster.title,
+      knowledgeType: "Source / Research",
       source: "TopicCluster",
+      sourceUrl: TopicStore.getById(cluster.primaryTopicId)?.url || "",
+      confidence: cluster.confidence || 75,
+      status: KNOWLEDGE_STATUS.ACTIVE,
       topic: cluster.category,
       tags: cluster.tags,
       linkedClusterId: cluster.id,
@@ -3620,7 +3725,98 @@ function buildTaskTitle(type, payload = {}) {
 }
 
 const PromptStore = createCrudStore("promptTemplates", normalizePrompt);
-const KnowledgeStore = createCrudStore("knowledgeItems", normalizeKnowledge);
+const baseKnowledgeStore = createCrudStore("knowledgeItems", normalizeKnowledge);
+const KnowledgeStore = {
+  ...baseKnowledgeStore,
+  search(filters = {}) {
+    const query = String(filters.query || "").trim().toLowerCase();
+    const tag = String(filters.tag || "").trim().toLowerCase();
+    const source = String(filters.source || "").trim().toLowerCase();
+    return this.getAll().filter(item => {
+      if (filters.type && item.knowledgeType !== filters.type) return false;
+      if (filters.status && item.status !== filters.status) return false;
+      if (filters.topicId && item.linkedTopicId !== filters.topicId) return false;
+      if (filters.contentId && !(item.linkedContentIds || []).includes(filters.contentId)) return false;
+      if (tag && !(item.tags || []).some(value => String(value).toLowerCase().includes(tag))) return false;
+      if (source && !`${item.source} ${item.sourceUrl}`.toLowerCase().includes(source)) return false;
+      if (query && !`${item.title} ${item.summary} ${item.topic} ${item.source} ${(item.tags || []).join(" ")}`.toLowerCase().includes(query)) return false;
+      return true;
+    }).sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
+  },
+  related({ topicId = "", contentId = "", tags = [], topic = "", limit = 6 } = {}) {
+    const wantedTags = new Set((tags || []).map(value => String(value).toLowerCase()));
+    return this.getAll().filter(item => item.status === KNOWLEDGE_STATUS.ACTIVE).map(item => {
+      let relevance = 0;
+      if (contentId && item.linkedContentIds.includes(contentId)) relevance += 120;
+      if (topicId && item.linkedTopicId === topicId) relevance += 100;
+      if (topic && item.topic === topic) relevance += 30;
+      relevance += (item.tags || []).filter(tag => wantedTags.has(String(tag).toLowerCase())).length * 15;
+      return { ...item, relevance };
+    }).filter(item => item.relevance > 0).sort((a, b) => b.relevance - a.relevance || b.confidence - a.confidence).slice(0, limit);
+  }
+};
+
+const KnowledgeRetrieval = {
+  search(filters = {}) { return KnowledgeStore.search(filters); },
+  forTopic(topic, limit = 6) {
+    if (!topic) return [];
+    return KnowledgeStore.related({ topicId: topic.id, tags: topic.tags, topic: topic.category, limit });
+  },
+  forContent(content, limit = 6) {
+    if (!content) return [];
+    return KnowledgeStore.related({ contentId: content.id, topicId: content.sourceTopicId, tags: content.tags, topic: content.topic, limit });
+  },
+  contextFor({ topic = null, content = null, limit = 8 } = {}) {
+    const items = content ? this.forContent(content, limit) : this.forTopic(topic, limit);
+    return {
+      verifiedFacts: items.filter(item => item.knowledgeType === "Fact" && item.status === KNOWLEDGE_STATUS.ACTIVE),
+      inferences: items.filter(item => item.knowledgeType === "Inference" && item.status === KNOWLEDGE_STATUS.ACTIVE),
+      references: items.filter(item => !["Fact", "Inference"].includes(item.knowledgeType) && item.status === KNOWLEDGE_STATUS.ACTIVE)
+    };
+  }
+};
+
+const KnowledgeBrainService = {
+  backendEnabled() { return normalizeBackendApiConfig(db.settings?.backendApiConfig).enabled; },
+  async save(payload, id = "") {
+    const record = id ? KnowledgeStore.update(id, payload) : KnowledgeStore.create(payload);
+    if (!record || !this.backendEnabled()) return record;
+    try {
+      await backendApiProvider.saveKnowledge(record);
+      updateBackendStatus({ lastSuccess: true, lastAction: "saveKnowledge", lastError: "", lastSummary: `${record.knowledgeType} · ${record.title}` });
+    } catch (error) {
+      updateBackendStatus({ lastSuccess: false, lastAction: "saveKnowledge", lastError: error.message || String(error), lastSummary: "Knowledge 已保存在 localStorage，等待后端恢复" });
+    }
+    return record;
+  },
+  async archive(id) {
+    const record = KnowledgeStore.update(id, { status: KNOWLEDGE_STATUS.ARCHIVED });
+    if (!record || !this.backendEnabled()) return record;
+    try {
+      await backendApiProvider.archiveKnowledge(id);
+      updateBackendStatus({ lastSuccess: true, lastAction: "archiveKnowledge", lastError: "", lastSummary: record.title });
+    } catch (error) {
+      updateBackendStatus({ lastSuccess: false, lastAction: "archiveKnowledge", lastError: error.message || String(error), lastSummary: "归档状态已保存在 localStorage" });
+    }
+    return record;
+  },
+  async restore(id) {
+    return this.save({ status: KNOWLEDGE_STATUS.ACTIVE }, id);
+  },
+  async saveCreatorMemory(payload) {
+    const memory = normalizeCreatorMemory({ ...db.settings.creatorMemory, ...payload, updatedAt: now() });
+    db.settings.creatorMemory = memory;
+    saveDb();
+    if (!this.backendEnabled()) return memory;
+    try {
+      await backendApiProvider.saveCreatorMemory(memory);
+      updateBackendStatus({ lastSuccess: true, lastAction: "saveCreatorMemory", lastError: "", lastSummary: "Creator Memory 已同步" });
+    } catch (error) {
+      updateBackendStatus({ lastSuccess: false, lastAction: "saveCreatorMemory", lastError: error.message || String(error), lastSummary: "Creator Memory 已保存在 localStorage" });
+    }
+    return memory;
+  }
+};
 
 // =========================
 // ai/aiRouter.js
@@ -4143,19 +4339,23 @@ score=${current.finalScore}`;
     appState.selectedContentId = content.id;
     return content;
   },
-  saveToKnowledge(topicId) {
+  async saveToKnowledge(topicId) {
     const topic = TopicStore.getById(topicId);
     if (!topic) throw new Error("找不到 Topic");
     if (topic.savedKnowledgeId && KnowledgeStore.getById(topic.savedKnowledgeId)) return KnowledgeStore.getById(topic.savedKnowledgeId);
-    const source = `${topic.source} / MockTopicProvider`;
-    const existing = KnowledgeStore.getAll().find(item => item.linkedTopicId === topic.id || (item.title === topic.title && item.source === source));
+    const source = topic.feedName || topic.sourceProvider || topic.source;
+    const existing = KnowledgeStore.getAll().find(item => item.linkedTopicId === topic.id || (item.title === topic.title && item.sourceUrl === topic.url));
     if (existing) {
       TopicStore.update(topicId, { savedKnowledgeId: existing.id });
       return existing;
     }
-    const knowledge = KnowledgeStore.create({
+    const knowledge = await KnowledgeBrainService.save({
       title: topic.title,
+      knowledgeType: "Source / Research",
       source,
+      sourceUrl: topic.canonicalUrl || topic.url || "",
+      confidence: topic.isOfficialSource ? 95 : topic.sourceType === "github" ? 82 : 68,
+      status: KNOWLEDGE_STATUS.ACTIVE,
       topic: topic.category,
       tags: topic.tags,
       linkedTopicId: topic.id,
@@ -4624,6 +4824,8 @@ window.ExperienceStore = ExperienceStore;
 window.LearningService = LearningService;
 window.PromptStore = PromptStore;
 window.KnowledgeStore = KnowledgeStore;
+window.KnowledgeRetrieval = KnowledgeRetrieval;
+window.KnowledgeBrainService = KnowledgeBrainService;
 window.TaskQueue = TaskQueue;
 window.StorageProvider = StorageProvider;
 window.LocalStorageProvider = LocalStorageProvider;
@@ -4793,9 +4995,9 @@ function createMockPrompts() {
 
 function createMockKnowledge() {
   return [
-    normalizeKnowledge({ title: "AI Agent 内容常见争议", source: "Mock Research", topic: "AI Agent", tags: ["争议", "职业"], summary: "适合从效率、替代和学习路径三个角度解释。" }),
-    normalizeKnowledge({ title: "开发者工具内容结构", source: "Internal SOP", topic: "开发者工具", tags: ["B站", "教程"], summary: "先展示结果，再解释工作流，最后给可复制步骤。" }),
-    normalizeKnowledge({ title: "小红书 AI 工具笔记框架", source: "Internal SOP", topic: "小红书", tags: ["图文", "标题"], summary: "痛点标题 + 三步教程 + 使用场景 + 评论区提问。" })
+    normalizeKnowledge({ title: "AI Agent 内容常见争议", knowledgeType: "Source / Research", source: "Mock Research", confidence: 68, status: "ACTIVE", topic: "AI Agent", tags: ["争议", "职业"], summary: "适合从效率、替代和学习路径三个角度解释。" }),
+    normalizeKnowledge({ title: "开发者工具内容结构", knowledgeType: "Playbook", source: "Internal SOP", confidence: 88, status: "ACTIVE", topic: "开发者工具", tags: ["B站", "教程"], summary: "先展示结果，再解释工作流，最后给可复制步骤。" }),
+    normalizeKnowledge({ title: "小红书 AI 工具笔记框架", knowledgeType: "Playbook", source: "Internal SOP", confidence: 90, status: "ACTIVE", topic: "小红书", tags: ["图文", "标题"], summary: "痛点标题 + 三步教程 + 使用场景 + 评论区提问。" })
   ];
 }
 
@@ -5338,6 +5540,7 @@ function renderTopicDetail(topic) {
   const createLabel = isConverted ? "打开已创建 Content" : "Create Content";
   const knowledgeLabel = hasKnowledge ? "打开知识条目" : "Save To Knowledge";
   const retryButton = topic.status === TOPIC_STATUS.FAILED ? `<button class="btn small" data-topic-process="${topic.id}">Retry</button>` : "";
+  const knowledgeContext = KnowledgeRetrieval.contextFor({ topic });
   return `<div class="card sticky">
     <div class="item-head">
       <h3>${escapeHtml(topic.title)}</h3>
@@ -5373,6 +5576,9 @@ function renderTopicDetail(topic) {
     <div class="divider"></div>
     <strong>Recommended Platforms</strong>
     ${tagChips(topic.recommendedPlatforms)}
+    <div class="divider"></div>
+    <strong>Related Knowledge</strong>
+    ${renderKnowledgeContext(knowledgeContext, "还没有与此 Topic 相关的 Knowledge。")}
     <div class="divider"></div>
     <div class="toolbar">
       ${retryButton}
@@ -5528,6 +5734,8 @@ function renderWorkspace() {
   const sourceTopic = content.sourceTopicId ? TopicStore.getById(content.sourceTopicId) : null;
   const sourceCluster = content.sourceClusterId ? TopicClusterStore.getById(content.sourceClusterId) : null;
   const learningRefs = LearningService.referencesForContent(content.id, draft.platform);
+  const knowledgeContext = KnowledgeRetrieval.contextFor({ content });
+  const creatorMemory = normalizeCreatorMemory(db.settings.creatorMemory);
   return `<div class="card toolbar">
       <select id="workspaceSelect">${ContentStore.getAll().map(item => `<option value="${item.id}" ${item.id === content.id ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}</select>
       <button class="btn ghost" data-analyze="${content.id}">AI 分析</button>
@@ -5602,6 +5810,12 @@ function renderWorkspace() {
         <div class="divider"></div>
         <h3>历史表现参考</h3>
         ${renderLearningReferences(learningRefs)}
+        <div class="divider"></div>
+        <h3>Knowledge Brain 参考</h3>
+        ${renderKnowledgeContext(knowledgeContext, "暂无相关知识。保存的内容只作为参考，不会自动覆盖草稿。")}
+        <div class="divider"></div>
+        <h3>Creator Memory</h3>
+        ${renderCreatorMemoryReference(creatorMemory)}
         <div class="divider"></div>
         <h3>加入发布队列</h3>
         <div class="form-grid single">
@@ -5975,18 +6189,114 @@ function renderPromptLibrary() {
 
 function renderKnowledgeBase() {
   const item = appState.editKnowledgeId ? KnowledgeStore.getById(appState.editKnowledgeId) : null;
-  return `<div class="card">
-    <h3>${item ? "编辑知识条目" : "新增知识条目"}</h3>
-    <div class="form-grid">
-      <div><label>标题</label><input id="knowledgeTitle" value="${escapeHtml(item?.title)}" /></div>
-      <div><label>来源</label><input id="knowledgeSource" value="${escapeHtml(item?.source)}" /></div>
-      <div><label>主题</label><input id="knowledgeTopic" value="${escapeHtml(item?.topic)}" /></div>
-      <div class="span-all"><label>标签</label><input id="knowledgeTags" value="${escapeHtml((item?.tags || []).join('，'))}" /></div>
-      <div class="span-all"><label>摘要</label><textarea id="knowledgeSummary">${escapeHtml(item?.summary)}</textarea></div>
+  const memory = normalizeCreatorMemory(db.settings.creatorMemory);
+  const filters = appState.filters;
+  const items = KnowledgeRetrieval.search({
+    query: filters.knowledgeQuery,
+    type: filters.knowledgeType,
+    tag: filters.knowledgeTag,
+    source: filters.knowledgeSource,
+    status: filters.knowledgeStatus
+  });
+  const topicOptions = TopicStore.getAll().map(topic => `<option value="${topic.id}" ${topic.id === item?.linkedTopicId ? "selected" : ""}>${escapeHtml(topic.title)}</option>`).join("");
+  const relatedContentId = item?.linkedContentIds?.[0] || "";
+  const contentOptions = ContentStore.getAll().map(content => `<option value="${content.id}" ${content.id === relatedContentId ? "selected" : ""}>${escapeHtml(content.title)}</option>`).join("");
+  return `<div class="knowledge-brain">
+    <div class="grid two">
+      <div class="card">
+        <div class="item-head"><h3>Creator Profile / Memory</h3><span class="chip">Single Creator</span></div>
+        <p class="meta">供未来 Research、Content Creation 和 Learning 检索使用；不会自动修改内容策略。</p>
+        <div class="form-grid single">
+          <div><label>Account Positioning</label><textarea id="creatorAccountPositioning">${escapeHtml(memory.accountPositioning)}</textarea></div>
+          <div><label>Target Audience</label><textarea id="creatorTargetAudience">${escapeHtml(memory.targetAudience)}</textarea></div>
+          <div><label>Content Pillars</label><input id="creatorContentPillars" value="${escapeHtml(memory.contentPillars.join("，"))}" placeholder="AI Agent，AI Coding" /></div>
+          <div><label>Tone / Style</label><textarea id="creatorToneStyle">${escapeHtml(memory.toneStyle)}</textarea></div>
+          <div><label>Preferred Formats</label><input id="creatorPreferredFormats" value="${escapeHtml(memory.preferredFormats.join("，"))}" placeholder="小红书图文，B站长视频" /></div>
+          <div><label>Topics to Avoid</label><input id="creatorTopicsToAvoid" value="${escapeHtml(memory.topicsToAvoid.join("，"))}" /></div>
+          <div><label>Platform Preferences</label><input id="creatorPlatformPreferences" value="${escapeHtml(memory.platformPreferences.join("，"))}" placeholder="小红书，抖音，B站" /></div>
+        </div>
+        <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-creator-memory>保存 Creator Memory</button><span class="meta">更新：${memory.updatedAt ? new Date(memory.updatedAt).toLocaleString("zh-CN") : "—"}</span></div>
+      </div>
+      <div class="card">
+        <div class="item-head"><h3>${item ? "编辑知识条目" : "新增结构化知识"}</h3><span class="chip">${KnowledgeStore.getAll().length} entries</span></div>
+        <div class="form-grid">
+          <div><label>标题</label><input id="knowledgeTitle" value="${escapeHtml(item?.title)}" /></div>
+          <div><label>Type</label><select id="knowledgeType">${KNOWLEDGE_TYPES.map(type => `<option value="${type}" ${type === (item?.knowledgeType || "Source / Research") ? "selected" : ""}>${type}</option>`).join("")}</select></div>
+          <div><label>Status</label><select id="knowledgeStatus">${Object.values(KNOWLEDGE_STATUS).map(status => `<option value="${status}" ${status === (item?.status || "ACTIVE") ? "selected" : ""}>${KNOWLEDGE_STATUS_LABELS[status]}</option>`).join("")}</select></div>
+          <div><label>来源名称</label><input id="knowledgeSource" value="${escapeHtml(item?.source)}" placeholder="官方博客 / Research / Internal SOP" /></div>
+          <div><label>来源链接</label><input id="knowledgeSourceUrl" type="url" value="${escapeHtml(item?.sourceUrl)}" placeholder="https://..." /></div>
+          <div><label>Confidence (0-100)</label><input id="knowledgeConfidence" type="number" min="0" max="100" value="${escapeHtml(item?.confidence ?? 70)}" /></div>
+          <div><label>主题 / Category</label><input id="knowledgeTopic" value="${escapeHtml(item?.topic)}" /></div>
+          <div><label>Related Topic</label><select id="knowledgeRelatedTopic"><option value="">未关联</option>${topicOptions}</select></div>
+          <div><label>Related Content</label><select id="knowledgeRelatedContent"><option value="">未关联</option>${contentOptions}</select></div>
+          <div class="span-all"><label>标签</label><input id="knowledgeTags" value="${escapeHtml((item?.tags || []).join("，"))}" /></div>
+          <div class="span-all"><label>正文 / 摘要</label><textarea id="knowledgeSummary" class="knowledge-body">${escapeHtml(item?.summary)}</textarea></div>
+        </div>
+        <div class="knowledge-trust-note">Fact 仅用于已核验信息；Inference 会始终作为推断单独检索，不会进入 verified facts。</div>
+        <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-knowledge>${item ? "保存知识" : "新增知识"}</button>${item ? `<button class="btn ghost" data-cancel-knowledge>取消</button>` : ""}</div>
+      </div>
     </div>
-    <div class="toolbar" style="margin-top:12px"><button class="btn" data-save-knowledge>${item ? "保存知识" : "新增知识"}</button>${item ? `<button class="btn ghost" data-cancel-knowledge>取消</button>` : ""}</div>
-  </div>
-  <div class="grid two">${KnowledgeStore.getAll().map(k => `<div class="card item-card"><div class="item-head"><h3 class="item-title">${escapeHtml(k.title)}</h3><span class="chip">${escapeHtml(k.topic)}</span></div><div class="meta">来源：${escapeHtml(k.source)} · 关联内容：${k.linkedContentIds.length} · linkedTopicId：${escapeHtml(k.linkedTopicId || "—")} · linkedClusterId：${escapeHtml(k.linkedClusterId || "—")} · Sources：${k.sources?.length || 0}</div>${tagChips(k.tags)}<p>${escapeHtml(k.summary)}</p><div class="toolbar"><button class="btn small ghost" data-edit-knowledge="${k.id}">编辑</button><button class="btn small danger" data-remove-knowledge="${k.id}">删除</button></div></div>`).join("")}</div>`;
+    <div class="card knowledge-filters">
+      <div class="item-head"><h3>Knowledge Retrieval</h3><span class="chip">${items.length} / ${KnowledgeStore.getAll().length}</span></div>
+      <div class="toolbar">
+        <input class="grow" id="knowledgeQuery" value="${escapeHtml(filters.knowledgeQuery)}" placeholder="搜索标题、正文、主题、来源..." />
+        <select id="knowledgeTypeFilter"><option value="">全部类型</option>${KNOWLEDGE_TYPES.map(type => `<option value="${type}" ${type === filters.knowledgeType ? "selected" : ""}>${type}</option>`).join("")}</select>
+        <input id="knowledgeTagFilter" value="${escapeHtml(filters.knowledgeTag)}" placeholder="Tag" />
+        <input id="knowledgeSourceFilter" value="${escapeHtml(filters.knowledgeSource)}" placeholder="Source" />
+        <select id="knowledgeStatusFilter"><option value="">全部状态</option>${Object.values(KNOWLEDGE_STATUS).map(status => `<option value="${status}" ${status === filters.knowledgeStatus ? "selected" : ""}>${KNOWLEDGE_STATUS_LABELS[status]}</option>`).join("")}</select>
+      </div>
+    </div>
+    <div class="grid two knowledge-results">${items.map(renderKnowledgeEntryCard).join("") || empty("当前筛选条件下没有 Knowledge。")}</div>
+  </div>`;
+}
+
+function renderKnowledgeEntryCard(item) {
+  const topic = item.linkedTopicId ? TopicStore.getById(item.linkedTopicId) : null;
+  const content = item.linkedContentIds?.[0] ? ContentStore.getById(item.linkedContentIds[0]) : null;
+  const inferenceWarning = item.knowledgeType === "Inference" ? `<div class="knowledge-inference-warning">Inference · 未验证推断，不作为 Fact 使用</div>` : "";
+  return `<div class="card item-card knowledge-entry ${item.status === KNOWLEDGE_STATUS.ARCHIVED ? "archived" : ""}">
+    <div class="item-head"><h3 class="item-title">${escapeHtml(item.title)}</h3><span class="knowledge-type">${escapeHtml(item.knowledgeType)}</span></div>
+    <div class="chips"><span class="chip">${KNOWLEDGE_STATUS_LABELS[item.status]}</span><span class="chip">Confidence ${item.confidence}</span><span class="chip">${escapeHtml(item.topic)}</span></div>
+    ${inferenceWarning}
+    <div class="meta">Source：${escapeHtml(item.source || "—")}${item.sourceUrl ? ` · <a href="${escapeHtml(item.sourceUrl)}" target="_blank" rel="noreferrer">打开来源</a>` : ""}</div>
+    <div class="meta">Related Topic：${escapeHtml(topic?.title || item.linkedTopicId || "—")} · Related Content：${escapeHtml(content?.title || item.linkedContentIds?.[0] || "—")}</div>
+    ${tagChips(item.tags)}
+    <p class="knowledge-summary">${escapeHtml(item.summary)}</p>
+    <div class="toolbar"><button class="btn small ghost" data-edit-knowledge="${item.id}">编辑</button>${item.status === KNOWLEDGE_STATUS.ARCHIVED ? `<button class="btn small ghost" data-restore-knowledge="${item.id}">Restore</button>` : `<button class="btn small danger" data-archive-knowledge="${item.id}">Archive</button>`}</div>
+  </div>`;
+}
+
+function renderKnowledgeContext(context, emptyMessage = "暂无相关 Knowledge。") {
+  const groups = [
+    ["Verified Facts", context.verifiedFacts || [], "fact"],
+    ["Inferences（未验证）", context.inferences || [], "inference"],
+    ["Research / Playbook / Learning", context.references || [], "reference"]
+  ].filter(([, items]) => items.length);
+  if (!groups.length) return empty(emptyMessage);
+  return `<div class="mini-stack knowledge-context">
+    <div class="meta">Fact 与 Inference 分组展示；推断不会被当作已验证事实。</div>
+    ${groups.map(([label, items, kind]) => `<div class="knowledge-context-group ${kind}">
+      <strong>${label}</strong>
+      ${items.map(item => `<button class="knowledge-context-item" data-open-knowledge="${item.id}">
+        <span>${escapeHtml(item.title)}</span><span class="chip">${escapeHtml(item.knowledgeType)} · ${item.confidence}</span>
+      </button>`).join("")}
+    </div>`).join("")}
+  </div>`;
+}
+
+function renderCreatorMemoryReference(memory) {
+  const hasMemory = memory.accountPositioning || memory.targetAudience || memory.contentPillars.length || memory.toneStyle || memory.preferredFormats.length || memory.topicsToAvoid.length || memory.platformPreferences.length;
+  if (!hasMemory) return empty("Creator Memory 尚未设置。可在 Knowledge Brain 中维护。 ");
+  return `<div class="mini-stack creator-memory-reference">
+    <div class="meta">仅作为创作边界和风格参考，不会自动写入或修改正文。</div>
+    ${memory.accountPositioning ? kv("账号定位", escapeHtml(memory.accountPositioning)) : ""}
+    ${memory.targetAudience ? kv("目标受众", escapeHtml(memory.targetAudience)) : ""}
+    ${memory.contentPillars.length ? kv("内容支柱", tagChips(memory.contentPillars)) : ""}
+    ${memory.toneStyle ? kv("语气 / 风格", escapeHtml(memory.toneStyle)) : ""}
+    ${memory.preferredFormats.length ? kv("偏好形式", tagChips(memory.preferredFormats)) : ""}
+    ${memory.topicsToAvoid.length ? kv("避免主题", tagChips(memory.topicsToAvoid)) : ""}
+    ${memory.platformPreferences.length ? kv("平台偏好", tagChips(memory.platformPreferences)) : ""}
+  </div>`;
 }
 
 function renderSettings() {
@@ -6235,7 +6545,8 @@ function bindScopedInputs() {
     ["researchSource", "researchSource"], ["researchSourceType", "researchSourceType"], ["researchCategory", "researchCategory"], ["researchSort", "researchSort"], ["researchDate", "researchDate"],
     ["clusterSourceCount", "clusterSourceCount"], ["clusterCategory", "clusterCategory"], ["clusterStatus", "clusterStatus"], ["clusterOfficial", "clusterOfficial"], ["clusterDate", "clusterDate"], ["clusterSort", "clusterSort"],
     ["publishPlatformFilter", "publishPlatform"], ["publishStatusFilter", "publishStatus"], ["publishDateFilter", "publishDate"],
-    ["analyticsRange", "analyticsRange"], ["analyticsPlatformFilter", "analyticsPlatform"], ["analyticsContentTypeFilter", "analyticsContentType"]
+    ["analyticsRange", "analyticsRange"], ["analyticsPlatformFilter", "analyticsPlatform"], ["analyticsContentTypeFilter", "analyticsContentType"],
+    ["knowledgeQuery", "knowledgeQuery"], ["knowledgeTypeFilter", "knowledgeType"], ["knowledgeTagFilter", "knowledgeTag"], ["knowledgeSourceFilter", "knowledgeSource"], ["knowledgeStatusFilter", "knowledgeStatus"]
   ];
   bindings.forEach(([id, key]) => {
     const el = document.getElementById(id);
@@ -6369,6 +6680,7 @@ document.addEventListener("click", async event => {
   if (target.dataset.retryTask) { await TaskQueue.retry(target.dataset.retryTask); return render(); }
   if (target.dataset.agentChain) return createAgentTaskChain(target.dataset.agentChain);
   if (target.dataset.openWorkspace) { appState.selectedContentId = target.dataset.openWorkspace; return setPage("workspace"); }
+  if (target.dataset.openKnowledge) { appState.editKnowledgeId = target.dataset.openKnowledge; return setPage("knowledge"); }
   if (target.dataset.refreshGithub !== undefined) {
     const task = TaskQueue.add(TASK_TYPES.FETCH_GITHUB_TOPICS, {});
     await TaskQueue.retry(task.id);
@@ -6551,7 +6863,7 @@ document.addEventListener("click", async event => {
   }
   if (target.dataset.topicSaveKnowledge) {
     const before = TopicStore.getById(target.dataset.topicSaveKnowledge);
-    const knowledge = ResearchPipeline.saveToKnowledge(target.dataset.topicSaveKnowledge);
+    const knowledge = await ResearchPipeline.saveToKnowledge(target.dataset.topicSaveKnowledge);
     appState.selectedTopicId = target.dataset.topicSaveKnowledge;
     if (before?.savedKnowledgeId && knowledge) {
       appState.editKnowledgeId = knowledge.id;
@@ -6805,19 +7117,39 @@ document.addEventListener("click", async event => {
   if (target.dataset.saveKnowledge !== undefined) {
     const payload = {
       title: document.getElementById("knowledgeTitle").value.trim(),
-      source: document.getElementById("knowledgeSource").value.trim(),
+      knowledgeType: document.getElementById("knowledgeType").value,
+      source: document.getElementById("knowledgeSource").value.trim() || "手动录入",
+      sourceUrl: document.getElementById("knowledgeSourceUrl").value.trim(),
+      confidence: clampScore(document.getElementById("knowledgeConfidence").value),
+      status: document.getElementById("knowledgeStatus").value,
       topic: document.getElementById("knowledgeTopic").value.trim(),
       tags: splitTags(document.getElementById("knowledgeTags").value),
-      summary: document.getElementById("knowledgeSummary").value.trim()
+      summary: document.getElementById("knowledgeSummary").value.trim(),
+      linkedTopicId: document.getElementById("knowledgeRelatedTopic").value,
+      linkedContentIds: document.getElementById("knowledgeRelatedContent").value ? [document.getElementById("knowledgeRelatedContent").value] : []
     };
     if (!payload.title) return alert("请填写知识标题。");
-    appState.editKnowledgeId ? KnowledgeStore.update(appState.editKnowledgeId, payload) : KnowledgeStore.create(payload);
+    await KnowledgeBrainService.save(payload, appState.editKnowledgeId || "");
     appState.editKnowledgeId = null;
+    return render();
+  }
+  if (target.dataset.saveCreatorMemory !== undefined) {
+    await KnowledgeBrainService.saveCreatorMemory({
+      accountPositioning: document.getElementById("creatorAccountPositioning").value.trim(),
+      targetAudience: document.getElementById("creatorTargetAudience").value.trim(),
+      contentPillars: splitTags(document.getElementById("creatorContentPillars").value),
+      toneStyle: document.getElementById("creatorToneStyle").value.trim(),
+      preferredFormats: splitTags(document.getElementById("creatorPreferredFormats").value),
+      topicsToAvoid: splitTags(document.getElementById("creatorTopicsToAvoid").value),
+      platformPreferences: splitTags(document.getElementById("creatorPlatformPreferences").value)
+    });
     return render();
   }
   if (target.dataset.editKnowledge) { appState.editKnowledgeId = target.dataset.editKnowledge; return render(); }
   if (target.dataset.cancelKnowledge !== undefined) { appState.editKnowledgeId = null; return render(); }
-  if (target.dataset.removeKnowledge) { KnowledgeStore.remove(target.dataset.removeKnowledge); return render(); }
+  if (target.dataset.archiveKnowledge) { await KnowledgeBrainService.archive(target.dataset.archiveKnowledge); if (appState.editKnowledgeId === target.dataset.archiveKnowledge) appState.editKnowledgeId = null; return render(); }
+  if (target.dataset.restoreKnowledge) { await KnowledgeBrainService.restore(target.dataset.restoreKnowledge); return render(); }
+  if (target.dataset.removeKnowledge) { await KnowledgeBrainService.archive(target.dataset.removeKnowledge); return render(); }
   if (target.dataset.saveFeedSource !== undefined) {
     db.settings.feedCorsProxyUrl = document.getElementById("feedCorsProxyUrl").value.trim();
     const payload = collectFeedSourceForm();
