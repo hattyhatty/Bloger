@@ -180,6 +180,25 @@ def test_localstorage_import_is_idempotent(client):
         "topics": [{"id": "topic_1", "title": "Topic", "category": "GPT"}],
         "contentItems": [{"id": "content_1", "title": "Content", "sourceTopicId": "topic_1"}],
         "knowledgeItems": [{"id": "knowledge_1", "title": "Knowledge", "summary": "Body", "linkedTopicId": "topic_1", "linkedContentIds": ["content_1"]}],
+        "opportunityItems": [{
+            "id": "opportunity_import_1",
+            "topicId": "topic_1",
+            "creatorProfileId": "default",
+            "analysisBatchId": "batch_import_1",
+            "knowledgeIds": ["knowledge_1"],
+            "contentOpportunity": "把 GPT 热点解释成创作者行动清单",
+            "recommendedFormat": "短帖",
+            "platformFit": ["小红书"],
+            "novelty": 75,
+            "timeliness": 80,
+            "audienceFit": 85,
+            "creatorFit": 90,
+            "humanNeedStrength": 70,
+            "platformFitScore": 85,
+            "visualPotential": 60,
+            "productionDifficulty": 35,
+            "reasoning": "匹配创作者定位。",
+        }],
         "creatorMemory": {"accountPositioning": "AI 创作者", "contentPillars": ["AI Agent"]},
     }
     first = client.post("/api/import/localstorage-core", json=payload).json()
@@ -190,6 +209,8 @@ def test_localstorage_import_is_idempotent(client):
     assert second["knowledge"]["skipped"] == 1
     assert first["creator_memory"]["added"] == 1
     assert second["creator_memory"]["skipped"] == 1
+    assert first["opportunities"]["added"] == 1
+    assert second["opportunities"]["skipped"] == 1
 
 
 def test_business_workflow_crud_and_activity(client):
@@ -414,3 +435,160 @@ def test_business_localstorage_import_is_idempotent(client):
     assert second["analytics_records"]["skipped"] == 1
     assert second["tracking_snapshots"]["skipped"] == 1
     assert second["experience_records"]["skipped"] == 1
+
+
+def opportunity_candidate(candidate_id: str, angle: str, score_shift: int = 0):
+    return {
+        "id": candidate_id,
+        "summary": "AI Agent 产品发布带来新的创作切口。",
+        "why_it_matters": "它把复杂技术转化为普通创作者可使用的工作流。",
+        "audience": "希望提升效率的中文独立创作者",
+        "underlying_need_or_emotion": "害怕落后，同时希望获得可执行的方法",
+        "content_opportunity": angle,
+        "recommended_format": "口播稿",
+        "platform_fit": ["抖音", "B站"],
+        "novelty": 80 + score_shift,
+        "timeliness": 90,
+        "audience_fit": 75,
+        "creator_fit": 85,
+        "human_need_strength": 70,
+        "platform_fit_score": 80,
+        "visual_potential": 60,
+        "production_difficulty": 40,
+        "overall_score": 1,
+        "reasoning": "题目新鲜、与账号定位一致，并能给目标受众明确行动建议。",
+    }
+
+
+def test_research_opportunity_develop_workflow(client):
+    assert client.post("/api/topics", json={
+        "id": "topic_opportunity",
+        "title": "OpenAI releases an agent workflow",
+        "category": "AI Agent",
+        "url": "https://example.com/agent",
+        "raw": {"tags": ["Agent", "Creator"], "publishedAt": "2026-09-25"},
+    }).status_code == 200
+    assert client.put("/api/creator-memory", json={
+        "account_positioning": "帮助中文独立创作者掌握 AI 工作流",
+        "target_audience": "中文独立创作者",
+        "content_pillars": ["AI Agent", "Creator Productivity"],
+        "preferred_formats": ["口播稿"],
+        "topics_to_avoid": ["未经证实的传闻"],
+        "platform_preferences": ["抖音", "B站"],
+    }).status_code == 200
+    fact = {
+        "id": "knowledge_opportunity_fact",
+        "topic_id": "topic_opportunity",
+        "title": "Official agent release note",
+        "body": "The official release documents an agent workflow.",
+        "knowledge_type": "Fact",
+        "source": "Official release",
+        "source_url": "https://example.com/agent",
+        "tags": ["Agent"],
+        "confidence": 95,
+        "status": "ACTIVE",
+    }
+    inference = {
+        **fact,
+        "id": "knowledge_opportunity_inference",
+        "title": "Creators may adopt agents faster",
+        "body": "This remains a hypothesis.",
+        "knowledge_type": "Inference",
+        "source": "Internal analysis",
+        "source_url": "",
+        "confidence": 55,
+    }
+    assert client.post("/api/knowledge", json=fact).status_code == 200
+    assert client.post("/api/knowledge", json=inference).status_code == 200
+
+    context = client.get("/api/topics/topic_opportunity/opportunity-context").json()
+    assert context["creator_memory"]["target_audience"] == "中文独立创作者"
+    assert {item["knowledge_type"] for item in context["knowledge"]} == {"Fact", "Inference"}
+
+    analysis = {
+        "topic_id": "topic_opportunity",
+        "creator_profile_id": context["creator_memory"]["id"],
+        "analysis_batch_id": "batch_opportunity_1",
+        "knowledge_ids": [item["id"] for item in context["knowledge"]],
+        "opportunities": [
+            opportunity_candidate("opportunity_1", "普通创作者如何用 Agent 节省每天两小时"),
+            opportunity_candidate("opportunity_2", "从这次发布看 AI Agent 的商业趋势", -5),
+            opportunity_candidate("opportunity_3", "用一个生活比喻讲懂 Agent 工作流", -10),
+        ],
+    }
+    created = client.post("/api/opportunities/analyze", json=analysis)
+    assert created.status_code == 200, created.text
+    opportunities = created.json()
+    assert len(opportunities) == 3
+    assert opportunities[0]["overall_score"] == 77
+    assert opportunities[0]["knowledge_ids"] == ["knowledge_opportunity_fact", "knowledge_opportunity_inference"]
+    assert len(client.get("/api/opportunities", params={"topic_id": "topic_opportunity"}).json()) == 3
+
+    saved = client.patch("/api/opportunities/opportunity_1/status", json={"status": "saved"}).json()
+    assert saved["status"] == "saved"
+    rejected = client.patch("/api/opportunities/opportunity_2/status", json={"status": "rejected"}).json()
+    assert rejected["status"] == "rejected"
+
+    developed = client.post("/api/opportunities/opportunity_1/develop", json={}).json()
+    assert developed["opportunity"]["status"] == "developed"
+    assert developed["content"]["topic_id"] == "topic_opportunity"
+    assert developed["content"]["raw"]["sourceOpportunityId"] == "opportunity_1"
+    assert developed["content"]["raw"]["relevantKnowledgeIds"] == [
+        "knowledge_opportunity_fact",
+        "knowledge_opportunity_inference",
+    ]
+    retry = client.post("/api/opportunities/opportunity_1/develop", json={}).json()
+    assert retry["content"]["id"] == developed["content"]["id"]
+    assert len(client.get("/api/contents").json()) == 1
+
+    actions = {item["action"] for item in client.get("/api/activity-logs").json()}
+    assert {"opportunity_analyzed", "opportunity_saved", "opportunity_rejected", "opportunity_developed"} <= actions
+
+
+def test_opportunity_workspace_and_reference_integrity(client):
+    client.post("/api/topics", json={"id": "topic_default", "title": "Default", "category": "GPT"})
+    client.post("/api/topics", json={"id": "topic_other_opportunity", "workspace_id": "other", "title": "Other"})
+    client.post("/api/knowledge", json={
+        "id": "knowledge_other_opportunity",
+        "workspace_id": "other",
+        "topic_id": "topic_other_opportunity",
+        "title": "Other fact",
+        "body": "Verified by an official source.",
+        "knowledge_type": "Fact",
+        "source": "Official",
+        "source_url": "https://example.com/other",
+    })
+    client.post("/api/knowledge", json={
+        "id": "knowledge_archived_opportunity",
+        "topic_id": "topic_default",
+        "title": "Archived source",
+        "knowledge_type": "Source / Research",
+        "status": "ARCHIVED",
+    })
+    candidates = [
+        opportunity_candidate("invalid_1", "Angle one"),
+        opportunity_candidate("invalid_2", "Angle two"),
+        opportunity_candidate("invalid_3", "Angle three"),
+    ]
+    cross_topic = client.post("/api/opportunities/analyze", json={
+        "workspace_id": "default",
+        "topic_id": "topic_other_opportunity",
+        "analysis_batch_id": "invalid_topic",
+        "opportunities": candidates,
+    })
+    assert cross_topic.status_code == 409
+    cross_knowledge = client.post("/api/opportunities/analyze", json={
+        "topic_id": "topic_default",
+        "analysis_batch_id": "invalid_knowledge",
+        "knowledge_ids": ["knowledge_other_opportunity"],
+        "opportunities": candidates,
+    })
+    assert cross_knowledge.status_code == 409
+    archived_knowledge = client.post("/api/opportunities/analyze", json={
+        "topic_id": "topic_default",
+        "analysis_batch_id": "invalid_archived",
+        "knowledge_ids": ["knowledge_archived_opportunity"],
+        "opportunities": candidates,
+    })
+    assert archived_knowledge.status_code == 409
+    assert client.get("/api/opportunities", params={"workspace_id": "default"}).json() == []

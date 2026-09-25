@@ -91,6 +91,79 @@ class CreatorProfileOut(CreatorProfileIn):
     model_config = ConfigDict(from_attributes=True)
 
 
+OpportunityStatus = Literal["candidate", "saved", "rejected", "developed"]
+
+
+class OpportunityCandidateIn(BaseModel):
+    id: str
+    summary: str = ""
+    why_it_matters: str = ""
+    audience: str = ""
+    underlying_need_or_emotion: str = ""
+    content_opportunity: str
+    recommended_format: str = ""
+    platform_fit: list[str] = Field(default_factory=list)
+    novelty: int = Field(default=0, ge=0, le=100)
+    timeliness: int = Field(default=0, ge=0, le=100)
+    audience_fit: int = Field(default=0, ge=0, le=100)
+    creator_fit: int = Field(default=0, ge=0, le=100)
+    human_need_strength: int = Field(default=0, ge=0, le=100)
+    platform_fit_score: int = Field(default=0, ge=0, le=100)
+    visual_potential: int = Field(default=0, ge=0, le=100)
+    production_difficulty: int = Field(default=0, ge=0, le=100)
+    overall_score: int = Field(default=0, ge=0, le=100)
+    reasoning: str = ""
+    raw: JsonDict = Field(default_factory=dict)
+
+
+class OpportunityAnalysisIn(BaseModel):
+    workspace_id: str = "default"
+    topic_id: str
+    creator_profile_id: str | None = None
+    analysis_batch_id: str
+    knowledge_ids: list[str] = Field(default_factory=list)
+    opportunities: list[OpportunityCandidateIn] = Field(min_length=3, max_length=5)
+
+
+class ContentOpportunityIn(OpportunityCandidateIn):
+    workspace_id: str = "default"
+    topic_id: str
+    creator_profile_id: str = "default"
+    developed_content_id: str | None = None
+    analysis_batch_id: str
+    angle_key: str = ""
+    knowledge_ids: list[str] = Field(default_factory=list)
+    status: OpportunityStatus = "candidate"
+
+
+class ContentOpportunityOut(ContentOpportunityIn):
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OpportunityStatusIn(BaseModel):
+    workspace_id: str = "default"
+    status: Literal["candidate", "saved", "rejected"]
+
+
+class OpportunityDevelopIn(BaseModel):
+    workspace_id: str = "default"
+    content_id: str | None = None
+
+
+class OpportunityDevelopOut(BaseModel):
+    opportunity: ContentOpportunityOut
+    content: ContentOut
+
+
+class OpportunityContextOut(BaseModel):
+    topic: TopicOut
+    knowledge: list[KnowledgeEntryOut] = Field(default_factory=list)
+    creator_memory: CreatorProfileOut
+
+
 class ActivityLogOut(BaseModel):
     id: int
     workspace_id: str = "default"
@@ -107,6 +180,7 @@ class LocalStorageCoreImportIn(BaseModel):
     topics: list[JsonDict] = Field(default_factory=list)
     contentItems: list[JsonDict] = Field(default_factory=list)
     knowledgeItems: list[JsonDict] = Field(default_factory=list)
+    opportunityItems: list[JsonDict] = Field(default_factory=list)
     creatorMemory: JsonDict | None = None
 
 
@@ -122,6 +196,7 @@ class ImportSummary(BaseModel):
     contents: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
     knowledge: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
     creator_memory: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
+    opportunities: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
 
 
 class PlatformVersionIn(BaseModel):

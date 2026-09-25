@@ -1,4 +1,4 @@
-# AI Content OS Backend — Phase 7D
+# AI Content OS Backend — Phase 7E
 
 FastAPI + PostgreSQL backend for the AI Content OS core workflow and Knowledge Brain, with server-side workflow validation, immutable published-version history, and idempotent business operations.
 
@@ -12,6 +12,7 @@ The database persists:
 - PlatformVersion / ApprovalRecord / PublishingTask
 - TrackingSnapshot / AnalyticsRecord / ExperienceRecord
 - Workspace (the minimal ownership boundary; this phase still uses one default workspace)
+- ContentOpportunity and its relevant Knowledge links
 
 Real platform APIs, auth, multi-user SaaS, schedulers, vector databases, and cloud deployment remain intentionally out of scope.
 
@@ -49,6 +50,11 @@ Open:
 - `DELETE /api/knowledge/{knowledge_id}`
 - `GET /api/creator-memory`
 - `PUT /api/creator-memory`
+- `GET /api/topics/{topic_id}/opportunity-context`
+- `GET /api/opportunities`
+- `POST /api/opportunities/analyze`
+- `PATCH /api/opportunities/{opportunity_id}/status`
+- `POST /api/opportunities/{opportunity_id}/develop`
 - `GET /api/activity-logs`
 - `GET/POST/PUT /api/platform-versions`
 - `GET/POST/PUT /api/approvals`
@@ -64,7 +70,7 @@ Open:
 
 ## localStorage import
 
-The frontend Settings page can import existing localStorage Topic, Content, Knowledge, Creator Memory, and business workflow data into PostgreSQL.
+The frontend Settings page can import existing localStorage Topic, Content, Knowledge, Creator Memory, Opportunity, and business workflow data into PostgreSQL.
 
 Import is idempotent by original ID:
 
@@ -74,7 +80,7 @@ Import is idempotent by original ID:
 
 ## Source of truth and offline fallback
 
-When the API is healthy, PostgreSQL is authoritative for Topic, Content, Knowledge, Creator Memory, Approval, Publishing, Tracking, Analytics, and Experience data. The frontend keeps localStorage only as:
+When the API is healthy, PostgreSQL is authoritative for Topic, Content, Knowledge, Creator Memory, Opportunity, Approval, Publishing, Tracking, Analytics, and Experience data. The frontend keeps localStorage only as:
 
 - a local cache for fast rendering
 - a temporary offline fallback when the API is unavailable
@@ -93,6 +99,17 @@ The service layer in `app/workflow.py` enforces the business chain independently
 - tracking snapshots are append-only history
 - analytics and experience records must refer to the same publishing/content/version chain
 - repeated approval, publishing, tracking, and experience requests resolve idempotently
+
+## Opportunity Discovery integrity
+
+- each Content angle is an independent `ContentOpportunity` row
+- one analysis batch contains 3–5 unique angles for one workspace-owned Topic
+- relevant Knowledge is linked through `opportunity_knowledge_links`; only active, same-workspace entries are accepted
+- Fact and Inference types remain unchanged in retrieval context so AI prompts cannot silently treat an inference as verified fact
+- Creator Memory is loaded through the service/API boundary and bound to the same workspace
+- the server recalculates `overall_score` from fixed, inspectable weights; it never trusts a model-provided total
+- Save, Reject, Restore, and Develop use controlled status transitions
+- Develop creates one Content record and is idempotent; the Content keeps the source Opportunity, Topic, Knowledge IDs, score, and reasoning
 
 ## Security
 

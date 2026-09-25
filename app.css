@@ -273,6 +273,45 @@ label { display: block; margin-bottom: 7px; color: #735461; font-size: 13px; fon
 .status.done { background: #15803d; }
 .status.pending { background: #d97706; }
 .status.skipped { background: #6b7280; }
+.status.candidate { background: #7c8aa0; }
+.status.saved { background: #3867d6; }
+.status.rejected { background: #c2415b; }
+.status.developed { background: #15803d; }
+
+.opportunity-layout { align-items: start; }
+.opportunity-detail { min-width: 0; overflow-wrap: anywhere; }
+.opportunity-score-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+.opportunity-score-grid > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  font-size: 12px;
+}
+.opportunity-detail .knowledge-context-item {
+  display: grid;
+  justify-content: stretch;
+  margin-top: 8px;
+}
+.text-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--brand);
+  text-align: left;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.error-text { color: #a61b45; border-color: rgba(194,65,91,.35); }
 
 .tracking-timeline {
   display: grid;
@@ -427,4 +466,5 @@ td { font-size: 14px; }
   .btn { width: 100%; }
   .item-head { display: grid; }
   .checks { grid-template-columns: 1fr; }
+  .opportunity-score-grid { grid-template-columns: 1fr; }
 }

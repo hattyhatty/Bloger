@@ -16,6 +16,7 @@ from .models import (
     AnalyticsRecord,
     ApprovalRecord,
     Content,
+    ContentOpportunity,
     CreatorProfile,
     ExperienceRecord,
     KnowledgeEntry,
@@ -35,6 +36,8 @@ from .schemas import (
     BusinessImportSummary,
     ContentIn,
     ContentOut,
+    ContentOpportunityIn,
+    ContentOpportunityOut,
     CreatorProfileIn,
     CreatorProfileOut,
     ExperienceRecordIn,
@@ -48,6 +51,11 @@ from .schemas import (
     MarkdownExportRequest,
     MarkdownExportResponse,
     MarkdownFile,
+    OpportunityAnalysisIn,
+    OpportunityContextOut,
+    OpportunityDevelopIn,
+    OpportunityDevelopOut,
+    OpportunityStatusIn,
     PlatformVersionIn,
     PlatformVersionOut,
     PublishingTaskIn,
@@ -56,6 +64,13 @@ from .schemas import (
     TopicOut,
     TrackingSnapshotIn,
     TrackingSnapshotOut,
+)
+from .opportunity import (
+    analyze_opportunities,
+    develop_opportunity,
+    import_opportunity_record,
+    retrieve_opportunity_context,
+    update_opportunity_status,
 )
 from .workflow import (
     DEFAULT_WORKSPACE_ID,
@@ -77,7 +92,7 @@ from .workflow import (
 
 
 settings = get_settings()
-app = FastAPI(title="AI Content OS Backend", version="0.7.2")
+app = FastAPI(title="AI Content OS Backend", version="0.7.3")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins or ["*"],
@@ -96,7 +111,7 @@ async def workflow_conflict_handler(_: Request, error: WorkflowConflict):
 
 @app.get("/api/health")
 def api_health() -> dict[str, str]:
-    return {"status": "ok", "service": "ai-content-os-backend", "phase": "7D", "sourceOfTruth": "postgresql"}
+    return {"status": "ok", "service": "ai-content-os-backend", "phase": "7E", "sourceOfTruth": "postgresql"}
 
 
 @app.get("/health")
@@ -322,6 +337,65 @@ def update_creator_memory(payload: CreatorProfileIn, db: Session = Depends(get_d
     return item
 
 
+@app.get("/api/topics/{topic_id}/opportunity-context", response_model=OpportunityContextOut)
+def get_opportunity_context(
+    topic_id: str,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    limit: int = Query(12, ge=1, le=30),
+    db: Session = Depends(get_db),
+):
+    topic, knowledge, creator = retrieve_opportunity_context(db, topic_id, workspace_id, limit)
+    # The single-creator profile is initialized lazily for older databases.
+    db.commit()
+    return {"topic": topic, "knowledge": knowledge, "creator_memory": creator}
+
+
+@app.get("/api/opportunities", response_model=list[ContentOpportunityOut])
+def list_opportunities(
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    topic_id: str = "",
+    status: str = "",
+    limit: int = Query(100, le=500),
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    statement = select(ContentOpportunity).where(ContentOpportunity.workspace_id == workspace_id)
+    if topic_id:
+        statement = statement.where(ContentOpportunity.topic_id == topic_id)
+    if status:
+        statement = statement.where(ContentOpportunity.status == status.casefold())
+    return list_records(
+        db,
+        statement.order_by(ContentOpportunity.overall_score.desc(), ContentOpportunity.updated_at.desc()),
+        limit,
+        offset,
+    )
+
+
+@app.post("/api/opportunities/analyze", response_model=list[ContentOpportunityOut])
+def save_opportunity_analysis(payload: OpportunityAnalysisIn, db: Session = Depends(get_db)):
+    return analyze_opportunities(
+        db,
+        workspace_id=payload.workspace_id,
+        topic_id=payload.topic_id,
+        creator_profile_id=payload.creator_profile_id,
+        analysis_batch_id=payload.analysis_batch_id,
+        knowledge_ids=payload.knowledge_ids,
+        candidates=[candidate.model_dump() for candidate in payload.opportunities],
+    )
+
+
+@app.patch("/api/opportunities/{opportunity_id}/status", response_model=ContentOpportunityOut)
+def set_opportunity_status(opportunity_id: str, payload: OpportunityStatusIn, db: Session = Depends(get_db)):
+    return update_opportunity_status(db, opportunity_id, payload.workspace_id, payload.status)
+
+
+@app.post("/api/opportunities/{opportunity_id}/develop", response_model=OpportunityDevelopOut)
+def develop_saved_opportunity(opportunity_id: str, payload: OpportunityDevelopIn, db: Session = Depends(get_db)):
+    opportunity, content = develop_opportunity(db, opportunity_id, payload.workspace_id, payload.content_id)
+    return {"opportunity": opportunity, "content": content}
+
+
 @app.get("/api/activity-logs", response_model=list[ActivityLogOut])
 def list_activity_logs(workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
     return list_records(db, select(ActivityLog).where(ActivityLog.workspace_id == workspace_id).order_by(ActivityLog.created_at.desc()), limit, offset)
@@ -493,6 +567,42 @@ def creator_profile_from_local(item: dict[str, Any] | None) -> CreatorProfileIn 
         preferred_formats=item.get("preferredFormats") if isinstance(item.get("preferredFormats"), list) else [],
         topics_to_avoid=item.get("topicsToAvoid") if isinstance(item.get("topicsToAvoid"), list) else [],
         platform_preferences=item.get("platformPreferences") if isinstance(item.get("platformPreferences"), list) else [],
+        raw=item,
+    )
+
+
+def opportunity_from_local(item: dict[str, Any]) -> ContentOpportunityIn | None:
+    item_id = item.get("id")
+    topic_id = item.get("topicId") or item.get("topic_id")
+    if not item_id or not topic_id or not item.get("contentOpportunity"):
+        return None
+    return ContentOpportunityIn(
+        id=item_id,
+        workspace_id=item.get("workspaceId") or "default",
+        topic_id=topic_id,
+        creator_profile_id=item.get("creatorProfileId") or "default",
+        developed_content_id=item.get("developedContentId") or None,
+        analysis_batch_id=item.get("analysisBatchId") or f"import_{topic_id}",
+        angle_key=item.get("angleKey") or "",
+        knowledge_ids=item.get("knowledgeIds") if isinstance(item.get("knowledgeIds"), list) else [],
+        summary=item.get("summary") or "",
+        why_it_matters=item.get("whyItMatters") or "",
+        audience=item.get("audience") or "",
+        underlying_need_or_emotion=item.get("underlyingNeedOrEmotion") or "",
+        content_opportunity=item.get("contentOpportunity") or "",
+        recommended_format=item.get("recommendedFormat") or "",
+        platform_fit=item.get("platformFit") if isinstance(item.get("platformFit"), list) else [],
+        novelty=item.get("novelty") or 0,
+        timeliness=item.get("timeliness") or 0,
+        audience_fit=item.get("audienceFit") or 0,
+        creator_fit=item.get("creatorFit") or 0,
+        human_need_strength=item.get("humanNeedStrength") or 0,
+        platform_fit_score=item.get("platformFitScore") or 0,
+        visual_potential=item.get("visualPotential") or 0,
+        production_difficulty=item.get("productionDifficulty") or 0,
+        overall_score=item.get("overallScore") or 0,
+        reasoning=item.get("reasoning") or "",
+        status=str(item.get("status") or "candidate").casefold(),
         raw=item,
     )
 
@@ -786,6 +896,7 @@ def import_records(db: Session, records: list[Any], model, entity_type: str, sav
 def import_localstorage_core(payload: LocalStorageCoreImportIn, db: Session = Depends(get_db)):
     ensure_workspace(db)
     creator_records = [record for record in [creator_profile_from_local(payload.creatorMemory)] if record]
+    opportunity_records = [record for record in (opportunity_from_local(item) for item in payload.opportunityItems) if record]
 
     def save_imported_knowledge(session: Session, record_id: str, values: dict[str, Any], *, commit: bool = False):
         validate_knowledge_links(session, values)
@@ -807,6 +918,7 @@ def import_localstorage_core(payload: LocalStorageCoreImportIn, db: Session = De
         contents=import_bucket(db, payload.contentItems, content_from_local, Content, "Content", save_content),
         knowledge=import_bucket(db, payload.knowledgeItems, knowledge_from_local, KnowledgeEntry, "KnowledgeEntry", save_imported_knowledge),
         creator_memory=import_records(db, creator_records, CreatorProfile, "CreatorProfile"),
+        opportunities=import_records(db, opportunity_records, ContentOpportunity, "ContentOpportunity", import_opportunity_record),
     )
     log_activity(db, "import_localstorage_core", "Database", "localStorage", summary.model_dump(), workspace_id=DEFAULT_WORKSPACE_ID)
     db.commit()

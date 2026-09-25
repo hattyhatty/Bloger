@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, JSON, DateTime, ForeignKey, Index, Integer, String, Table, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,6 +16,15 @@ def utcnow() -> datetime:
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+opportunity_knowledge_links = Table(
+    "opportunity_knowledge_links",
+    Base.metadata,
+    Column("opportunity_id", String(128), ForeignKey("content_opportunities.id", ondelete="CASCADE"), primary_key=True),
+    Column("knowledge_entry_id", String(128), ForeignKey("knowledge_entries.id"), primary_key=True),
+)
+Index("ix_opportunity_knowledge_links_knowledge_entry_id", opportunity_knowledge_links.c.knowledge_entry_id)
 
 
 class Workspace(Base, TimestampMixin):
@@ -41,6 +50,7 @@ class Topic(Base, TimestampMixin):
 
     contents: Mapped[list["Content"]] = relationship(back_populates="topic")
     knowledge_entries: Mapped[list["KnowledgeEntry"]] = relationship(back_populates="topic")
+    opportunities: Mapped[list["ContentOpportunity"]] = relationship(back_populates="topic")
 
 
 class Content(Base, TimestampMixin):
@@ -65,6 +75,7 @@ class Content(Base, TimestampMixin):
     publishing_tasks: Mapped[list["PublishingTask"]] = relationship(back_populates="content", cascade="all, delete-orphan")
     analytics_records: Mapped[list["AnalyticsRecord"]] = relationship(back_populates="content", cascade="all, delete-orphan")
     experience_records: Mapped[list["ExperienceRecord"]] = relationship(back_populates="content")
+    developed_opportunities: Mapped[list["ContentOpportunity"]] = relationship(back_populates="developed_content")
 
 
 class KnowledgeEntry(Base, TimestampMixin):
@@ -86,6 +97,10 @@ class KnowledgeEntry(Base, TimestampMixin):
 
     topic: Mapped[Topic | None] = relationship(back_populates="knowledge_entries")
     content: Mapped[Content | None] = relationship(back_populates="knowledge_entries")
+    opportunities: Mapped[list["ContentOpportunity"]] = relationship(
+        secondary=opportunity_knowledge_links,
+        back_populates="relevant_knowledge",
+    )
 
 
 class CreatorProfile(Base, TimestampMixin):
@@ -102,6 +117,64 @@ class CreatorProfile(Base, TimestampMixin):
     topics_to_avoid: Mapped[list] = mapped_column(JsonType, default=list)
     platform_preferences: Mapped[list] = mapped_column(JsonType, default=list)
     raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    opportunities: Mapped[list["ContentOpportunity"]] = relationship(back_populates="creator_profile")
+
+
+class ContentOpportunity(Base, TimestampMixin):
+    __tablename__ = "content_opportunities"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "topic_id", "analysis_batch_id", "angle_key", name="uq_opportunity_batch_angle"),
+        UniqueConstraint("developed_content_id", name="uq_opportunity_developed_content"),
+        CheckConstraint("status IN ('candidate', 'saved', 'rejected', 'developed')", name="ck_opportunity_status"),
+        CheckConstraint(
+            "novelty BETWEEN 0 AND 100 AND timeliness BETWEEN 0 AND 100 "
+            "AND audience_fit BETWEEN 0 AND 100 AND creator_fit BETWEEN 0 AND 100 "
+            "AND human_need_strength BETWEEN 0 AND 100 AND platform_fit_score BETWEEN 0 AND 100 "
+            "AND visual_potential BETWEEN 0 AND 100 AND production_difficulty BETWEEN 0 AND 100 "
+            "AND overall_score BETWEEN 0 AND 100",
+            name="ck_opportunity_scores",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    topic_id: Mapped[str] = mapped_column(String(128), ForeignKey("topics.id"), index=True)
+    creator_profile_id: Mapped[str] = mapped_column(String(128), ForeignKey("creator_profiles.id"), index=True)
+    developed_content_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("contents.id"), nullable=True, index=True)
+    analysis_batch_id: Mapped[str] = mapped_column(String(128), index=True)
+    angle_key: Mapped[str] = mapped_column(String(64), index=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    why_it_matters: Mapped[str] = mapped_column(Text, default="")
+    audience: Mapped[str] = mapped_column(Text, default="")
+    underlying_need_or_emotion: Mapped[str] = mapped_column(Text, default="")
+    content_opportunity: Mapped[str] = mapped_column(Text)
+    recommended_format: Mapped[str] = mapped_column(String(128), default="")
+    platform_fit: Mapped[list] = mapped_column(JsonType, default=list)
+    novelty: Mapped[int] = mapped_column(Integer, default=0)
+    timeliness: Mapped[int] = mapped_column(Integer, default=0)
+    audience_fit: Mapped[int] = mapped_column(Integer, default=0)
+    creator_fit: Mapped[int] = mapped_column(Integer, default=0)
+    human_need_strength: Mapped[int] = mapped_column(Integer, default=0)
+    platform_fit_score: Mapped[int] = mapped_column(Integer, default=0)
+    visual_potential: Mapped[int] = mapped_column(Integer, default=0)
+    production_difficulty: Mapped[int] = mapped_column(Integer, default=0)
+    overall_score: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    reasoning: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), index=True, default="candidate")
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    topic: Mapped[Topic] = relationship(back_populates="opportunities")
+    creator_profile: Mapped[CreatorProfile] = relationship(back_populates="opportunities")
+    developed_content: Mapped[Content | None] = relationship(back_populates="developed_opportunities")
+    relevant_knowledge: Mapped[list[KnowledgeEntry]] = relationship(
+        secondary=opportunity_knowledge_links,
+        back_populates="opportunities",
+    )
+
+    @property
+    def knowledge_ids(self) -> list[str]:
+        return [item.id for item in self.relevant_knowledge]
 
 
 class PlatformVersion(Base, TimestampMixin):
