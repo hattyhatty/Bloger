@@ -13,7 +13,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .activity import log_activity
-from .models import Content, ContentOpportunity, CreatorProfile, KnowledgeEntry, Topic
+from .intelligence import active_learning_influence
+from .models import Content, ContentOpportunity, CreatorLearning, CreatorProfile, KnowledgeEntry, Topic
 from .workflow import DEFAULT_WORKSPACE_ID, WorkflowConflict, ensure_owned, ensure_workspace, save_content, stable_hash
 
 
@@ -111,7 +112,7 @@ def _search_terms(topic: Topic) -> set[str]:
     return {token for token in re.findall(r"[\w\u4e00-\u9fff-]+", source) if len(token) > 1}
 
 
-def retrieve_opportunity_context(db: Session, topic_id: str, workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = 12) -> tuple[Topic, list[KnowledgeEntry], CreatorProfile]:
+def retrieve_opportunity_context(db: Session, topic_id: str, workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = 12) -> tuple[Topic, list[KnowledgeEntry], CreatorProfile, list[CreatorLearning]]:
     topic = db.get(Topic, topic_id)
     ensure_owned(topic, workspace_id, "Topic")
     creator = ensure_creator_profile(db, workspace_id)
@@ -142,12 +143,22 @@ def retrieve_opportunity_context(db: Session, topic_id: str, workspace_id: str =
         if relevance:
             ranked.append((relevance + int(item.confidence or 0) // 10, item))
     ranked.sort(key=lambda pair: (pair[0], pair[1].confidence, pair[1].updated_at), reverse=True)
-    return topic, [item for _, item in ranked[: max(1, min(limit, 30))]], creator
+    learnings = list(db.scalars(select(CreatorLearning).where(
+        CreatorLearning.workspace_id == workspace_id,
+        CreatorLearning.status == "active",
+    ).order_by(CreatorLearning.confidence.desc()).limit(max(1, min(limit, 30)))).all())
+    return topic, [item for _, item in ranked[: max(1, min(limit, 30))]], creator, learnings
 
 
-def _candidate_values(candidate: dict[str, Any], *, workspace_id: str, topic: Topic, creator: CreatorProfile, batch_id: str) -> dict[str, Any]:
+def _candidate_values(db: Session, candidate: dict[str, Any], *, workspace_id: str, topic: Topic, creator: CreatorProfile, batch_id: str) -> dict[str, Any]:
+    candidate_fields = (
+        "summary", "why_it_matters", "audience", "underlying_need_or_emotion",
+        "content_opportunity", "recommended_format", "platform_fit", "novelty",
+        "timeliness", "audience_fit", "creator_fit", "human_need_strength",
+        "platform_fit_score", "visual_potential", "production_difficulty", "reasoning", "raw",
+    )
     values = {
-        **candidate,
+        **{key: candidate.get(key) for key in candidate_fields if key in candidate},
         "workspace_id": workspace_id,
         "topic_id": topic.id,
         "creator_profile_id": creator.id,
@@ -167,11 +178,19 @@ def _candidate_values(candidate: dict[str, Any], *, workspace_id: str, topic: To
         "production_difficulty",
     ):
         values[key] = clamp_score(values.get(key))
-    values["overall_score"] = calculate_opportunity_score(values)
+    base_score = calculate_opportunity_score(values)
+    influence = active_learning_influence(db, workspace_id, topic, values)
+    values["learning_adjustment"] = influence["learning_adjustment"]
+    values["learning_explanation"] = influence["learning_explanation"]
+    values["exploration_bonus"] = influence["exploration_bonus"]
+    values["overall_score"] = clamp_score(base_score + values["learning_adjustment"] + values["exploration_bonus"])
+    values["_relevant_learnings"] = influence["learnings"]
     values["raw"] = {
         **(values.get("raw") or {}),
         "scoreWeights": OPPORTUNITY_WEIGHTS,
         "productionEase": 100 - values["production_difficulty"],
+        "baseOpportunityScore": base_score,
+        "learningAdjustmentCap": 8,
     }
     return values
 
@@ -200,7 +219,8 @@ def analyze_opportunities(
 
     results: list[ContentOpportunity] = []
     for candidate in candidates:
-        values = _candidate_values(candidate, workspace_id=workspace_id, topic=topic, creator=creator, batch_id=analysis_batch_id)
+        values = _candidate_values(db, candidate, workspace_id=workspace_id, topic=topic, creator=creator, batch_id=analysis_batch_id)
+        relevant_learnings = values.pop("_relevant_learnings")
         existing = db.get(ContentOpportunity, candidate["id"])
         same_angle = db.scalar(select(ContentOpportunity).where(
             ContentOpportunity.workspace_id == workspace_id,
@@ -218,6 +238,7 @@ def analyze_opportunities(
         else:
             item = ContentOpportunity(id=candidate["id"], **{key: value for key, value in values.items() if key != "id"})
             item.relevant_knowledge = knowledge
+            item.relevant_learnings = relevant_learnings
             db.add(item)
         results.append(item)
 
@@ -303,6 +324,10 @@ def develop_opportunity(db: Session, opportunity_id: str, workspace_id: str, con
         "opportunityScore": item.overall_score,
         "opportunityReasoning": item.reasoning,
         "relevantKnowledgeIds": item.knowledge_ids,
+        "relevantLearningIds": item.learning_ids,
+        "learningGuidance": item.learning_explanation,
+        "learningAdjustment": item.learning_adjustment,
+        "explorationBonus": item.exploration_bonus,
         "creatorProfileId": item.creator_profile_id,
     }
     content = save_content(db, target_content_id, {
@@ -346,7 +371,8 @@ def import_opportunity_record(db: Session, record_id: str, values: dict[str, Any
         ensure_owned(db.get(Content, developed_content_id), workspace_id, "Content")
     elif status == "developed":
         status = "saved"
-    candidate_values = _candidate_values(values, workspace_id=workspace_id, topic=topic, creator=creator, batch_id=values.get("analysis_batch_id") or f"import_{topic.id}")
+    candidate_values = _candidate_values(db, values, workspace_id=workspace_id, topic=topic, creator=creator, batch_id=values.get("analysis_batch_id") or f"import_{topic.id}")
+    candidate_values.pop("_relevant_learnings", None)
     candidate_values.update({
         "status": status,
         "developed_content_id": developed_content_id,

@@ -520,7 +520,9 @@ def test_research_opportunity_develop_workflow(client):
     assert created.status_code == 200, created.text
     opportunities = created.json()
     assert len(opportunities) == 3
-    assert opportunities[0]["overall_score"] == 77
+    assert opportunities[0]["overall_score"] == 81
+    assert opportunities[0]["exploration_bonus"] == 4
+    assert opportunities[0]["learning_adjustment"] == 0
     assert opportunities[0]["knowledge_ids"] == ["knowledge_opportunity_fact", "knowledge_opportunity_inference"]
     assert len(client.get("/api/opportunities", params={"topic_id": "topic_opportunity"}).json()) == 3
 
@@ -541,7 +543,7 @@ def test_research_opportunity_develop_workflow(client):
     assert retry["content"]["id"] == developed["content"]["id"]
     assert len(client.get("/api/contents").json()) == 1
 
-    actions = {item["action"] for item in client.get("/api/activity-logs").json()}
+    actions = {item["action"] for item in client.get("/api/activity-logs", params={"limit": 500}).json()}
     assert {"opportunity_analyzed", "opportunity_saved", "opportunity_rejected", "opportunity_developed"} <= actions
 
 
@@ -592,3 +594,193 @@ def test_opportunity_workspace_and_reference_integrity(client):
     })
     assert archived_knowledge.status_code == 409
     assert client.get("/api/opportunities", params={"workspace_id": "default"}).json() == []
+
+
+def create_performance_sample(client, suffix, platform, content_type, category, views, engagement, hook_style):
+    topic_id = f"topic_learning_{suffix}"
+    content_id = f"content_learning_{suffix}"
+    version_id = f"version_learning_{suffix}"
+    approval_id = f"approval_learning_{suffix}"
+    job_id = f"job_learning_{suffix}"
+    assert client.post("/api/topics", json={
+        "id": topic_id,
+        "title": f"Learning topic {suffix}",
+        "category": category,
+    }).status_code == 200
+    assert client.post("/api/contents", json={
+        "id": content_id,
+        "topic_id": topic_id,
+        "title": f"Learning content {suffix}",
+        "platform": platform,
+        "content_type": content_type,
+        "source_url": f"https://example.com/source/{suffix}",
+        "raw": {"draftTitle": f"Title {suffix}", "draftBody": "Body", "selectedAngle": "效率提升"},
+    }).status_code == 200
+    assert client.post("/api/platform-versions", json={
+        "id": version_id,
+        "content_id": content_id,
+        "platform": platform,
+        "content_type": content_type,
+        "title": f"Title {suffix}",
+        "hook": hook_style,
+        "body": "Body",
+        "raw": {"sourceUrl": f"https://example.com/source/{suffix}"},
+    }).status_code == 200
+    assert client.post("/api/approvals", json={
+        "id": approval_id,
+        "content_id": content_id,
+        "platform_version_id": version_id,
+        "status": "APPROVED",
+        "approved_at": "2026-09-24T12:00:00Z",
+    }).status_code == 200
+    publish_payload = {
+        "id": job_id,
+        "content_id": content_id,
+        "platform_version_id": version_id,
+        "platform": platform,
+        "content_type": content_type,
+        "scheduled_at": f"2026-09-24T{10 + (int(suffix.split('_')[-1]) % 10):02d}:00",
+        "status": "READY",
+    }
+    assert client.post("/api/publishing-tasks", json=publish_payload).status_code == 200
+    assert client.put(f"/api/publishing-tasks/{job_id}", json={
+        **publish_payload,
+        "status": "PUBLISHED",
+        "actual_published_at": "2026-09-24T12:05:00Z",
+        "url": f"https://example.com/post/{suffix}",
+    }).status_code == 200
+    analytics = client.post(f"/api/publishing-tasks/{job_id}/tracking/start").json()
+    likes = int(engagement * 0.45)
+    saves = int(engagement * 0.30)
+    shares = int(engagement * 0.15)
+    comments = engagement - likes - saves - shares
+    metrics = {
+        "views": views,
+        "likes": likes,
+        "comments": comments,
+        "shares": shares,
+        "saves": saves,
+        "followersGained": max(0, int(engagement * 0.05)),
+        "completionRate": 62 if engagement else 20,
+    }
+    assert client.post("/api/tracking-snapshots", json={
+        "id": f"snapshot_learning_{suffix}",
+        "publishing_task_id": job_id,
+        "analytics_record_id": analytics["id"],
+        "checkpoint_id": "7d",
+        "label": "发布后 7 天",
+        "status": "DONE",
+        "metrics": metrics,
+    }).status_code == 200
+    assert client.post("/api/experience-records", json={
+        "id": f"experience_learning_{suffix}",
+        "content_id": content_id,
+        "topic_id": topic_id,
+        "platform_version_id": version_id,
+        "publishing_task_id": job_id,
+        "analytics_record_id": analytics["id"],
+        "platform": platform,
+        "content_type": content_type,
+        "topic_category": category,
+        "performance_result": "tracked",
+        "raw": {"hookStyle": hook_style, "sourceMetrics": metrics},
+    }).status_code == 200
+    return {"topic_id": topic_id, "content_id": content_id, "analytics_id": analytics["id"]}
+
+
+def test_creator_intelligence_learning_lifecycle_and_integrations(client):
+    assert client.put("/api/creator-memory", json={
+        "account_positioning": "面向中文创作者的 AI 工作流账号",
+        "target_audience": "独立创作者",
+        "content_pillars": ["AI Agent", "AI Coding", "AI Video"],
+        "preferred_formats": ["长文"],
+        "platform_preferences": ["小红书"],
+    }).status_code == 200
+
+    # Deterministic evidence: one proven platform/format pattern plus genuine counter-examples.
+    for index in range(3):
+        create_performance_sample(client, f"high_{index}", "抖音", "口播稿", "AI Agent", 1000, 200, "问题式 Hook")
+        create_performance_sample(client, f"low_format_{index}", "抖音", "短帖", "AI Coding", 1000, 5, "平铺 Hook")
+        create_performance_sample(client, f"low_platform_{index}", "B站", "长文", "AI Video", 1000, 10, "叙事 Hook")
+
+    generated = client.post("/api/creator-intelligence/generate", json={"workspace_id": "default"})
+    assert generated.status_code == 200, generated.text
+    intelligence = generated.json()
+    platform_learning = next(item for item in intelligence["learnings"] if item["pattern_key"] == "platform:all:抖音")
+    format_learning = next(item for item in intelligence["learnings"] if item["pattern_key"] == "format:抖音:口播稿")
+    assert platform_learning["status"] == "active"
+    assert format_learning["status"] == "active"
+    assert platform_learning["sample_size"] == 6
+    assert len(platform_learning["evidence"]) == 6
+    assert platform_learning["confidence"] >= 60
+    initial_confidence = platform_learning["confidence"]
+
+    learning_knowledge = client.get("/api/knowledge", params={"type": "Learning"}).json()
+    assert any(item["raw"].get("creatorLearningId") == platform_learning["id"] for item in learning_knowledge)
+    assert all(item["knowledge_type"] == "Learning" for item in learning_knowledge)
+
+    suggestions = [item for item in intelligence["strategy_suggestions"] if item["status"] == "pending"]
+    platform_suggestion = next(item for item in suggestions if item["proposed_change"].get("field") == "platformPreferences")
+    format_suggestion = next(item for item in suggestions if item["proposed_change"].get("field") == "preferredFormats")
+    accepted = client.patch(f"/api/strategy-suggestions/{platform_suggestion['id']}", json={"workspace_id": "default", "decision": "accepted"})
+    assert accepted.status_code == 200
+    assert "抖音" in accepted.json()["creator_memory"]["platform_preferences"]
+    rejected = client.patch(f"/api/strategy-suggestions/{format_suggestion['id']}", json={"workspace_id": "default", "decision": "rejected"})
+    assert rejected.status_code == 200
+    assert "口播稿" not in rejected.json()["creator_memory"]["preferred_formats"]
+
+    local_intelligence_payload = {
+        "creatorLearnings": [platform_learning],
+        "strategySuggestions": [platform_suggestion],
+    }
+    first_import = client.post("/api/import/localstorage-business", json=local_intelligence_payload).json()
+    second_import = client.post("/api/import/localstorage-business", json=local_intelligence_payload).json()
+    assert first_import["creator_learnings"]["updated"] == 1
+    assert first_import["strategy_suggestions"]["updated"] == 1
+    assert second_import["creator_learnings"]["skipped"] == 1
+    assert second_import["strategy_suggestions"]["skipped"] == 1
+
+    topic = client.post("/api/topics", json={
+        "id": "topic_learning_opportunity",
+        "title": "AI Agent workflow for creators",
+        "category": "AI Agent",
+        "raw": {"tags": ["Agent", "Creator"]},
+    }).json()
+    context = client.get(f"/api/topics/{topic['id']}/opportunity-context").json()
+    assert platform_learning["id"] in {item["id"] for item in context["learnings"]}
+    analyzed = client.post("/api/opportunities/analyze", json={
+        "topic_id": topic["id"],
+        "analysis_batch_id": "learning_integration_batch",
+        "opportunities": [
+            opportunity_candidate("learning_opportunity_1", "AI Agent 如何帮助创作者提升效率"),
+            opportunity_candidate("learning_opportunity_2", "AI Agent 工作流的真实边界"),
+            opportunity_candidate("learning_opportunity_3", "普通创作者应该测试哪些 Agent"),
+        ],
+    }).json()
+    assert analyzed[0]["learning_adjustment"] > 0
+    assert analyzed[0]["learning_ids"]
+    assert any("Confidence" in line for line in analyzed[0]["learning_explanation"])
+    developed = client.post(f"/api/opportunities/{analyzed[0]['id']}/develop", json={}).json()
+    assert developed["content"]["raw"]["relevantLearningIds"] == analyzed[0]["learning_ids"]
+    assert developed["content"]["raw"]["learningGuidance"] == analyzed[0]["learning_explanation"]
+
+    # More consistent supporting data must not lower confidence.
+    create_performance_sample(client, "high_3", "抖音", "口播稿", "AI Agent", 1000, 210, "问题式 Hook")
+    refreshed = client.post("/api/creator-intelligence/generate", json={"workspace_id": "default"}).json()
+    refreshed_platform = next(item for item in refreshed["learnings"] if item["id"] == platform_learning["id"])
+    assert refreshed_platform["sample_size"] == 7
+    assert refreshed_platform["confidence"] >= initial_confidence
+
+    # Conflicting outcomes weaken, rather than silently preserving, a prior active rule.
+    for index in range(4, 10):
+        create_performance_sample(client, f"conflict_{index}", "抖音", "口播稿", "AI Agent", 1000, 0, "问题式 Hook")
+    conflicted = client.post("/api/creator-intelligence/generate", json={"workspace_id": "default"}).json()
+    weakened = next(item for item in conflicted["learnings"] if item["id"] == platform_learning["id"])
+    assert weakened["status"] == "weakened"
+    assert weakened["sample_size"] == 13
+
+    actions = {item["action"] for item in client.get("/api/activity-logs", params={"limit": 500}).json()}
+    assert {"learning_generated", "learning_validated", "learning_weakened", "strategy_suggestion_created", "strategy_suggestion_accepted", "strategy_suggestion_rejected"} <= actions
+
+    assert client.post(f"/api/creator-learnings/{platform_learning['id']}/archive", params={"workspace_id": "other"}).status_code == 409
+    assert client.patch(f"/api/strategy-suggestions/{platform_suggestion['id']}", json={"workspace_id": "other", "decision": "accepted"}).status_code == 409

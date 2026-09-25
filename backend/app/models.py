@@ -26,6 +26,14 @@ opportunity_knowledge_links = Table(
 )
 Index("ix_opportunity_knowledge_links_knowledge_entry_id", opportunity_knowledge_links.c.knowledge_entry_id)
 
+opportunity_learning_links = Table(
+    "opportunity_learning_links",
+    Base.metadata,
+    Column("opportunity_id", String(128), ForeignKey("content_opportunities.id", ondelete="CASCADE"), primary_key=True),
+    Column("creator_learning_id", String(128), ForeignKey("creator_learnings.id"), primary_key=True),
+)
+Index("ix_opportunity_learning_links_creator_learning_id", opportunity_learning_links.c.creator_learning_id)
+
 
 class Workspace(Base, TimestampMixin):
     __tablename__ = "workspaces"
@@ -119,6 +127,8 @@ class CreatorProfile(Base, TimestampMixin):
     raw: Mapped[dict] = mapped_column(JsonType, default=dict)
 
     opportunities: Mapped[list["ContentOpportunity"]] = relationship(back_populates="creator_profile")
+    creator_learnings: Mapped[list["CreatorLearning"]] = relationship(back_populates="creator_profile")
+    strategy_suggestions: Mapped[list["StrategySuggestion"]] = relationship(back_populates="creator_profile")
 
 
 class ContentOpportunity(Base, TimestampMixin):
@@ -135,6 +145,8 @@ class ContentOpportunity(Base, TimestampMixin):
             "AND overall_score BETWEEN 0 AND 100",
             name="ck_opportunity_scores",
         ),
+        CheckConstraint("learning_adjustment BETWEEN -8 AND 8", name="ck_opportunity_learning_adjustment"),
+        CheckConstraint("exploration_bonus BETWEEN 0 AND 5", name="ck_opportunity_exploration_bonus"),
     )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -161,6 +173,9 @@ class ContentOpportunity(Base, TimestampMixin):
     production_difficulty: Mapped[int] = mapped_column(Integer, default=0)
     overall_score: Mapped[int] = mapped_column(Integer, index=True, default=0)
     reasoning: Mapped[str] = mapped_column(Text, default="")
+    learning_adjustment: Mapped[int] = mapped_column(Integer, default=0)
+    learning_explanation: Mapped[list] = mapped_column(JsonType, default=list)
+    exploration_bonus: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), index=True, default="candidate")
     raw: Mapped[dict] = mapped_column(JsonType, default=dict)
 
@@ -171,10 +186,18 @@ class ContentOpportunity(Base, TimestampMixin):
         secondary=opportunity_knowledge_links,
         back_populates="opportunities",
     )
+    relevant_learnings: Mapped[list["CreatorLearning"]] = relationship(
+        secondary=opportunity_learning_links,
+        back_populates="opportunities",
+    )
 
     @property
     def knowledge_ids(self) -> list[str]:
         return [item.id for item in self.relevant_knowledge]
+
+    @property
+    def learning_ids(self) -> list[str]:
+        return [item.id for item in self.relevant_learnings]
 
 
 class PlatformVersion(Base, TimestampMixin):
@@ -330,6 +353,93 @@ class ExperienceRecord(Base, TimestampMixin):
     platform_version: Mapped[PlatformVersion | None] = relationship(back_populates="experience_records")
     publishing_task: Mapped[PublishingTask | None] = relationship(back_populates="experience_records")
     analytics_record: Mapped[AnalyticsRecord | None] = relationship(back_populates="experience_records")
+
+
+class CreatorLearning(Base, TimestampMixin):
+    __tablename__ = "creator_learnings"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "pattern_key", name="uq_creator_learning_pattern"),
+        CheckConstraint("status IN ('proposed', 'active', 'weakened', 'archived')", name="ck_creator_learning_status"),
+        CheckConstraint("confidence BETWEEN 0 AND 100", name="ck_creator_learning_confidence"),
+        CheckConstraint("consistency BETWEEN 0 AND 100", name="ck_creator_learning_consistency"),
+        CheckConstraint("recency_score BETWEEN 0 AND 100", name="ck_creator_learning_recency"),
+        CheckConstraint("effect_strength BETWEEN 0 AND 100", name="ck_creator_learning_effect"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    creator_profile_id: Mapped[str] = mapped_column(String(128), ForeignKey("creator_profiles.id"), index=True)
+    knowledge_entry_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("knowledge_entries.id"), nullable=True, index=True)
+    pattern_key: Mapped[str] = mapped_column(String(255), index=True)
+    learning_statement: Mapped[str] = mapped_column(Text)
+    learning_type: Mapped[str] = mapped_column(String(64), index=True)
+    context_key: Mapped[str] = mapped_column(String(255), index=True, default="")
+    direction: Mapped[str] = mapped_column(String(32), default="neutral")
+    supporting_metrics: Mapped[dict] = mapped_column(JsonType, default=dict)
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    confidence: Mapped[int] = mapped_column(Integer, default=0)
+    consistency: Mapped[int] = mapped_column(Integer, default=0)
+    recency_score: Mapped[int] = mapped_column(Integer, default=0)
+    effect_strength: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="proposed")
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    creator_profile: Mapped[CreatorProfile] = relationship(back_populates="creator_learnings")
+    knowledge_entry: Mapped[KnowledgeEntry | None] = relationship()
+    evidence: Mapped[list["CreatorLearningEvidence"]] = relationship(back_populates="learning", cascade="all, delete-orphan")
+    opportunities: Mapped[list[ContentOpportunity]] = relationship(
+        secondary=opportunity_learning_links,
+        back_populates="relevant_learnings",
+    )
+
+
+class CreatorLearningEvidence(Base, TimestampMixin):
+    __tablename__ = "creator_learning_evidence"
+    __table_args__ = (
+        UniqueConstraint("learning_id", "analytics_record_id", name="uq_learning_analytics_evidence"),
+        CheckConstraint("outcome_score BETWEEN -100 AND 100", name="ck_learning_evidence_outcome"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    learning_id: Mapped[str] = mapped_column(String(128), ForeignKey("creator_learnings.id", ondelete="CASCADE"), index=True)
+    content_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("contents.id"), nullable=True, index=True)
+    opportunity_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("content_opportunities.id"), nullable=True, index=True)
+    publishing_task_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("publishing_tasks.id"), nullable=True, index=True)
+    analytics_record_id: Mapped[str] = mapped_column(String(128), ForeignKey("analytics_records.id"), index=True)
+    experience_record_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("experience_records.id"), nullable=True, index=True)
+    tracking_snapshot_ids: Mapped[list] = mapped_column(JsonType, default=list)
+    metrics: Mapped[dict] = mapped_column(JsonType, default=dict)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    supports: Mapped[bool] = mapped_column(Boolean, default=True)
+    outcome_score: Mapped[int] = mapped_column(Integer, default=0)
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    learning: Mapped[CreatorLearning] = relationship(back_populates="evidence")
+
+
+class StrategySuggestion(Base, TimestampMixin):
+    __tablename__ = "strategy_suggestions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "fingerprint", name="uq_strategy_suggestion_fingerprint"),
+        CheckConstraint("status IN ('pending', 'accepted', 'rejected', 'ignored')", name="ck_strategy_suggestion_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    creator_profile_id: Mapped[str] = mapped_column(String(128), ForeignKey("creator_profiles.id"), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    suggestion_type: Mapped[str] = mapped_column(String(64), index=True)
+    statement: Mapped[str] = mapped_column(Text)
+    proposed_change: Mapped[dict] = mapped_column(JsonType, default=dict)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    supporting_learning_ids: Mapped[list] = mapped_column(JsonType, default=list)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="pending")
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    creator_profile: Mapped[CreatorProfile] = relationship(back_populates="strategy_suggestions")
 
 
 class ActivityLog(Base):

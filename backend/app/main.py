@@ -22,6 +22,7 @@ from .models import (
     KnowledgeEntry,
     PlatformVersion,
     PublishingTask,
+    StrategySuggestion,
     Topic,
     TrackingSnapshot,
     Workspace,
@@ -40,6 +41,9 @@ from .schemas import (
     ContentOpportunityOut,
     CreatorProfileIn,
     CreatorProfileOut,
+    CreatorIntelligenceGenerateIn,
+    CreatorIntelligenceOut,
+    CreatorLearningOut,
     ExperienceRecordIn,
     ExperienceRecordOut,
     ImportBucketSummary,
@@ -60,6 +64,9 @@ from .schemas import (
     PlatformVersionOut,
     PublishingTaskIn,
     PublishingTaskOut,
+    StrategySuggestionDecisionIn,
+    StrategySuggestionDecisionOut,
+    StrategySuggestionOut,
     TopicIn,
     TopicOut,
     TrackingSnapshotIn,
@@ -71,6 +78,17 @@ from .opportunity import (
     import_opportunity_record,
     retrieve_opportunity_context,
     update_opportunity_status,
+)
+from .intelligence import (
+    archive_learning,
+    creator_intelligence_summary,
+    decide_strategy_suggestion,
+    ensure_creator,
+    generate_creator_intelligence,
+    import_creator_learning_records,
+    import_strategy_suggestion_records,
+    list_learnings,
+    performance_rows,
 )
 from .workflow import (
     DEFAULT_WORKSPACE_ID,
@@ -92,7 +110,7 @@ from .workflow import (
 
 
 settings = get_settings()
-app = FastAPI(title="AI Content OS Backend", version="0.7.3")
+app = FastAPI(title="AI Content OS Backend", version="0.7.4")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins or ["*"],
@@ -111,7 +129,7 @@ async def workflow_conflict_handler(_: Request, error: WorkflowConflict):
 
 @app.get("/api/health")
 def api_health() -> dict[str, str]:
-    return {"status": "ok", "service": "ai-content-os-backend", "phase": "7E", "sourceOfTruth": "postgresql"}
+    return {"status": "ok", "service": "ai-content-os-backend", "phase": "7F", "sourceOfTruth": "postgresql"}
 
 
 @app.get("/health")
@@ -344,10 +362,10 @@ def get_opportunity_context(
     limit: int = Query(12, ge=1, le=30),
     db: Session = Depends(get_db),
 ):
-    topic, knowledge, creator = retrieve_opportunity_context(db, topic_id, workspace_id, limit)
+    topic, knowledge, creator, learnings = retrieve_opportunity_context(db, topic_id, workspace_id, limit)
     # The single-creator profile is initialized lazily for older databases.
     db.commit()
-    return {"topic": topic, "knowledge": knowledge, "creator_memory": creator}
+    return {"topic": topic, "knowledge": knowledge, "creator_memory": creator, "learnings": learnings}
 
 
 @app.get("/api/opportunities", response_model=list[ContentOpportunityOut])
@@ -394,6 +412,58 @@ def set_opportunity_status(opportunity_id: str, payload: OpportunityStatusIn, db
 def develop_saved_opportunity(opportunity_id: str, payload: OpportunityDevelopIn, db: Session = Depends(get_db)):
     opportunity, content = develop_opportunity(db, opportunity_id, payload.workspace_id, payload.content_id)
     return {"opportunity": opportunity, "content": content}
+
+
+@app.get("/api/creator-learnings", response_model=list[CreatorLearningOut])
+def get_creator_learnings(
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    status: str = "",
+    db: Session = Depends(get_db),
+):
+    return list_learnings(db, workspace_id, status)
+
+
+@app.post("/api/creator-learnings/{learning_id}/archive", response_model=CreatorLearningOut)
+def archive_creator_learning(learning_id: str, workspace_id: str = DEFAULT_WORKSPACE_ID, db: Session = Depends(get_db)):
+    return archive_learning(db, learning_id, workspace_id)
+
+
+@app.get("/api/strategy-suggestions", response_model=list[StrategySuggestionOut])
+def get_strategy_suggestions(workspace_id: str = DEFAULT_WORKSPACE_ID, db: Session = Depends(get_db)):
+    return list(db.scalars(select(StrategySuggestion).where(
+        StrategySuggestion.workspace_id == workspace_id,
+    ).order_by(StrategySuggestion.updated_at.desc())).all())
+
+
+@app.patch("/api/strategy-suggestions/{suggestion_id}", response_model=StrategySuggestionDecisionOut)
+def decide_strategy(
+    suggestion_id: str,
+    payload: StrategySuggestionDecisionIn,
+    db: Session = Depends(get_db),
+):
+    suggestion, creator = decide_strategy_suggestion(db, suggestion_id, payload.workspace_id, payload.decision)
+    return {"suggestion": suggestion, "creator_memory": creator}
+
+
+@app.get("/api/creator-intelligence", response_model=CreatorIntelligenceOut)
+def get_creator_intelligence(workspace_id: str = DEFAULT_WORKSPACE_ID, db: Session = Depends(get_db)):
+    creator = ensure_creator(db, workspace_id)
+    db.commit()
+    learnings = list_learnings(db, workspace_id)
+    suggestions = list(db.scalars(select(StrategySuggestion).where(
+        StrategySuggestion.workspace_id == workspace_id,
+    ).order_by(StrategySuggestion.updated_at.desc())).all())
+    return {
+        "learnings": learnings,
+        "strategy_suggestions": suggestions,
+        "summary": creator_intelligence_summary(creator, learnings, performance_rows(db, workspace_id)),
+    }
+
+
+@app.post("/api/creator-intelligence/generate", response_model=CreatorIntelligenceOut)
+def refresh_creator_intelligence(payload: CreatorIntelligenceGenerateIn, db: Session = Depends(get_db)):
+    learnings, suggestions, summary = generate_creator_intelligence(db, payload.workspace_id)
+    return {"learnings": learnings, "strategy_suggestions": suggestions, "summary": summary}
 
 
 @app.get("/api/activity-logs", response_model=list[ActivityLogOut])
@@ -602,6 +672,10 @@ def opportunity_from_local(item: dict[str, Any]) -> ContentOpportunityIn | None:
         production_difficulty=item.get("productionDifficulty") or 0,
         overall_score=item.get("overallScore") or 0,
         reasoning=item.get("reasoning") or "",
+        learning_ids=item.get("learningIds") if isinstance(item.get("learningIds"), list) else [],
+        learning_adjustment=item.get("learningAdjustment") or 0,
+        learning_explanation=item.get("learningExplanation") if isinstance(item.get("learningExplanation"), list) else [],
+        exploration_bonus=item.get("explorationBonus") or 0,
         status=str(item.get("status") or "candidate").casefold(),
         raw=item,
     )
@@ -952,13 +1026,22 @@ def import_localstorage_business(payload: LocalStorageBusinessImportIn, db: Sess
         "platform_version_id": publishing_lookup.get(record.publishing_task_id).platform_version_id if publishing_lookup.get(record.publishing_task_id) else record.platform_version_id
     }) for record in experience_records]
 
+    approval_summary = import_records(db, approvals, ApprovalRecord, "ApprovalRecord", save_approval_record)
+    publishing_summary = import_records(db, publishing_tasks, PublishingTask, "PublishingTask", save_publishing_task_record)
+    analytics_summary = import_records(db, analytics_records, AnalyticsRecord, "AnalyticsRecord", save_analytics)
+    tracking_summary = import_records(db, tracking_snapshots, TrackingSnapshot, "TrackingSnapshot", append_tracking_snapshot)
+    experience_summary = import_records(db, experience_records, ExperienceRecord, "ExperienceRecord", save_experience)
+    learning_summary = ImportBucketSummary(**import_creator_learning_records(db, payload.creatorLearnings))
+    strategy_summary = ImportBucketSummary(**import_strategy_suggestion_records(db, payload.strategySuggestions))
     summary = BusinessImportSummary(
         platform_versions=platform_summary,
-        approvals=import_records(db, approvals, ApprovalRecord, "ApprovalRecord", save_approval_record),
-        publishing_tasks=import_records(db, publishing_tasks, PublishingTask, "PublishingTask", save_publishing_task_record),
-        analytics_records=import_records(db, analytics_records, AnalyticsRecord, "AnalyticsRecord", save_analytics),
-        tracking_snapshots=import_records(db, tracking_snapshots, TrackingSnapshot, "TrackingSnapshot", append_tracking_snapshot),
-        experience_records=import_records(db, experience_records, ExperienceRecord, "ExperienceRecord", save_experience),
+        approvals=approval_summary,
+        publishing_tasks=publishing_summary,
+        analytics_records=analytics_summary,
+        tracking_snapshots=tracking_summary,
+        experience_records=experience_summary,
+        creator_learnings=learning_summary,
+        strategy_suggestions=strategy_summary,
     )
     log_activity(db, "import_localstorage_business", "Database", "localStorage", summary.model_dump(), workspace_id=DEFAULT_WORKSPACE_ID)
     db.commit()

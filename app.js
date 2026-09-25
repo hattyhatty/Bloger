@@ -121,6 +121,9 @@ const KNOWLEDGE_STATUS = Object.freeze({ DRAFT: "DRAFT", ACTIVE: "ACTIVE", ARCHI
 const KNOWLEDGE_STATUS_LABELS = Object.freeze({ DRAFT: "草稿", ACTIVE: "有效", ARCHIVED: "已归档" });
 const OPPORTUNITY_STATUS = Object.freeze({ CANDIDATE: "candidate", SAVED: "saved", REJECTED: "rejected", DEVELOPED: "developed" });
 const OPPORTUNITY_STATUS_LABELS = Object.freeze({ candidate: "Candidate", saved: "Saved", rejected: "Rejected", developed: "Developed" });
+const CREATOR_LEARNING_STATUS = Object.freeze({ PROPOSED: "proposed", ACTIVE: "active", WEAKENED: "weakened", ARCHIVED: "archived" });
+const CREATOR_LEARNING_STATUS_LABELS = Object.freeze({ proposed: "Hypothesis", active: "Active", weakened: "Weakened", archived: "Archived" });
+const STRATEGY_SUGGESTION_STATUS_LABELS = Object.freeze({ pending: "Pending", accepted: "Accepted", rejected: "Rejected", ignored: "Ignored" });
 const LEGACY_LONG_FORM_PLATFORM = ["公", "众", "号"].join("");
 const TASK_STATUS = Object.freeze({ PENDING: "PENDING", RUNNING: "RUNNING", SUCCESS: "SUCCESS", FAILED: "FAILED" });
 const TASK_TYPES = Object.freeze({
@@ -264,6 +267,8 @@ const appState = {
   selectedOpportunityId: null,
   opportunityBusyTopicId: null,
   opportunityError: "",
+  creatorIntelligenceBusy: false,
+  creatorIntelligenceError: "",
   selectedBriefDate: "",
   editPromptId: null,
   editKnowledgeId: null,
@@ -382,6 +387,10 @@ function normalizeContent(item = {}) {
     sourceTopicId: item.sourceTopicId || "",
     sourceOpportunityId: item.sourceOpportunityId || "",
     relevantKnowledgeIds: Array.isArray(item.relevantKnowledgeIds) ? item.relevantKnowledgeIds : [],
+    relevantLearningIds: Array.isArray(item.relevantLearningIds) ? item.relevantLearningIds : [],
+    learningGuidance: Array.isArray(item.learningGuidance) ? item.learningGuidance : [],
+    learningAdjustment: Math.max(-8, Math.min(8, Number(item.learningAdjustment) || 0)),
+    explorationBonus: Math.max(0, Math.min(5, Number(item.explorationBonus) || 0)),
     creatorProfileId: item.creatorProfileId || "",
     opportunityScore: clampScore(item.opportunityScore || 0),
     opportunityReasoning: item.opportunityReasoning || "",
@@ -1099,6 +1108,7 @@ function normalizeOpportunity(item = {}) {
     analysisBatchId: item.analysisBatchId || item.analysis_batch_id || "",
     angleKey: item.angleKey || item.angle_key || "",
     knowledgeIds: Array.isArray(item.knowledgeIds) ? item.knowledgeIds : Array.isArray(item.knowledge_ids) ? item.knowledge_ids : [],
+    learningIds: Array.isArray(item.learningIds) ? item.learningIds : Array.isArray(item.learning_ids) ? item.learning_ids : [],
     summary: item.summary || "",
     whyItMatters: item.whyItMatters || item.why_it_matters || "",
     audience: item.audience || "",
@@ -1116,10 +1126,80 @@ function normalizeOpportunity(item = {}) {
     productionDifficulty: clampScore(item.productionDifficulty ?? item.production_difficulty),
     overallScore: clampScore(item.overallScore ?? item.overall_score),
     reasoning: item.reasoning || "",
+    learningAdjustment: Math.max(-8, Math.min(8, Number(item.learningAdjustment ?? item.learning_adjustment) || 0)),
+    learningExplanation: Array.isArray(item.learningExplanation) ? item.learningExplanation : Array.isArray(item.learning_explanation) ? item.learning_explanation : [],
+    explorationBonus: Math.max(0, Math.min(5, Number(item.explorationBonus ?? item.exploration_bonus) || 0)),
     status: Object.values(OPPORTUNITY_STATUS).includes(status) ? status : OPPORTUNITY_STATUS.CANDIDATE,
     raw: item.raw || {},
     createdAt,
     updatedAt: item.updatedAt || item.updated_at || createdAt
+  };
+}
+
+function normalizeCreatorLearningEvidence(item = {}) {
+  return {
+    id: item.id || uid("learning_evidence"),
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    learningId: item.learningId || item.learning_id || "",
+    contentId: item.contentId || item.content_id || "",
+    opportunityId: item.opportunityId || item.opportunity_id || "",
+    publishJobId: item.publishJobId || item.publishing_task_id || "",
+    analyticsRecordId: item.analyticsRecordId || item.analytics_record_id || "",
+    experienceRecordId: item.experienceRecordId || item.experience_record_id || "",
+    trackingSnapshotIds: Array.isArray(item.trackingSnapshotIds) ? item.trackingSnapshotIds : Array.isArray(item.tracking_snapshot_ids) ? item.tracking_snapshot_ids : [],
+    metrics: item.metrics || {},
+    observedAt: item.observedAt || item.observed_at || "",
+    supports: item.supports !== false,
+    outcomeScore: Math.max(-100, Math.min(100, Number(item.outcomeScore ?? item.outcome_score) || 0)),
+    raw: item.raw || {},
+    createdAt: item.createdAt || item.created_at || now(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
+  };
+}
+
+function normalizeCreatorLearning(item = {}) {
+  const status = String(item.status || "proposed").toLowerCase();
+  return {
+    id: item.id || uid("learning"),
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    creatorProfileId: item.creatorProfileId || item.creator_profile_id || "default",
+    knowledgeEntryId: item.knowledgeEntryId || item.knowledge_entry_id || "",
+    patternKey: item.patternKey || item.pattern_key || "",
+    learningStatement: item.learningStatement || item.learning_statement || "",
+    learningType: item.learningType || item.learning_type || "",
+    contextKey: item.contextKey || item.context_key || "",
+    direction: item.direction || "neutral",
+    supportingMetrics: item.supportingMetrics || item.supporting_metrics || {},
+    sampleSize: Math.max(0, Number(item.sampleSize ?? item.sample_size) || 0),
+    confidence: clampScore(item.confidence),
+    consistency: clampScore(item.consistency),
+    recencyScore: clampScore(item.recencyScore ?? item.recency_score),
+    effectStrength: clampScore(item.effectStrength ?? item.effect_strength),
+    status: Object.values(CREATOR_LEARNING_STATUS).includes(status) ? status : "proposed",
+    lastValidatedAt: item.lastValidatedAt || item.last_validated_at || "",
+    evidence: (item.evidence || []).map(normalizeCreatorLearningEvidence),
+    raw: item.raw || {},
+    createdAt: item.createdAt || item.created_at || now(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
+  };
+}
+
+function normalizeStrategySuggestion(item = {}) {
+  return {
+    id: item.id || uid("strategy"),
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    creatorProfileId: item.creatorProfileId || item.creator_profile_id || "default",
+    fingerprint: item.fingerprint || "",
+    suggestionType: item.suggestionType || item.suggestion_type || "",
+    statement: item.statement || "",
+    proposedChange: item.proposedChange || item.proposed_change || {},
+    rationale: item.rationale || "",
+    supportingLearningIds: Array.isArray(item.supportingLearningIds) ? item.supportingLearningIds : Array.isArray(item.supporting_learning_ids) ? item.supporting_learning_ids : [],
+    status: item.status || "pending",
+    decidedAt: item.decidedAt || item.decided_at || "",
+    raw: item.raw || {},
+    createdAt: item.createdAt || item.created_at || now(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
   };
 }
 
@@ -1244,6 +1324,18 @@ class ApiClient {
       body: JSON.stringify({ workspace_id: workspaceId, content_id: contentId })
     });
   }
+  getCreatorIntelligence(workspaceId = "default") {
+    return this.request(`/api/creator-intelligence?workspace_id=${encodeURIComponent(workspaceId)}`);
+  }
+  generateCreatorIntelligence(workspaceId = "default") {
+    return this.request("/api/creator-intelligence/generate", { method: "POST", body: JSON.stringify({ workspace_id: workspaceId }) });
+  }
+  archiveCreatorLearning(id, workspaceId = "default") {
+    return this.request(`/api/creator-learnings/${encodeURIComponent(id)}/archive?workspace_id=${encodeURIComponent(workspaceId)}`, { method: "POST" });
+  }
+  decideStrategySuggestion(id, decision, workspaceId = "default") {
+    return this.request(`/api/strategy-suggestions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ workspace_id: workspaceId, decision }) });
+  }
   corePayload(data = db) {
     return {
       topics: data.topics || [],
@@ -1259,7 +1351,9 @@ class ApiClient {
       generatedAssets: data.generatedAssets || [],
       publishJobs: data.publishJobs || [],
       analyticsRecords: data.analyticsRecords || [],
-      experienceItems: data.experienceItems || []
+      experienceItems: data.experienceItems || [],
+      creatorLearnings: data.creatorLearnings || [],
+      strategySuggestions: data.strategySuggestions || []
     };
   }
   importLocalStorage(data) {
@@ -1274,12 +1368,13 @@ class ApiClient {
     return { core, business };
   }
   async pullCoreData() {
-    const [topics, contents, knowledgeItems, creatorMemory, opportunities, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords] = await Promise.all([
+    const [topics, contents, knowledgeItems, creatorMemory, opportunities, creatorIntelligence, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords] = await Promise.all([
       this.request("/api/topics?limit=500"),
       this.request("/api/contents?limit=500"),
       this.request("/api/knowledge?limit=500"),
       this.request("/api/creator-memory"),
       this.request("/api/opportunities?limit=500"),
+      this.request("/api/creator-intelligence"),
       this.request("/api/platform-versions?limit=500"),
       this.request("/api/approvals?limit=500"),
       this.request("/api/publishing-tasks?limit=500"),
@@ -1287,7 +1382,7 @@ class ApiClient {
       this.request("/api/analytics-records?limit=500"),
       this.request("/api/experience-records?limit=500")
     ]);
-    return { topics, contents, knowledgeItems, creatorMemory, opportunities, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords };
+    return { topics, contents, knowledgeItems, creatorMemory, opportunities, creatorIntelligence, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords };
   }
   knowledgePayload(item) {
     const record = normalizeKnowledge(item);
@@ -1441,6 +1536,7 @@ function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
     topicId: item.topic_id, creatorProfileId: item.creator_profile_id,
     developedContentId: item.developed_content_id, analysisBatchId: item.analysis_batch_id,
     angleKey: item.angle_key, knowledgeIds: item.knowledge_ids,
+    learningIds: item.learning_ids,
     summary: item.summary, whyItMatters: item.why_it_matters, audience: item.audience,
     underlyingNeedOrEmotion: item.underlying_need_or_emotion,
     contentOpportunity: item.content_opportunity, recommendedFormat: item.recommended_format,
@@ -1449,8 +1545,12 @@ function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
     humanNeedStrength: item.human_need_strength, platformFitScore: item.platform_fit_score,
     visualPotential: item.visual_potential, productionDifficulty: item.production_difficulty,
     overallScore: item.overall_score, reasoning: item.reasoning, status: item.status,
+    learningAdjustment: item.learning_adjustment, learningExplanation: item.learning_explanation,
+    explorationBonus: item.exploration_bonus,
     createdAt: item.created_at, updatedAt: item.updated_at
   }));
+  const creatorLearnings = (snapshot.creatorIntelligence?.learnings || []).map(normalizeCreatorLearning);
+  const strategySuggestions = (snapshot.creatorIntelligence?.strategy_suggestions || []).map(normalizeStrategySuggestion);
   const platformVersions = (snapshot.platformVersions || []).map(item => normalizePlatformVersion({
     ...(item.raw || {}), id: item.id, workspaceId: item.workspace_id, contentId: item.content_id,
     platform: item.platform, contentType: item.content_type, title: item.title, hook: item.hook,
@@ -1533,6 +1633,8 @@ function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
     db.contentItems = contents;
     db.knowledgeItems = knowledgeItems;
     db.opportunityItems = opportunityItems;
+    db.creatorLearnings = creatorLearnings;
+    db.strategySuggestions = strategySuggestions;
     db.platformVersions = platformVersions;
     db.publishJobs = publishJobs;
     db.analyticsRecords = analyticsRecords;
@@ -1542,12 +1644,15 @@ function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
     contents.forEach(item => upsertById(db.contentItems, item));
     knowledgeItems.forEach(item => upsertById(db.knowledgeItems, item));
     opportunityItems.forEach(item => upsertById(db.opportunityItems, item));
+    creatorLearnings.forEach(item => upsertById(db.creatorLearnings, item));
+    strategySuggestions.forEach(item => upsertById(db.strategySuggestions, item));
     platformVersions.forEach(item => upsertById(db.platformVersions, item));
     publishJobs.forEach(item => upsertById(db.publishJobs, item));
     analyticsRecords.forEach(item => upsertById(db.analyticsRecords, item));
     experienceItems.forEach(item => upsertById(db.experienceItems, item));
   }
   if (snapshot.creatorMemory) db.settings.creatorMemory = normalizeCreatorMemory(snapshot.creatorMemory);
+  if (snapshot.creatorIntelligence?.summary) db.settings.creatorIntelligenceSummary = snapshot.creatorIntelligence.summary;
   storageProvider.save(db);
   render();
   return snapshot;
@@ -1564,14 +1669,14 @@ async function bootstrapBackendCoreData() {
   }
   try {
     const snapshot = await apiClient.pullCoreData();
-    const backendEmpty = !(snapshot.topics?.length || snapshot.contents?.length || snapshot.knowledgeItems?.length || snapshot.opportunities?.length);
-    const localHasData = Boolean(db.topics?.length || db.contentItems?.length || db.knowledgeItems?.length || db.opportunityItems?.length);
+    const backendEmpty = !(snapshot.topics?.length || snapshot.contents?.length || snapshot.knowledgeItems?.length || snapshot.opportunities?.length || snapshot.creatorIntelligence?.learnings?.length);
+    const localHasData = Boolean(db.topics?.length || db.contentItems?.length || db.knowledgeItems?.length || db.opportunityItems?.length || db.creatorLearnings?.length);
     if (backendEmpty && localHasData) {
       updateBackendStatus({ lastSuccess: true, lastAction: "bootstrapDeferred", lastError: "", lastSummary: "PostgreSQL 为空；请先执行 Migrate Business Data，localStorage 暂作为待迁移恢复区", authority: "local-fallback", pendingRecovery: true });
       return;
     }
     mergeBackendCoreData(snapshot, { authoritative: true });
-    updateBackendStatus({ lastSuccess: true, lastAction: "bootstrapPull", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Opportunities ${snapshot.opportunities?.length || 0} · Contents ${snapshot.contents.length} · Publishing ${snapshot.publishingTasks?.length || 0} · Analytics ${snapshot.analyticsRecords?.length || 0}`, authority: "postgresql", pendingRecovery: false, lastPulledAt: now() });
+    updateBackendStatus({ lastSuccess: true, lastAction: "bootstrapPull", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Opportunities ${snapshot.opportunities?.length || 0} · Learnings ${snapshot.creatorIntelligence?.learnings?.length || 0} · Contents ${snapshot.contents.length} · Publishing ${snapshot.publishingTasks?.length || 0} · Analytics ${snapshot.analyticsRecords?.length || 0}`, authority: "postgresql", pendingRecovery: false, lastPulledAt: now() });
   } catch (error) {
     updateBackendStatus({ lastSuccess: false, lastAction: "bootstrapPull", lastError: error.message || String(error), lastSummary: "后端不可用，继续使用 localStorage cache/fallback", authority: "local-fallback" });
   }
@@ -1580,7 +1685,7 @@ async function bootstrapBackendCoreData() {
 function migrateDatabase(raw) {
   const source = raw && raw.contentItems ? raw : createInitialData();
   const newDb = {
-    schemaVersion: 8,
+    schemaVersion: 9,
     contentItems: [],
     topics: [],
     topicClusters: [],
@@ -1598,6 +1703,8 @@ function migrateDatabase(raw) {
     promptTemplates: [],
     knowledgeItems: [],
     opportunityItems: [],
+    creatorLearnings: [],
+    strategySuggestions: [],
     settings: {
       provider: source.settings?.provider || "LocalStorageProvider",
       aiCapabilities: source.settings?.aiCapabilities || ["热点分析", "评论总结", "小红书改写", "短视频脚本生成", "视频分镜"],
@@ -1633,6 +1740,8 @@ function migrateDatabase(raw) {
   const existingClusters = Array.isArray(source.topicClusters) ? source.topicClusters : [];
   const existingBriefs = Array.isArray(source.dailyBriefs) ? source.dailyBriefs : [];
   const existingOpportunities = Array.isArray(source.opportunityItems) ? source.opportunityItems : [];
+  const existingCreatorLearnings = Array.isArray(source.creatorLearnings) ? source.creatorLearnings : [];
+  const existingStrategySuggestions = Array.isArray(source.strategySuggestions) ? source.strategySuggestions : [];
 
   (source.contentItems || []).forEach(oldItem => {
     const content = normalizeContent(oldItem);
@@ -1684,6 +1793,8 @@ function migrateDatabase(raw) {
   newDb.promptTemplates = (source.promptTemplates || createMockPrompts()).map(normalizePrompt);
   newDb.knowledgeItems = (source.knowledgeItems || createMockKnowledge()).map(normalizeKnowledge);
   newDb.opportunityItems = existingOpportunities.map(normalizeOpportunity);
+  newDb.creatorLearnings = existingCreatorLearnings.map(normalizeCreatorLearning);
+  newDb.strategySuggestions = existingStrategySuggestions.map(normalizeStrategySuggestion);
   ensureVideoProjectsForGeneratedVideo(newDb);
   return newDb;
 }
@@ -2591,6 +2702,9 @@ const ContentStudioService = {
     const safePlatform = CONTENT_STUDIO_PLATFORMS.includes(platform) ? platform : "小红书";
     const safeFormat = CONTENT_STUDIO_FORMATS.includes(format) ? format : "口播稿";
     const previous = this.getDraft(contentId) || {};
+    const creatorMemory = normalizeCreatorMemory(db.settings.creatorMemory);
+    const knowledgeContext = KnowledgeRetrieval.contextFor({ content, limit: 8 });
+    const creatorLearnings = CreatorIntelligenceService.guidanceForContent({ ...content, studioPlatform: safePlatform, studioFormat: safeFormat });
     const generatedFallback = this.fallbackDraft(content, safePlatform, safeFormat);
     const fallback = {
       ...generatedFallback,
@@ -2622,8 +2736,20 @@ AI 分析：${content.aiAnalysis}
 评论总结：${content.commentSummary}
 摘要：${content.originalSummary || content.clusterSummary}
 标签：${content.tags.join(", ")}`;
+    const groundedPrompt = `${prompt}
+
+Creator Memory（风格与方向参考，不得擅自改变策略）：
+${JSON.stringify({ accountPositioning: creatorMemory.accountPositioning, targetAudience: creatorMemory.targetAudience, contentPillars: creatorMemory.contentPillars, toneStyle: creatorMemory.toneStyle, preferredFormats: creatorMemory.preferredFormats, topicsToAvoid: creatorMemory.topicsToAvoid, platformPreferences: creatorMemory.platformPreferences })}
+
+Relevant Knowledge（Fact 与 Inference 必须保持类型边界）：
+${JSON.stringify([...knowledgeContext.verifiedFacts, ...knowledgeContext.inferences, ...knowledgeContext.references].map(item => ({ type: item.knowledgeType, title: item.title, summary: item.summary, confidence: item.confidence, source: item.source })))}
+
+Relevant Active Learnings（只作为 guidance，不强制采用，不得编造 evidence）：
+${JSON.stringify(creatorLearnings.map(item => ({ id: item.id, statement: item.learningStatement, confidence: item.confidence, sampleSize: item.sampleSize, direction: item.direction, metrics: item.supportingMetrics })))}
+
+如果 Learning 与本次主题不适合，可以不采用；不得为了迎合历史表现而牺牲新鲜度或探索。`;
     try {
-      const text = await aiRouter.generateText(prompt, {
+      const text = await aiRouter.generateText(groundedPrompt, {
         task: "contentStudio.generateDraft",
         title: content.title,
         format: "Content Studio Draft JSON",
@@ -4163,6 +4289,147 @@ const LearningService = {
   }
 };
 
+const CreatorLearningStore = {
+  ...createCrudStore("creatorLearnings", normalizeCreatorLearning),
+  active() { return this.getAll().filter(item => item.status === CREATOR_LEARNING_STATUS.ACTIVE).sort((a, b) => b.confidence - a.confidence); }
+};
+
+const StrategySuggestionStore = createCrudStore("strategySuggestions", normalizeStrategySuggestion);
+
+const CreatorIntelligenceService = {
+  confidence(sampleSize, consistency, recency, effect) {
+    let value = Math.round(Math.min(40, sampleSize * 8) + consistency * .25 + recency * .20 + effect * .15);
+    if (sampleSize === 1) value = Math.min(value, 35);
+    if (sampleSize === 2) value = Math.min(value, 48);
+    return clampScore(value);
+  },
+  localRefresh() {
+    const experiences = ExperienceStore.getAll().filter(item => Number(item.sourceMetrics?.views) > 0);
+    const globalAvg = experiences.length ? experiences.reduce((sum, item) => sum + Number(item.sourceMetrics?.engagementRate || 0), 0) / experiences.length : 0;
+    const groups = new Map();
+    experiences.forEach(item => {
+      [["platform", item.platform], ["format", item.contentType], ["topic_pillar", item.topicCategory], ["hook", item.hookStyle]].filter(([, value]) => value).forEach(([type, context]) => {
+        const key = `${type}:${item.platform || "all"}:${context}`.toLowerCase();
+        if (!groups.has(key)) groups.set(key, { type, context, items: [] });
+        groups.get(key).items.push(item);
+      });
+    });
+    const records = [...groups.entries()].map(([patternKey, group]) => {
+      const rates = group.items.map(item => Number(item.sourceMetrics?.engagementRate || 0));
+      const avg = rates.reduce((sum, value) => sum + value, 0) / rates.length;
+      const relative = globalAvg ? (avg - globalAvg) / globalAvg * 100 : 0;
+      const direction = relative >= 5 ? "positive" : relative <= -5 ? "negative" : "neutral";
+      const supports = rates.filter(value => direction === "positive" ? value >= globalAvg : direction === "negative" ? value <= globalAvg : Math.abs(value - globalAvg) <= Math.max(.5, globalAvg * .15)).length;
+      const consistency = clampScore(supports / rates.length * 100);
+      const effectStrength = clampScore(Math.abs(relative));
+      const confidence = this.confidence(rates.length, consistency, 100, effectStrength);
+      const prior = CreatorLearningStore.getAll().find(item => item.patternKey === patternKey);
+      const weakened = prior?.status === "active" && (prior.direction !== direction || consistency < 50 || confidence < 45);
+      const status = prior?.status === "archived" ? "archived" : weakened ? "weakened" : rates.length >= 3 && confidence >= 60 && direction !== "neutral" ? "active" : "proposed";
+      const statement = `${group.type}「${group.context}」${direction === "positive" ? "表现高于" : direction === "negative" ? "表现低于" : "目前接近"}本地基线（ER ${avg.toFixed(2)}%，样本 ${rates.length}）。`;
+      return normalizeCreatorLearning({
+        id: prior?.id || `learning_${simpleHash(patternKey)}`,
+        patternKey, learningType: group.type, contextKey: group.context, learningStatement: statement,
+        direction, sampleSize: rates.length, confidence, consistency, recencyScore: 100, effectStrength,
+        status, lastValidatedAt: now(), supportingMetrics: { avgEngagementRate: Number(avg.toFixed(2)), baselineEngagementRate: Number(globalAvg.toFixed(2)), relativeDifferencePercent: Number(relative.toFixed(2)) },
+        evidence: group.items.map(item => ({
+          id: `evidence_${simpleHash(`${patternKey}|${item.analyticsRecordId}`)}`, learningId: prior?.id || `learning_${simpleHash(patternKey)}`,
+          contentId: item.contentId, opportunityId: ContentStore.getById(item.contentId)?.sourceOpportunityId || "",
+          publishJobId: item.publishJobId, analyticsRecordId: item.analyticsRecordId, experienceRecordId: item.id,
+          metrics: item.sourceMetrics, observedAt: item.reviewedAt, supports: direction === "positive" ? Number(item.sourceMetrics?.engagementRate || 0) >= globalAvg : Number(item.sourceMetrics?.engagementRate || 0) <= globalAvg
+        }))
+      });
+    });
+    records.forEach(item => upsertById(db.creatorLearnings, item));
+    db.settings.creatorIntelligenceSummary = {
+      publishedSamples: experiences.length,
+      activeLearningCount: records.filter(item => item.status === "active").length,
+      hypothesisCount: records.filter(item => ["proposed", "weakened"].includes(item.status)).length,
+      provenPatterns: records.filter(item => item.status === "active").map(item => item.learningStatement).slice(0, 5),
+      hypothesesToTest: records.filter(item => item.status !== "active").map(item => item.learningStatement).slice(0, 5),
+      unexploredOpportunities: normalizeCreatorMemory(db.settings.creatorMemory).contentPillars.filter(pillar => !records.some(item => item.contextKey === pillar))
+    };
+    saveDb();
+    return { learnings: records, strategy_suggestions: db.strategySuggestions, summary: db.settings.creatorIntelligenceSummary };
+  },
+  mergeResult(result = {}) {
+    const learnings = (result.learnings || []).map(normalizeCreatorLearning);
+    const suggestions = (result.strategy_suggestions || []).map(normalizeStrategySuggestion);
+    db.creatorLearnings = learnings;
+    db.strategySuggestions = suggestions;
+    db.settings.creatorIntelligenceSummary = result.summary || {};
+    saveDb();
+    return { learnings, suggestions, summary: result.summary || {} };
+  },
+  async refresh() {
+    if (!backendWritesEnabled()) return this.localRefresh();
+    const result = await runBackendWrite("creatorIntelligence.generate", () => backendApiProvider.generateCreatorIntelligence("default"));
+    return result ? this.mergeResult(result) : this.localRefresh();
+  },
+  async archive(id) {
+    const current = CreatorLearningStore.getById(id);
+    if (!current) throw new Error("Learning 不存在。");
+    const result = await runBackendWrite("creatorLearning.archive", () => backendApiProvider.archiveCreatorLearning(id, current.workspaceId));
+    const updated = result ? normalizeCreatorLearning(result) : normalizeCreatorLearning({ ...current, status: "archived", lastValidatedAt: now() });
+    upsertById(db.creatorLearnings, updated);
+    saveDb();
+    return updated;
+  },
+  async decideSuggestion(id, decision) {
+    const current = StrategySuggestionStore.getById(id);
+    if (!current) throw new Error("Strategy Suggestion 不存在。");
+    const result = await runBackendWrite("strategySuggestion.decide", () => backendApiProvider.decideStrategySuggestion(id, decision, current.workspaceId));
+    if (result) {
+      upsertById(db.strategySuggestions, normalizeStrategySuggestion(result.suggestion));
+      db.settings.creatorMemory = normalizeCreatorMemory(result.creator_memory);
+    } else {
+      upsertById(db.strategySuggestions, normalizeStrategySuggestion({ ...current, status: decision, decidedAt: now() }));
+      if (decision === "accepted") {
+        const change = current.proposedChange || {};
+        const field = change.field;
+        const allowed = ["contentPillars", "preferredFormats", "platformPreferences", "topicsToAvoid"];
+        if (allowed.includes(field) && change.action === "add" && change.value) {
+          const memory = normalizeCreatorMemory(db.settings.creatorMemory);
+          memory[field] = [...new Set([...(memory[field] || []), change.value])];
+          db.settings.creatorMemory = memory;
+        }
+      }
+    }
+    saveDb();
+  },
+  relevantFor({ platform = "", format = "", topic = "", angle = "", ids = [] } = {}) {
+    const idSet = new Set(ids || []);
+    const text = `${topic} ${angle}`.toLowerCase();
+    return CreatorLearningStore.active().filter(item => idSet.has(item.id)
+      || (item.learningType === "platform" && item.contextKey === platform)
+      || (item.learningType === "format" && format.includes(item.contextKey))
+      || (["topic_pillar", "hook", "angle"].includes(item.learningType) && text.includes(item.contextKey.toLowerCase())));
+  },
+  opportunityInfluence(topic, candidate) {
+    const relevant = this.relevantFor({ platform: candidate.platformFit?.[0] || "", format: candidate.recommendedFormat || "", topic: `${topic.category} ${(topic.tags || []).join(" ")}`, angle: candidate.contentOpportunity || "" });
+    let adjustment = 0;
+    const explanation = relevant.map(item => {
+      const points = (item.direction === "positive" ? 1 : item.direction === "negative" ? -1 : 0) * Math.min(3, item.confidence / 30);
+      adjustment += points;
+      return `${item.learningStatement} Confidence ${item.confidence} / n=${item.sampleSize}，影响 ${points >= 0 ? "+" : ""}${points.toFixed(1)}。`;
+    });
+    adjustment = Math.max(-8, Math.min(8, Math.round(adjustment)));
+    const maxSample = Math.max(0, ...relevant.map(item => item.sampleSize));
+    const explorationBonus = relevant.length ? (maxSample < 3 ? 3 : 1) : 4;
+    if (!relevant.length) explanation.push("暂无直接匹配的 Active Learning，保留 exploration bonus，避免形成反馈回路。");
+    return { relevant, adjustment, explorationBonus, explanation };
+  },
+  guidanceForContent(content) {
+    return this.relevantFor({
+      platform: content.studioPlatform,
+      format: content.studioFormat,
+      topic: `${content.topic} ${(content.tags || []).join(" ")}`,
+      angle: content.selectedAngle,
+      ids: content.relevantLearningIds
+    });
+  }
+};
+
 const TaskQueue = {
   getAll() { return (db.tasks || []).map(normalizeTask).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)); },
   getById(id) { return (db.tasks || []).find(item => item.id === id) || null; },
@@ -4572,7 +4839,8 @@ const OpportunityService = {
     return {
       topic,
       knowledge: [...context.verifiedFacts, ...context.inferences, ...context.references],
-      creatorMemory: normalizeCreatorMemory(db.settings.creatorMemory)
+      creatorMemory: normalizeCreatorMemory(db.settings.creatorMemory),
+      learnings: CreatorLearningStore.active()
     };
   },
   async contextFor(topic) {
@@ -4588,7 +4856,8 @@ const OpportunityService = {
           source: item.source, sourceUrl: item.source_url, tags: item.tags,
           confidence: item.confidence, status: item.status
         })),
-        creatorMemory: normalizeCreatorMemory(response.creator_memory || {})
+        creatorMemory: normalizeCreatorMemory(response.creator_memory || {}),
+        learnings: (response.learnings || []).map(normalizeCreatorLearning)
       };
     } catch (error) {
       if (!isBackendUnavailable(error)) throw error;
@@ -4669,9 +4938,20 @@ const OpportunityService = {
     const inferences = context.knowledge.filter(item => item.knowledgeType === "Inference");
     const references = context.knowledge.filter(item => !["Fact", "Inference"].includes(item.knowledgeType));
     const fallback = this.fallbackAngles(topic, context);
-    const prompt = `请分析这个 Topic 对当前 Creator 是否构成值得开发的内容机会，而不是只总结新闻。\n\nTopic:\n${JSON.stringify({ title: topic.title, category: topic.category, summary: topic.summary, whyTrending: topic.whyTrending, scores: { trend: topic.trendScore, freshness: topic.freshnessScore, chinaFit: topic.chinaFitScore }, tags: topic.tags })}\n\nCreator Memory:\n${JSON.stringify(context.creatorMemory)}\n\nVerified Facts（可作为事实）:\n${JSON.stringify(verifiedFacts.map(item => ({ title: item.title, body: item.summary, source: item.source, confidence: item.confidence })))}\n\nInferences（只能作为待验证推断，不得当作事实）:\n${JSON.stringify(inferences.map(item => ({ title: item.title, body: item.summary, confidence: item.confidence })))}\n\nOther Knowledge:\n${JSON.stringify(references.map(item => ({ type: item.knowledgeType, title: item.title, body: item.summary })))}\n\n只返回 JSON：{\"summary\":\"\",\"why_it_matters\":\"\",\"audience\":\"\",\"opportunities\":[3到5个对象]}。每个对象必须包含 content_opportunity、underlying_need_or_emotion、recommended_format、platform_fit、novelty、timeliness、audience_fit、creator_fit、human_need_strength、platform_fit_score、visual_potential、production_difficulty、reasoning。所有评分 0-100，并说明理由。`;
+    const prompt = `请分析这个 Topic 对当前 Creator 是否构成值得开发的内容机会，而不是只总结新闻。\n\nTopic:\n${JSON.stringify({ title: topic.title, category: topic.category, summary: topic.summary, whyTrending: topic.whyTrending, scores: { trend: topic.trendScore, freshness: topic.freshnessScore, chinaFit: topic.chinaFitScore }, tags: topic.tags })}\n\nCreator Memory:\n${JSON.stringify(context.creatorMemory)}\n\nActive Learnings（仅作为有证据且有置信度的建议，不得编造数据或强制覆盖人工选择）:\n${JSON.stringify((context.learnings || []).map(item => ({ id: item.id, statement: item.learningStatement, type: item.learningType, context: item.contextKey, direction: item.direction, confidence: item.confidence, sampleSize: item.sampleSize, metrics: item.supportingMetrics })))}\n\nVerified Facts（可作为事实）:\n${JSON.stringify(verifiedFacts.map(item => ({ title: item.title, body: item.summary, source: item.source, confidence: item.confidence })))}\n\nInferences（只能作为待验证推断，不得当作事实）:\n${JSON.stringify(inferences.map(item => ({ title: item.title, body: item.summary, confidence: item.confidence })))}\n\nOther Knowledge:\n${JSON.stringify(references.map(item => ({ type: item.knowledgeType, title: item.title, body: item.summary })))}\n\n只返回 JSON：{\"summary\":\"\",\"why_it_matters\":\"\",\"audience\":\"\",\"opportunities\":[3到5个对象]}。每个对象必须包含 content_opportunity、underlying_need_or_emotion、recommended_format、platform_fit、novelty、timeliness、audience_fit、creator_fit、human_need_strength、platform_fit_score、visual_potential、production_difficulty、reasoning。所有评分 0-100，并说明理由。`;
     const text = await aiRouter.generateText(prompt, { task: "research.analyzeOpportunity", format: "Opportunity JSON", title: topic.title, systemPrompt: "你是内容机会分析师。严格区分 verified fact 与 inference，并根据 Creator Memory 做可解释判断。" });
-    const candidates = this.normalizeAiAngles(safeParseJSON(text, null), fallback);
+    const candidates = this.normalizeAiAngles(safeParseJSON(text, null), fallback).map(item => {
+      const influence = CreatorIntelligenceService.opportunityInfluence(topic, item);
+      const baseScore = OpportunityScoring.calculate(item);
+      return {
+        ...item,
+        learningIds: influence.relevant.map(learning => learning.id),
+        learningAdjustment: influence.adjustment,
+        learningExplanation: influence.explanation,
+        explorationBonus: influence.explorationBonus,
+        overallScore: clampScore(baseScore + influence.adjustment + influence.explorationBonus)
+      };
+    });
     const analysisBatchId = `opportunity_batch_${simpleHash(`${topic.id}|${Date.now()}`)}`;
     const knowledgeIds = context.knowledge.map(item => item.id);
     const payload = {
@@ -4689,6 +4969,8 @@ const OpportunityService = {
         human_need_strength: item.humanNeedStrength, platform_fit_score: item.platformFitScore,
         visual_potential: item.visualPotential, production_difficulty: item.productionDifficulty,
         overall_score: item.overallScore, reasoning: item.reasoning,
+        learning_ids: item.learningIds, learning_adjustment: item.learningAdjustment,
+        learning_explanation: item.learningExplanation, exploration_bonus: item.explorationBonus,
         raw: { knowledgeTypeBoundary: true }
       }))
     };
@@ -4747,6 +5029,10 @@ const OpportunityService = {
       opportunityScore: current.overallScore,
       opportunityReasoning: current.reasoning,
       relevantKnowledgeIds: current.knowledgeIds,
+      relevantLearningIds: current.learningIds,
+      learningGuidance: current.learningExplanation,
+      learningAdjustment: current.learningAdjustment,
+      explorationBonus: current.explorationBonus,
       creatorProfileId: current.creatorProfileId
     });
     upsertById(db.opportunityItems, normalizeOpportunity({ ...current, status: OPPORTUNITY_STATUS.DEVELOPED, developedContentId: content.id, updatedAt: now() }));
@@ -5549,6 +5835,11 @@ window.AnalyticsStore = AnalyticsStore;
 window.AnalyticsService = AnalyticsService;
 window.ExperienceStore = ExperienceStore;
 window.LearningService = LearningService;
+window.CreatorLearningStore = CreatorLearningStore;
+window.StrategySuggestionStore = StrategySuggestionStore;
+window.CreatorIntelligenceService = CreatorIntelligenceService;
+window.OpportunityStore = OpportunityStore;
+window.OpportunityService = OpportunityService;
 window.PromptStore = PromptStore;
 window.KnowledgeStore = KnowledgeStore;
 window.KnowledgeRetrieval = KnowledgeRetrieval;
@@ -5580,7 +5871,7 @@ window.OpportunityScoring = OpportunityScoring;
 // =========================
 function createInitialData() {
   return {
-    schemaVersion: 8,
+    schemaVersion: 9,
     contentItems: createMockContents(),
     topics: createMockTopics(),
     topicClusters: [],
@@ -5598,6 +5889,8 @@ function createInitialData() {
     promptTemplates: createMockPrompts(),
     knowledgeItems: createMockKnowledge(),
     opportunityItems: [],
+    creatorLearnings: [],
+    strategySuggestions: [],
     settings: { provider: "LocalStorageProvider", feedSources: createPresetFeedSources() }
   };
 }
@@ -5931,7 +6224,7 @@ function renderOpportunityScoreBreakdown(item) {
       ["Creator Fit", item.creatorFit], ["Human Need", item.humanNeedStrength], ["Platform Fit", item.platformFitScore],
       ["Visual", item.visualPotential], ["Difficulty", item.productionDifficulty]
     ].map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("")}
-  </div><div class="meta">Overall 为服务端固定权重计算；Difficulty 越低越容易制作。</div>`;
+  </div><div class="meta">基础分使用固定权重；Difficulty 越低越容易制作。Learning ${item.learningAdjustment >= 0 ? "+" : ""}${item.learningAdjustment || 0} · Exploration +${item.explorationBonus || 0} · 最终 ${item.overallScore}。</div>`;
 }
 
 function renderOpportunityCard(item) {
@@ -5948,6 +6241,7 @@ function renderOpportunityDetail(item) {
   if (!item) return empty("请选择一个 Opportunity。");
   const topic = TopicStore.getById(item.topicId);
   const knowledge = item.knowledgeIds.map(id => KnowledgeStore.getById(id)).filter(Boolean);
+  const learnings = item.learningIds.map(id => CreatorLearningStore.getById(id)).filter(Boolean);
   const facts = knowledge.filter(entry => entry.knowledgeType === "Fact");
   const inferences = knowledge.filter(entry => entry.knowledgeType === "Inference");
   return `<div class="card sticky opportunity-detail">
@@ -5967,6 +6261,11 @@ function renderOpportunityDetail(item) {
     <strong>Knowledge Grounding</strong>
     <div class="meta">Fact ${facts.length} · Inference ${inferences.length} · Other ${knowledge.length - facts.length - inferences.length}</div>
     ${knowledge.length ? knowledge.map(entry => `<div class="knowledge-context-item"><span class="chip">${escapeHtml(entry.knowledgeType)}</span> <strong>${escapeHtml(entry.title)}</strong><div class="meta">${entry.knowledgeType === "Inference" ? "待验证推断，不作为已证实事实" : escapeHtml(entry.source || "Knowledge Brain")}</div></div>`).join("") : empty("本地缓存中暂无关联知识；后端仍保存关联 ID。")}
+    <div class="divider"></div>
+    <strong>Creator Learning Influence</strong>
+    <div class="meta">Learning 调整 ${item.learningAdjustment >= 0 ? "+" : ""}${item.learningAdjustment || 0}（上限 ±8）· Exploration bonus +${item.explorationBonus || 0}</div>
+    ${(item.learningExplanation || []).map(line => `<div class="empty">${escapeHtml(line)}</div>`).join("") || empty("暂无 Active Learning 直接影响；仍保留探索空间。")}
+    ${learnings.map(learning => `<div class="experience-card"><div class="item-head"><strong>${escapeHtml(learning.learningStatement)}</strong><span class="score">${learning.confidence}%</span></div><div class="meta">${escapeHtml(learning.learningType)} · n=${learning.sampleSize} · Evidence ${learning.evidence.length}</div></div>`).join("")}
     <div class="divider"></div>
     <div class="toolbar">
       ${item.status !== OPPORTUNITY_STATUS.DEVELOPED ? `<button class="btn small" data-opportunity-status="${item.id}:saved">Save</button><button class="btn small danger" data-opportunity-status="${item.id}:rejected">Reject</button><button class="btn small ghost" data-opportunity-status="${item.id}:candidate">Restore</button><button class="btn small" data-develop-opportunity="${item.id}" ${item.status === OPPORTUNITY_STATUS.REJECTED ? "disabled" : ""}>Develop</button>` : `<button class="btn small" data-open-workspace="${item.developedContentId}">打开 Content Studio</button>`}
@@ -6550,6 +6849,7 @@ function renderWorkspace() {
   const sourceCluster = content.sourceClusterId ? TopicClusterStore.getById(content.sourceClusterId) : null;
   const sourceOpportunity = content.sourceOpportunityId ? OpportunityStore.getById(content.sourceOpportunityId) : null;
   const learningRefs = LearningService.referencesForContent(content.id, draft.platform);
+  const creatorGuidance = CreatorIntelligenceService.guidanceForContent({ ...content, studioPlatform: draft.platform, studioFormat: draft.format });
   const knowledgeContext = KnowledgeRetrieval.contextFor({ content });
   const creatorMemory = normalizeCreatorMemory(db.settings.creatorMemory);
   return `<div class="card toolbar">
@@ -6628,6 +6928,14 @@ function renderWorkspace() {
         <div class="divider"></div>
         <h3>历史表现参考</h3>
         ${renderLearningReferences(learningRefs)}
+        <div class="divider"></div>
+        <h3>Creator Learning Guidance</h3>
+        <div class="meta">只提供有 evidence 的建议，不会自动覆盖标题、Hook 或正文。</div>
+        ${creatorGuidance.length ? creatorGuidance.map(item => `<div class="experience-card">
+          <div class="item-head"><strong>${escapeHtml(item.learningStatement)}</strong><span class="score">${item.confidence}%</span></div>
+          <div class="meta">${CREATOR_LEARNING_STATUS_LABELS[item.status]} · ${escapeHtml(item.learningType)} · n=${item.sampleSize} · Evidence ${item.evidence.length}</div>
+          ${item.supportingMetrics?.avgEngagementRate !== undefined ? `<div class="chips"><span class="chip">ER ${item.supportingMetrics.avgEngagementRate}%</span><span class="chip">Baseline ${item.supportingMetrics.baselineEngagementRate || 0}%</span></div>` : ""}
+        </div>`).join("") : empty("暂无与当前平台、形式、Topic 或 Angle 匹配的 Active Learning。")}
         <div class="divider"></div>
         <h3>Knowledge Brain 参考</h3>
         ${renderKnowledgeContext(knowledgeContext, "暂无相关知识。保存的内容只作为参考，不会自动覆盖草稿。")}
@@ -6888,6 +7196,46 @@ function renderPublishDetail(job) {
   </div>`;
 }
 
+function renderCreatorLearningCard(item) {
+  const metrics = item.supportingMetrics || {};
+  return `<div class="experience-card">
+    <div class="item-head"><strong>${escapeHtml(item.learningStatement)}</strong><span class="score">${item.confidence}%</span></div>
+    <div class="chips"><span class="${statusClass(item.status)}">${CREATOR_LEARNING_STATUS_LABELS[item.status] || escapeHtml(item.status)}</span><span class="chip">${escapeHtml(item.learningType)}</span><span class="chip">n=${item.sampleSize}</span><span class="chip">Evidence ${item.evidence.length}</span></div>
+    <div class="meta">Consistency ${item.consistency}% · Recency ${item.recencyScore}% · Effect ${item.effectStrength}% · ${item.lastValidatedAt ? new Date(item.lastValidatedAt).toLocaleString("zh-CN") : "尚未验证"}</div>
+    ${metrics.avgEngagementRate !== undefined ? `<div class="meta">ER ${metrics.avgEngagementRate}% · Baseline ${metrics.baselineEngagementRate || 0}% · Difference ${metrics.relativeDifferencePercent || 0}%</div>` : ""}
+    <div class="toolbar">${item.status !== CREATOR_LEARNING_STATUS.ARCHIVED ? `<button class="btn small danger" data-archive-creator-learning="${item.id}">Archive</button>` : ""}${item.evidence[0]?.contentId ? `<button class="btn small ghost" data-open-workspace="${item.evidence[0].contentId}">查看 Evidence Content</button>` : ""}</div>
+  </div>`;
+}
+
+function renderStrategySuggestion(item) {
+  return `<div class="experience-card">
+    <div class="item-head"><strong>${escapeHtml(item.statement)}</strong><span class="${statusClass(item.status)}">${STRATEGY_SUGGESTION_STATUS_LABELS[item.status] || escapeHtml(item.status)}</span></div>
+    <div class="meta">${escapeHtml(item.rationale)}</div>
+    ${item.status === "pending" ? `<div class="toolbar"><button class="btn small" data-strategy-suggestion="${item.id}" data-strategy-decision="accepted">Accept</button><button class="btn small danger" data-strategy-suggestion="${item.id}" data-strategy-decision="rejected">Reject</button><button class="btn small ghost" data-strategy-suggestion="${item.id}" data-strategy-decision="ignored">Ignore</button></div>` : ""}
+  </div>`;
+}
+
+function renderCreatorIntelligence() {
+  const learnings = CreatorLearningStore.getAll();
+  const active = learnings.filter(item => item.status === CREATOR_LEARNING_STATUS.ACTIVE);
+  const hypotheses = learnings.filter(item => [CREATOR_LEARNING_STATUS.PROPOSED, CREATOR_LEARNING_STATUS.WEAKENED].includes(item.status));
+  const suggestions = StrategySuggestionStore.getAll();
+  const summary = db.settings.creatorIntelligenceSummary || {};
+  return `<div class="card">
+    <div class="item-head"><div><h3>Creator Intelligence</h3><div class="meta">What have we learned? What should we test next?</div></div><button class="btn small" data-refresh-creator-intelligence ${appState.creatorIntelligenceBusy ? "disabled" : ""}>${appState.creatorIntelligenceBusy ? "Analyzing…" : "Generate / Validate Learnings"}</button></div>
+    ${appState.creatorIntelligenceError ? `<div class="empty error-text">${escapeHtml(appState.creatorIntelligenceError)}</div>` : ""}
+    <div class="chips"><span class="chip">Performance samples ${summary.publishedSamples || 0}</span><span class="chip">Active ${active.length}</span><span class="chip">Hypotheses ${hypotheses.length}</span><span class="chip">Strategy pending ${suggestions.filter(item => item.status === "pending").length}</span></div>
+    <div class="grid two">
+      <div><h3>Active Learnings</h3><div class="mini-stack">${active.map(renderCreatorLearningCard).join("") || empty("暂无达到 Active 门槛的 Learning。少量样本只会形成 Hypothesis。")}</div></div>
+      <div><h3>Hypotheses to test</h3><div class="mini-stack">${hypotheses.map(renderCreatorLearningCard).join("") || empty("暂无待验证假设。")}</div></div>
+    </div>
+    <div class="divider"></div>
+    <h3>Strategy Suggestions · Human approval required</h3>
+    <div class="mini-stack">${suggestions.map(renderStrategySuggestion).join("") || empty("暂无策略变更建议。系统不会自动修改 Creator Memory。")}</div>
+    ${Array.isArray(summary.unexploredOpportunities) && summary.unexploredOpportunities.length ? kv("Unexplored opportunities", tagChips(summary.unexploredOpportunities)) : ""}
+  </div>`;
+}
+
 function renderAnalytics() {
   const publishedJobs = AnalyticsService.publishedJobs();
   if (!appState.selectedAnalyticsJobId || !PublishJobStore.getById(appState.selectedAnalyticsJobId)) appState.selectedAnalyticsJobId = publishedJobs[0]?.id || "";
@@ -6944,6 +7292,7 @@ function renderAnalytics() {
       <div class="mini-stack">${ExperienceStore.getAll().slice(0, 8).map(renderExperienceCard).join("") || empty("暂无经验。请先在已追踪的 Published 内容上生成复盘并保存经验。")}</div>
     </div>
   </div>
+  ${renderCreatorIntelligence()}
   <div class="card">
     <h3>内容表现列表</h3>
     <div class="mini-stack">${records.map(renderAnalyticsRecordCard).join("") || empty("当前筛选条件下暂无表现数据。")}</div>
@@ -7927,6 +8276,35 @@ document.addEventListener("click", async event => {
       await LearningService.saveExperience(target.dataset.saveExperience);
     } catch (error) {
       alert(error.message || "保存经验失败。");
+    }
+    return render();
+  }
+  if (target.dataset.refreshCreatorIntelligence !== undefined) {
+    appState.creatorIntelligenceBusy = true;
+    appState.creatorIntelligenceError = "";
+    render();
+    try {
+      await CreatorIntelligenceService.refresh();
+    } catch (error) {
+      appState.creatorIntelligenceError = error.message || "Creator Intelligence 生成失败。";
+    } finally {
+      appState.creatorIntelligenceBusy = false;
+    }
+    return render();
+  }
+  if (target.dataset.archiveCreatorLearning) {
+    try {
+      await CreatorIntelligenceService.archive(target.dataset.archiveCreatorLearning);
+    } catch (error) {
+      appState.creatorIntelligenceError = error.message || "Learning Archive 失败。";
+    }
+    return render();
+  }
+  if (target.dataset.strategySuggestion && target.dataset.strategyDecision) {
+    try {
+      await CreatorIntelligenceService.decideSuggestion(target.dataset.strategySuggestion, target.dataset.strategyDecision);
+    } catch (error) {
+      appState.creatorIntelligenceError = error.message || "Strategy Suggestion 更新失败。";
     }
     return render();
   }

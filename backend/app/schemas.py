@@ -133,6 +133,10 @@ class ContentOpportunityIn(OpportunityCandidateIn):
     analysis_batch_id: str
     angle_key: str = ""
     knowledge_ids: list[str] = Field(default_factory=list)
+    learning_ids: list[str] = Field(default_factory=list)
+    learning_adjustment: int = Field(default=0, ge=-8, le=8)
+    learning_explanation: list[str] = Field(default_factory=list)
+    exploration_bonus: int = Field(default=0, ge=0, le=5)
     status: OpportunityStatus = "candidate"
 
 
@@ -158,10 +162,100 @@ class OpportunityDevelopOut(BaseModel):
     content: ContentOut
 
 
+CreatorLearningStatus = Literal["proposed", "active", "weakened", "archived"]
+
+
+class CreatorLearningEvidenceOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    learning_id: str
+    content_id: str | None = None
+    opportunity_id: str | None = None
+    publishing_task_id: str | None = None
+    analytics_record_id: str
+    experience_record_id: str | None = None
+    tracking_snapshot_ids: list[str] = Field(default_factory=list)
+    metrics: JsonDict = Field(default_factory=dict)
+    observed_at: datetime
+    supports: bool = True
+    outcome_score: int = Field(default=0, ge=-100, le=100)
+    raw: JsonDict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CreatorLearningOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    creator_profile_id: str
+    knowledge_entry_id: str | None = None
+    pattern_key: str
+    learning_statement: str
+    learning_type: str
+    context_key: str = ""
+    direction: str = "neutral"
+    supporting_metrics: JsonDict = Field(default_factory=dict)
+    sample_size: int = 0
+    confidence: int = Field(default=0, ge=0, le=100)
+    consistency: int = Field(default=0, ge=0, le=100)
+    recency_score: int = Field(default=0, ge=0, le=100)
+    effect_strength: int = Field(default=0, ge=0, le=100)
+    status: CreatorLearningStatus = "proposed"
+    last_validated_at: datetime | None = None
+    evidence: list[CreatorLearningEvidenceOut] = Field(default_factory=list)
+    raw: JsonDict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StrategySuggestionOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    creator_profile_id: str
+    fingerprint: str
+    suggestion_type: str
+    statement: str
+    proposed_change: JsonDict = Field(default_factory=dict)
+    rationale: str = ""
+    supporting_learning_ids: list[str] = Field(default_factory=list)
+    status: Literal["pending", "accepted", "rejected", "ignored"] = "pending"
+    decided_at: datetime | None = None
+    raw: JsonDict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StrategySuggestionDecisionIn(BaseModel):
+    workspace_id: str = "default"
+    decision: Literal["accepted", "rejected", "ignored"]
+
+
+class StrategySuggestionDecisionOut(BaseModel):
+    suggestion: StrategySuggestionOut
+    creator_memory: CreatorProfileOut
+
+
+class CreatorIntelligenceGenerateIn(BaseModel):
+    workspace_id: str = "default"
+
+
+class CreatorIntelligenceOut(BaseModel):
+    learnings: list[CreatorLearningOut] = Field(default_factory=list)
+    strategy_suggestions: list[StrategySuggestionOut] = Field(default_factory=list)
+    summary: JsonDict = Field(default_factory=dict)
+
+
 class OpportunityContextOut(BaseModel):
     topic: TopicOut
     knowledge: list[KnowledgeEntryOut] = Field(default_factory=list)
     creator_memory: CreatorProfileOut
+    learnings: list[CreatorLearningOut] = Field(default_factory=list)
 
 
 class ActivityLogOut(BaseModel):
@@ -353,6 +447,8 @@ class LocalStorageBusinessImportIn(BaseModel):
     publishJobs: list[JsonDict] = Field(default_factory=list)
     analyticsRecords: list[JsonDict] = Field(default_factory=list)
     experienceItems: list[JsonDict] = Field(default_factory=list)
+    creatorLearnings: list[JsonDict] = Field(default_factory=list)
+    strategySuggestions: list[JsonDict] = Field(default_factory=list)
 
 
 class BusinessImportSummary(BaseModel):
@@ -362,6 +458,8 @@ class BusinessImportSummary(BaseModel):
     tracking_snapshots: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
     analytics_records: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
     experience_records: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
+    creator_learnings: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
+    strategy_suggestions: ImportBucketSummary = Field(default_factory=ImportBucketSummary)
 
 
 class MarkdownExportRequest(BaseModel):

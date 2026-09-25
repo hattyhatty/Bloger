@@ -1,4 +1,4 @@
-# AI Content OS Backend — Phase 7E
+# AI Content OS Backend — Phase 7F
 
 FastAPI + PostgreSQL backend for the AI Content OS core workflow and Knowledge Brain, with server-side workflow validation, immutable published-version history, and idempotent business operations.
 
@@ -12,7 +12,8 @@ The database persists:
 - PlatformVersion / ApprovalRecord / PublishingTask
 - TrackingSnapshot / AnalyticsRecord / ExperienceRecord
 - Workspace (the minimal ownership boundary; this phase still uses one default workspace)
-- ContentOpportunity and its relevant Knowledge links
+- ContentOpportunity and its relevant Knowledge / Creator Learning links
+- CreatorLearning / CreatorLearningEvidence / StrategySuggestion
 
 Real platform APIs, auth, multi-user SaaS, schedulers, vector databases, and cloud deployment remain intentionally out of scope.
 
@@ -55,6 +56,12 @@ Open:
 - `POST /api/opportunities/analyze`
 - `PATCH /api/opportunities/{opportunity_id}/status`
 - `POST /api/opportunities/{opportunity_id}/develop`
+- `GET /api/creator-intelligence`
+- `POST /api/creator-intelligence/generate`
+- `GET /api/creator-learnings`
+- `POST /api/creator-learnings/{learning_id}/archive`
+- `GET /api/strategy-suggestions`
+- `PATCH /api/strategy-suggestions/{suggestion_id}`
 - `GET /api/activity-logs`
 - `GET/POST/PUT /api/platform-versions`
 - `GET/POST/PUT /api/approvals`
@@ -70,7 +77,7 @@ Open:
 
 ## localStorage import
 
-The frontend Settings page can import existing localStorage Topic, Content, Knowledge, Creator Memory, Opportunity, and business workflow data into PostgreSQL.
+The frontend Settings page can import existing localStorage Topic, Content, Knowledge, Creator Memory, Opportunity, business workflow, Creator Learning, and Strategy Suggestion data into PostgreSQL.
 
 Import is idempotent by original ID:
 
@@ -80,7 +87,7 @@ Import is idempotent by original ID:
 
 ## Source of truth and offline fallback
 
-When the API is healthy, PostgreSQL is authoritative for Topic, Content, Knowledge, Creator Memory, Opportunity, Approval, Publishing, Tracking, Analytics, and Experience data. The frontend keeps localStorage only as:
+When the API is healthy, PostgreSQL is authoritative for Topic, Content, Knowledge, Creator Memory, Opportunity, Approval, Publishing, Tracking, Analytics, Experience, Creator Learning, and Strategy Suggestion data. The frontend keeps localStorage only as:
 
 - a local cache for fast rendering
 - a temporary offline fallback when the API is unavailable
@@ -110,6 +117,17 @@ The service layer in `app/workflow.py` enforces the business chain independently
 - the server recalculates `overall_score` from fixed, inspectable weights; it never trusts a model-provided total
 - Save, Reject, Restore, and Develop use controlled status transitions
 - Develop creates one Content record and is idempotent; the Content keeps the source Opportunity, Topic, Knowledge IDs, score, and reasoning
+
+## Creator Intelligence integrity
+
+- Learnings are derived deterministically from published Analytics and historical TrackingSnapshot data; AI may explain evidence but cannot invent metrics
+- each Learning links to its supporting Content, PublishingTask, AnalyticsRecord, ExperienceRecord, Opportunity, and tracking snapshot IDs
+- confidence combines sample size, consistency, recency, and effect strength; one or two samples cannot become an active rule
+- new consistent evidence validates a Learning, while contradictory evidence can weaken it; Archive removes it from future ranking
+- Opportunity scoring shows a capped Learning adjustment (±8) plus an explicit exploration bonus, preventing historical winners from monopolizing future recommendations
+- Develop carries relevant Learning IDs and guidance into Content, but Content Studio never overwrites the user's draft automatically
+- Strategy Suggestions require Accept / Reject / Ignore; Creator Memory changes only after an explicit Accept
+- Learning entries mirrored to Knowledge Brain always retain type `Learning`, evidence IDs, metrics, and confidence; they are never promoted to `Fact`
 
 ## Security
 
