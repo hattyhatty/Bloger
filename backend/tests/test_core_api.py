@@ -50,7 +50,7 @@ def test_topic_content_knowledge_crud_and_activity(client):
     content = {"id": "content_1", "topic_id": "topic_1", "title": "Agent 内容", "status": "DRAFT", "raw": {"sourceTopicId": "topic_1"}}
     assert client.post("/api/contents", json=content).status_code == 200
     updated = {**content, "status": "APPROVED"}
-    assert client.put("/api/contents/content_1", json=updated).json()["status"] == "APPROVED"
+    assert client.put("/api/contents/content_1", json=updated).json()["status"] == "DRAFT"
 
     knowledge = {"id": "knowledge_1", "topic_id": "topic_1", "content_id": "content_1", "title": "经验", "body": "正文", "tags": ["AI"], "source_url": "https://example.com"}
     assert client.post("/api/knowledge", json=knowledge).status_code == 200
@@ -152,7 +152,8 @@ def test_knowledge_and_workspace_integrity(client):
 
 
 def test_unapproved_content_cannot_enter_publishing(client):
-    client.post("/api/contents", json={"id": "content_unapproved", "title": "Unapproved"})
+    unapproved = client.post("/api/contents", json={"id": "content_unapproved", "title": "Unapproved", "status": "PUBLISHED"}).json()
+    assert unapproved["status"] == "DRAFT"
     client.post("/api/platform-versions", json={
         "id": "pv_unapproved",
         "content_id": "content_unapproved",

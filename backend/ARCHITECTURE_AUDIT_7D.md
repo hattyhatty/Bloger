@@ -22,6 +22,7 @@ The audit confirmed these structural risks:
 - Publishing binds the Approval and PlatformVersion and stores the approved snapshot. A later content edit cannot alter published history.
 - Re-saving published metadata preserves the original approval, content revision, and platform snapshot; an existing PlatformVersion cannot be rebound to another Content.
 - Added a centralized workflow service for approval, publishing, tracking, analytics, and experience validation.
+- Approval/publishing/tracking-owned Content statuses can no longer be forged through the generic Content endpoint.
 - Added unique constraints and idempotent resolution for publishing, analytics, tracking history, experience, and creator memory.
 - TrackingSnapshot is append-only by checkpoint and sequence; Analytics remains a traceable summary.
 - Knowledge delete now archives. Fact entries require a source, and cross-workspace Topic/Content references are rejected.

@@ -32,6 +32,15 @@ from .models import (
 
 DEFAULT_WORKSPACE_ID = "default"
 APPROVED_STATUSES = {"APPROVED", "READY_TO_PUBLISH"}
+WORKFLOW_MANAGED_CONTENT_STATUSES = {
+    "IN_REVIEW",
+    "CHANGES_REQUESTED",
+    "APPROVED",
+    "READY_TO_PUBLISH",
+    "SCHEDULED",
+    "PUBLISHED",
+    "TRACKING",
+}
 PUBLISH_STATUSES = {"DRAFT", "READY", "SCHEDULED", "PUBLISHED", "FAILED", "CANCELLED"}
 PUBLISH_TRANSITIONS = {
     "DRAFT": {"DRAFT", "READY", "SCHEDULED", "CANCELLED"},
@@ -142,7 +151,10 @@ def save_content(db: Session, record_id: str, values: dict[str, Any], *, commit:
     existing = db.get(Content, record_id)
     new_hash = stable_hash(content_snapshot(values))
     if existing is None:
-        item = Content(id=record_id, **{**values, "workspace_id": workspace_id, "revision": 1, "content_hash": new_hash})
+        create_values = {**values, "workspace_id": workspace_id, "revision": 1, "content_hash": new_hash}
+        if canonical_status(create_values.get("status")) in WORKFLOW_MANAGED_CONTENT_STATUSES:
+            create_values["status"] = "DRAFT"
+        item = Content(id=record_id, **create_values)
         db.add(item)
         log_activity(db, "create", "Content", record_id, {"revision": 1}, workspace_id=workspace_id)
         return _finish(db, item, commit)
@@ -152,6 +164,11 @@ def save_content(db: Session, record_id: str, values: dict[str, Any], *, commit:
     changed_version = bool(has_current_hash and existing.content_hash != new_hash)
     for key, value in values.items():
         if key not in {"revision", "content_hash"}:
+            if key == "status" and (
+                canonical_status(value) in WORKFLOW_MANAGED_CONTENT_STATUSES
+                or canonical_status(existing.status) in WORKFLOW_MANAGED_CONTENT_STATUSES
+            ):
+                continue
             setattr(existing, key, value)
     if changed_version:
         existing.revision += 1
@@ -412,6 +429,9 @@ def start_tracking(db: Session, publishing_task_id: str, workspace_id: str = DEF
         raw={"trackingStartedAt": utcnow().isoformat()},
     )
     db.add(item)
+    content = db.get(Content, job.content_id)
+    ensure_owned(content, workspace_id, "Content")
+    content.status = "TRACKING"
     log_activity(db, "tracking_started", "PublishingTask", job.id, {"analyticsRecordId": item.id}, workspace_id=workspace_id)
     return _finish(db, item, commit)
 
