@@ -9,6 +9,7 @@ JsonDict = dict[str, Any]
 
 class TopicIn(BaseModel):
     id: str
+    workspace_id: str = "default"
     source: str = "mock"
     title: str
     url: str = ""
@@ -28,12 +29,15 @@ class TopicOut(TopicIn):
 
 class ContentIn(BaseModel):
     id: str
+    workspace_id: str = "default"
     topic_id: str | None = None
     title: str
     status: str = "DRAFT"
     platform: str = ""
     content_type: str = ""
     source_url: str = ""
+    revision: int = Field(default=1, ge=1)
+    content_hash: str = ""
     raw: JsonDict = Field(default_factory=dict)
 
 
@@ -46,6 +50,7 @@ class ContentOut(ContentIn):
 
 class KnowledgeEntryIn(BaseModel):
     id: str
+    workspace_id: str = "default"
     topic_id: str | None = None
     content_id: str | None = None
     title: str
@@ -68,6 +73,7 @@ class KnowledgeEntryOut(KnowledgeEntryIn):
 
 class CreatorProfileIn(BaseModel):
     id: str = "default"
+    workspace_id: str = "default"
     account_positioning: str = ""
     target_audience: str = ""
     content_pillars: list[str] = Field(default_factory=list)
@@ -87,6 +93,7 @@ class CreatorProfileOut(CreatorProfileIn):
 
 class ActivityLogOut(BaseModel):
     id: int
+    workspace_id: str = "default"
     action: str
     entity_type: str
     entity_id: str
@@ -119,6 +126,7 @@ class ImportSummary(BaseModel):
 
 class PlatformVersionIn(BaseModel):
     id: str
+    workspace_id: str = "default"
     content_id: str
     platform: str = ""
     content_type: str = ""
@@ -127,6 +135,9 @@ class PlatformVersionIn(BaseModel):
     body: str = ""
     tags: list[str] = Field(default_factory=list)
     status: str = "DRAFT"
+    revision: int = Field(default=1, ge=1)
+    content_hash: str = ""
+    is_immutable: bool = False
     raw: JsonDict = Field(default_factory=dict)
 
 
@@ -139,7 +150,11 @@ class PlatformVersionOut(PlatformVersionIn):
 
 class ApprovalRecordIn(BaseModel):
     id: str
+    workspace_id: str = "default"
     content_id: str
+    platform_version_id: str | None = None
+    platform_version_revision: int = Field(default=0, ge=0)
+    snapshot_hash: str = ""
     status: str = "DRAFT"
     notes: str = ""
     reviewed_at: datetime | None = None
@@ -159,8 +174,12 @@ class ApprovalRecordOut(ApprovalRecordIn):
 
 class PublishingTaskIn(BaseModel):
     id: str
+    workspace_id: str = "default"
     content_id: str
     platform_version_id: str | None = None
+    approval_record_id: str | None = None
+    content_revision: int = Field(default=1, ge=1)
+    version_snapshot: JsonDict = Field(default_factory=dict)
     platform: str = ""
     content_type: str = ""
     scheduled_at: str = ""
@@ -180,6 +199,7 @@ class PublishingTaskOut(PublishingTaskIn):
 
 class AnalyticsRecordIn(BaseModel):
     id: str
+    workspace_id: str = "default"
     publishing_task_id: str | None = None
     content_id: str | None = None
     platform: str = ""
@@ -205,9 +225,12 @@ class AnalyticsRecordOut(AnalyticsRecordIn):
 
 class TrackingSnapshotIn(BaseModel):
     id: str
+    workspace_id: str = "default"
     publishing_task_id: str
     analytics_record_id: str | None = None
     checkpoint_id: str = ""
+    sequence: int = Field(default=1, ge=1)
+    recorded_at: datetime | None = None
     label: str = ""
     due_at: str = ""
     status: str = "PENDING"
@@ -225,6 +248,7 @@ class TrackingSnapshotOut(TrackingSnapshotIn):
 
 class ExperienceRecordIn(BaseModel):
     id: str
+    workspace_id: str = "default"
     content_id: str | None = None
     topic_id: str | None = None
     platform_version_id: str | None = None

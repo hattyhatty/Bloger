@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,10 +18,18 @@ class TimestampMixin:
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class Workspace(Base, TimestampMixin):
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default="default")
+    name: Mapped[str] = mapped_column(String(255), default="Default Workspace")
+
+
 class Topic(Base, TimestampMixin):
     __tablename__ = "topics"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
     source: Mapped[str] = mapped_column(String(64), index=True, default="mock")
     title: Mapped[str] = mapped_column(String(512), index=True)
     url: Mapped[str] = mapped_column(Text, default="")
@@ -39,12 +47,15 @@ class Content(Base, TimestampMixin):
     __tablename__ = "contents"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
     topic_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("topics.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(512), index=True)
     status: Mapped[str] = mapped_column(String(64), index=True, default="DRAFT")
     platform: Mapped[str] = mapped_column(String(64), index=True, default="")
     content_type: Mapped[str] = mapped_column(String(64), index=True, default="")
     source_url: Mapped[str] = mapped_column(Text, default="")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
     raw: Mapped[dict] = mapped_column(JsonType, default=dict)
 
     topic: Mapped[Topic | None] = relationship(back_populates="contents")
@@ -60,6 +71,7 @@ class KnowledgeEntry(Base, TimestampMixin):
     __tablename__ = "knowledge_entries"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
     topic_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("topics.id"), nullable=True, index=True)
     content_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("contents.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(512), index=True)
@@ -78,8 +90,10 @@ class KnowledgeEntry(Base, TimestampMixin):
 
 class CreatorProfile(Base, TimestampMixin):
     __tablename__ = "creator_profiles"
+    __table_args__ = (UniqueConstraint("workspace_id", name="uq_creator_profiles_workspace"),)
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default="default")
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
     account_positioning: Mapped[str] = mapped_column(Text, default="")
     target_audience: Mapped[str] = mapped_column(Text, default="")
     content_pillars: Mapped[list] = mapped_column(JsonType, default=list)
@@ -92,8 +106,12 @@ class CreatorProfile(Base, TimestampMixin):
 
 class PlatformVersion(Base, TimestampMixin):
     __tablename__ = "platform_versions"
+    __table_args__ = (
+        UniqueConstraint("content_id", "platform", "content_type", "revision", name="uq_platform_version_revision"),
+    )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
     content_id: Mapped[str] = mapped_column(String(128), ForeignKey("contents.id"), index=True)
     platform: Mapped[str] = mapped_column(String(64), index=True, default="")
     content_type: Mapped[str] = mapped_column(String(64), index=True, default="")
@@ -102,6 +120,9 @@ class PlatformVersion(Base, TimestampMixin):
     body: Mapped[str] = mapped_column(Text, default="")
     tags: Mapped[list] = mapped_column(JsonType, default=list)
     status: Mapped[str] = mapped_column(String(64), index=True, default="DRAFT")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
+    is_immutable: Mapped[bool] = mapped_column(Boolean, default=False)
     raw: Mapped[dict] = mapped_column(JsonType, default=dict)
 
     content: Mapped[Content] = relationship(back_populates="platform_versions")
@@ -113,7 +134,11 @@ class ApprovalRecord(Base, TimestampMixin):
     __tablename__ = "approval_records"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
     content_id: Mapped[str] = mapped_column(String(128), ForeignKey("contents.id"), index=True)
+    platform_version_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("platform_versions.id"), nullable=True, index=True)
+    platform_version_revision: Mapped[int] = mapped_column(Integer, default=0)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
     status: Mapped[str] = mapped_column(String(64), index=True, default="DRAFT")
     notes: Mapped[str] = mapped_column(Text, default="")
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -128,10 +153,17 @@ class ApprovalRecord(Base, TimestampMixin):
 
 class PublishingTask(Base, TimestampMixin):
     __tablename__ = "publishing_tasks"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "content_id", "platform_version_id", "scheduled_at", name="uq_publishing_version_schedule"),
+    )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
     content_id: Mapped[str] = mapped_column(String(128), ForeignKey("contents.id"), index=True)
     platform_version_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("platform_versions.id"), nullable=True, index=True)
+    approval_record_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("approval_records.id"), nullable=True, index=True)
+    content_revision: Mapped[int] = mapped_column(Integer, default=1)
+    version_snapshot: Mapped[dict] = mapped_column(JsonType, default=dict)
     platform: Mapped[str] = mapped_column(String(64), index=True, default="")
     content_type: Mapped[str] = mapped_column(String(64), index=True, default="")
     scheduled_at: Mapped[str] = mapped_column(String(64), index=True, default="")
@@ -150,8 +182,10 @@ class PublishingTask(Base, TimestampMixin):
 
 class AnalyticsRecord(Base, TimestampMixin):
     __tablename__ = "analytics_records"
+    __table_args__ = (UniqueConstraint("publishing_task_id", name="uq_analytics_publishing_task"),)
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
     publishing_task_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("publishing_tasks.id"), nullable=True, index=True)
     content_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("contents.id"), nullable=True, index=True)
     platform: Mapped[str] = mapped_column(String(64), index=True, default="")
@@ -175,11 +209,17 @@ class AnalyticsRecord(Base, TimestampMixin):
 
 class TrackingSnapshot(Base, TimestampMixin):
     __tablename__ = "tracking_snapshots"
+    __table_args__ = (
+        UniqueConstraint("publishing_task_id", "checkpoint_id", "sequence", name="uq_tracking_checkpoint_sequence"),
+    )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
     publishing_task_id: Mapped[str] = mapped_column(String(128), ForeignKey("publishing_tasks.id"), index=True)
     analytics_record_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("analytics_records.id"), nullable=True, index=True)
     checkpoint_id: Mapped[str] = mapped_column(String(64), index=True, default="")
+    sequence: Mapped[int] = mapped_column(Integer, default=1)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     label: Mapped[str] = mapped_column(String(64), default="")
     due_at: Mapped[str] = mapped_column(String(64), default="")
     status: Mapped[str] = mapped_column(String(64), index=True, default="PENDING")
@@ -193,8 +233,10 @@ class TrackingSnapshot(Base, TimestampMixin):
 
 class ExperienceRecord(Base, TimestampMixin):
     __tablename__ = "experience_records"
+    __table_args__ = (UniqueConstraint("publishing_task_id", name="uq_experience_publishing_task"),)
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
     content_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("contents.id"), nullable=True, index=True)
     topic_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("topics.id"), nullable=True, index=True)
     platform_version_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("platform_versions.id"), nullable=True, index=True)
@@ -221,6 +263,7 @@ class ActivityLog(Base):
     __tablename__ = "activity_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), index=True, default="default")
     action: Mapped[str] = mapped_column(String(64), index=True)
     entity_type: Mapped[str] = mapped_column(String(64), index=True)
     entity_id: Mapped[str] = mapped_column(String(128), index=True)

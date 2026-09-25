@@ -1,6 +1,6 @@
-# AI Content OS Backend — Phase 7C
+# AI Content OS Backend — Phase 7D
 
-FastAPI + PostgreSQL backend for the AI Content OS core workflow and Knowledge Brain.
+FastAPI + PostgreSQL backend for the AI Content OS core workflow and Knowledge Brain, with server-side workflow validation, immutable published-version history, and idempotent business operations.
 
 The database persists:
 
@@ -11,6 +11,7 @@ The database persists:
 - ActivityLog
 - PlatformVersion / ApprovalRecord / PublishingTask
 - TrackingSnapshot / AnalyticsRecord / ExperienceRecord
+- Workspace (the minimal ownership boundary; this phase still uses one default workspace)
 
 Real platform APIs, auth, multi-user SaaS, schedulers, vector databases, and cloud deployment remain intentionally out of scope.
 
@@ -49,6 +50,13 @@ Open:
 - `GET /api/creator-memory`
 - `PUT /api/creator-memory`
 - `GET /api/activity-logs`
+- `GET/POST/PUT /api/platform-versions`
+- `GET/POST/PUT /api/approvals`
+- `GET/POST/PUT /api/publishing-tasks`
+- `POST /api/publishing-tasks/{task_id}/tracking/start`
+- `GET/POST/PUT /api/tracking-snapshots`
+- `GET/POST/PUT /api/analytics-records`
+- `GET/POST/PUT /api/experience-records`
 - `POST /api/import/localstorage-core`
 - `POST /api/import/localstorage-business`
 - `GET /api/knowledge/{knowledge_id}/export.md`
@@ -63,6 +71,28 @@ Import is idempotent by original ID:
 - existing IDs are skipped/updated safely
 - localStorage is never deleted before import
 - the response reports added, skipped, and failed counts
+
+## Source of truth and offline fallback
+
+When the API is healthy, PostgreSQL is authoritative for Topic, Content, Knowledge, Creator Memory, Approval, Publishing, Tracking, Analytics, and Experience data. The frontend keeps localStorage only as:
+
+- a local cache for fast rendering
+- a temporary offline fallback when the API is unavailable
+- pending recovery data until the user runs the idempotent migration action
+
+Normal frontend saves use entity-level write-through. They do not re-import the entire local database after every save. A successful backend bootstrap replaces server-backed cache collections with the database snapshot; it does not merge stale local records back into the authoritative result.
+
+## Workflow integrity
+
+The service layer in `app/workflow.py` enforces the business chain independently of the UI:
+
+- approvals bind an exact content revision and immutable platform version
+- publishing requires a matching active approval
+- published records retain an immutable version snapshot
+- tracking starts only for a published task with an actual timestamp and URL
+- tracking snapshots are append-only history
+- analytics and experience records must refer to the same publishing/content/version chain
+- repeated approval, publishing, tracking, and experience requests resolve idempotently
 
 ## Security
 

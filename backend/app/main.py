@@ -2,9 +2,9 @@ import json
 from datetime import datetime, timezone
 from typing import Any, TypeVar
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import Select, or_, select
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,7 @@ from .models import (
     PublishingTask,
     Topic,
     TrackingSnapshot,
+    Workspace,
 )
 from .obsidian import knowledge_to_markdown, safe_filename
 from .schemas import (
@@ -56,10 +57,27 @@ from .schemas import (
     TrackingSnapshotIn,
     TrackingSnapshotOut,
 )
+from .workflow import (
+    DEFAULT_WORKSPACE_ID,
+    WorkflowConflict,
+    append_tracking_snapshot,
+    assert_knowledge_type_boundary,
+    canonical_status,
+    ensure_workspace,
+    save_analytics,
+    save_approval as save_approval_record,
+    save_content,
+    save_experience,
+    save_platform_version as save_platform_version_record,
+    save_publishing_task as save_publishing_task_record,
+    start_tracking,
+    stable_hash,
+    validate_knowledge_links,
+)
 
 
 settings = get_settings()
-app = FastAPI(title="AI Content OS Backend", version="0.7.1")
+app = FastAPI(title="AI Content OS Backend", version="0.7.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins or ["*"],
@@ -71,9 +89,14 @@ app.add_middleware(
 ModelT = TypeVar("ModelT")
 
 
+@app.exception_handler(WorkflowConflict)
+async def workflow_conflict_handler(_: Request, error: WorkflowConflict):
+    return JSONResponse(status_code=409, content={"detail": str(error)})
+
+
 @app.get("/api/health")
 def api_health() -> dict[str, str]:
-    return {"status": "ok", "service": "ai-content-os-backend", "phase": "7C"}
+    return {"status": "ok", "service": "ai-content-os-backend", "phase": "7D", "sourceOfTruth": "postgresql"}
 
 
 @app.get("/health")
@@ -110,6 +133,7 @@ def upsert(
     *,
     create_action: str = "create",
     update_action: str = "update",
+    commit: bool = True,
 ) -> tuple[ModelT, bool, bool]:
     existing = db.get(model, record_id)
     created = existing is None
@@ -124,49 +148,62 @@ def upsert(
         item = model(id=record_id, **values)
         db.add(item)
     if created or changed:
-        log_activity(db, create_action if created else update_action, entity_type, record_id, {"fields": sorted(values.keys())})
-    db.commit()
-    db.refresh(item)
+        log_activity(
+            db,
+            create_action if created else update_action,
+            entity_type,
+            record_id,
+            {"fields": sorted(values.keys())},
+            workspace_id=values.get("workspace_id", DEFAULT_WORKSPACE_ID),
+        )
+    db.flush()
+    if commit:
+        db.commit()
+        db.refresh(item)
     return item, created, changed
 
 
 @app.get("/api/topics", response_model=list[TopicOut])
-def list_topics(limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    return list_records(db, select(Topic).order_by(Topic.updated_at.desc()), limit, offset)
+def list_topics(workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
+    return list_records(db, select(Topic).where(Topic.workspace_id == workspace_id).order_by(Topic.updated_at.desc()), limit, offset)
 
 
 @app.post("/api/topics", response_model=TopicOut)
 def create_topic(payload: TopicIn, db: Session = Depends(get_db)):
+    ensure_workspace(db, payload.workspace_id)
     item, _, _ = upsert(db, Topic, payload.id, payload.model_dump(exclude={"id"}), "Topic")
     return item
 
 
 @app.put("/api/topics/{topic_id}", response_model=TopicOut)
 def update_topic(topic_id: str, payload: TopicIn, db: Session = Depends(get_db)):
+    existing = db.get(Topic, topic_id)
+    if existing and existing.workspace_id != payload.workspace_id:
+        raise WorkflowConflict("Topic belongs to another workspace")
+    ensure_workspace(db, payload.workspace_id)
     values = payload.model_dump(exclude={"id"})
     item, _, _ = upsert(db, Topic, topic_id, values, "Topic")
     return item
 
 
 @app.get("/api/contents", response_model=list[ContentOut])
-def list_contents(limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    return list_records(db, select(Content).order_by(Content.updated_at.desc()), limit, offset)
+def list_contents(workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
+    return list_records(db, select(Content).where(Content.workspace_id == workspace_id).order_by(Content.updated_at.desc()), limit, offset)
 
 
 @app.post("/api/contents", response_model=ContentOut)
 def create_content(payload: ContentIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, Content, payload.id, payload.model_dump(exclude={"id"}), "Content")
-    return item
+    return save_content(db, payload.id, payload.model_dump(exclude={"id"}))
 
 
 @app.put("/api/contents/{content_id}", response_model=ContentOut)
 def update_content(content_id: str, payload: ContentIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, Content, content_id, payload.model_dump(exclude={"id"}), "Content")
-    return item
+    return save_content(db, content_id, payload.model_dump(exclude={"id"}))
 
 
 @app.get("/api/knowledge", response_model=list[KnowledgeEntryOut])
 def list_knowledge(
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
     q: str = "",
     knowledge_type: str = Query("", alias="type"),
     tag: str = "",
@@ -178,7 +215,7 @@ def list_knowledge(
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    statement = select(KnowledgeEntry)
+    statement = select(KnowledgeEntry).where(KnowledgeEntry.workspace_id == workspace_id)
     if q.strip():
         pattern = f"%{q.strip()}%"
         statement = statement.where(or_(KnowledgeEntry.title.ilike(pattern), KnowledgeEntry.body.ilike(pattern), KnowledgeEntry.source.ilike(pattern)))
@@ -201,67 +238,82 @@ def list_knowledge(
 
 @app.post("/api/knowledge", response_model=KnowledgeEntryOut)
 def create_knowledge(payload: KnowledgeEntryIn, db: Session = Depends(get_db)):
+    values = payload.model_dump(exclude={"id"})
+    validate_knowledge_links(db, values)
     item, _, _ = upsert(
         db,
         KnowledgeEntry,
         payload.id,
-        payload.model_dump(exclude={"id"}),
+        values,
         "KnowledgeEntry",
         create_action="knowledge_created",
         update_action="knowledge_updated",
+        commit=False,
     )
+    assert_knowledge_type_boundary(item)
+    db.commit()
+    db.refresh(item)
     return item
 
 
 @app.put("/api/knowledge/{knowledge_id}", response_model=KnowledgeEntryOut)
 def update_knowledge(knowledge_id: str, payload: KnowledgeEntryIn, db: Session = Depends(get_db)):
+    values = payload.model_dump(exclude={"id"})
+    validate_knowledge_links(db, values)
     item, _, _ = upsert(
         db,
         KnowledgeEntry,
         knowledge_id,
-        payload.model_dump(exclude={"id"}),
+        values,
         "KnowledgeEntry",
         create_action="knowledge_created",
         update_action="knowledge_updated",
+        commit=False,
     )
+    assert_knowledge_type_boundary(item)
+    db.commit()
+    db.refresh(item)
     return item
 
 
 @app.post("/api/knowledge/{knowledge_id}/archive", response_model=KnowledgeEntryOut)
-def archive_knowledge(knowledge_id: str, db: Session = Depends(get_db)):
+def archive_knowledge(knowledge_id: str, workspace_id: str = DEFAULT_WORKSPACE_ID, db: Session = Depends(get_db)):
     item = db.get(KnowledgeEntry, knowledge_id)
-    if not item:
+    if not item or item.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Knowledge entry not found")
     if item.status != "ARCHIVED":
         item.status = "ARCHIVED"
-        log_activity(db, "knowledge_archived", "KnowledgeEntry", knowledge_id, {})
+        log_activity(db, "knowledge_archived", "KnowledgeEntry", knowledge_id, {}, workspace_id=workspace_id)
         db.commit()
         db.refresh(item)
     return item
 
 
 @app.delete("/api/knowledge/{knowledge_id}")
-def delete_knowledge(knowledge_id: str, db: Session = Depends(get_db)):
+def delete_knowledge(knowledge_id: str, workspace_id: str = DEFAULT_WORKSPACE_ID, db: Session = Depends(get_db)):
     item = db.get(KnowledgeEntry, knowledge_id)
-    if not item:
+    if not item or item.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Knowledge entry not found")
-    db.delete(item)
-    log_activity(db, "delete", "KnowledgeEntry", knowledge_id, {})
-    db.commit()
-    return {"ok": True}
+    if item.status != "ARCHIVED":
+        item.status = "ARCHIVED"
+        log_activity(db, "knowledge_archived", "KnowledgeEntry", knowledge_id, {"requestedVia": "DELETE"}, workspace_id=workspace_id)
+        db.commit()
+    return {"ok": True, "archived": True}
 
 
 @app.get("/api/creator-memory", response_model=CreatorProfileOut | None)
-def get_creator_memory(db: Session = Depends(get_db)):
-    return db.get(CreatorProfile, "default")
+def get_creator_memory(workspace_id: str = DEFAULT_WORKSPACE_ID, db: Session = Depends(get_db)):
+    return db.scalar(select(CreatorProfile).where(CreatorProfile.workspace_id == workspace_id))
 
 
 @app.put("/api/creator-memory", response_model=CreatorProfileOut)
 def update_creator_memory(payload: CreatorProfileIn, db: Session = Depends(get_db)):
+    ensure_workspace(db, payload.workspace_id)
+    existing = db.scalar(select(CreatorProfile).where(CreatorProfile.workspace_id == payload.workspace_id))
     item, _, _ = upsert(
         db,
         CreatorProfile,
-        "default",
+        existing.id if existing else ("default" if payload.workspace_id == DEFAULT_WORKSPACE_ID else f"creator_{payload.workspace_id}"),
         payload.model_dump(exclude={"id"}),
         "CreatorProfile",
         create_action="creator_memory_updated",
@@ -271,110 +323,103 @@ def update_creator_memory(payload: CreatorProfileIn, db: Session = Depends(get_d
 
 
 @app.get("/api/activity-logs", response_model=list[ActivityLogOut])
-def list_activity_logs(limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    return list_records(db, select(ActivityLog).order_by(ActivityLog.created_at.desc()), limit, offset)
+def list_activity_logs(workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
+    return list_records(db, select(ActivityLog).where(ActivityLog.workspace_id == workspace_id).order_by(ActivityLog.created_at.desc()), limit, offset)
 
 
 @app.get("/api/platform-versions", response_model=list[PlatformVersionOut])
-def list_platform_versions(limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    return list_records(db, select(PlatformVersion).order_by(PlatformVersion.updated_at.desc()), limit, offset)
+def list_platform_versions(workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
+    return list_records(db, select(PlatformVersion).where(PlatformVersion.workspace_id == workspace_id).order_by(PlatformVersion.updated_at.desc()), limit, offset)
 
 
 @app.post("/api/platform-versions", response_model=PlatformVersionOut)
 def save_platform_version(payload: PlatformVersionIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, PlatformVersion, payload.id, payload.model_dump(exclude={"id"}), "PlatformVersion")
-    return item
+    return save_platform_version_record(db, payload.id, payload.model_dump(exclude={"id"}))
 
 
 @app.put("/api/platform-versions/{record_id}", response_model=PlatformVersionOut)
 def update_platform_version(record_id: str, payload: PlatformVersionIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, PlatformVersion, record_id, payload.model_dump(exclude={"id"}), "PlatformVersion")
-    return item
+    return save_platform_version_record(db, record_id, payload.model_dump(exclude={"id"}))
 
 
 @app.get("/api/approvals", response_model=list[ApprovalRecordOut])
-def list_approvals(limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    return list_records(db, select(ApprovalRecord).order_by(ApprovalRecord.updated_at.desc()), limit, offset)
+def list_approvals(workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
+    return list_records(db, select(ApprovalRecord).where(ApprovalRecord.workspace_id == workspace_id).order_by(ApprovalRecord.updated_at.desc()), limit, offset)
 
 
 @app.post("/api/approvals", response_model=ApprovalRecordOut)
 def save_approval(payload: ApprovalRecordIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, ApprovalRecord, payload.id, payload.model_dump(exclude={"id"}), "ApprovalRecord")
-    return item
+    return save_approval_record(db, payload.id, payload.model_dump(exclude={"id"}))
 
 
 @app.put("/api/approvals/{record_id}", response_model=ApprovalRecordOut)
 def update_approval(record_id: str, payload: ApprovalRecordIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, ApprovalRecord, record_id, payload.model_dump(exclude={"id"}), "ApprovalRecord")
-    return item
+    return save_approval_record(db, record_id, payload.model_dump(exclude={"id"}))
 
 
 @app.get("/api/publishing-tasks", response_model=list[PublishingTaskOut])
-def list_publishing_tasks(limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    return list_records(db, select(PublishingTask).order_by(PublishingTask.updated_at.desc()), limit, offset)
+def list_publishing_tasks(workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
+    return list_records(db, select(PublishingTask).where(PublishingTask.workspace_id == workspace_id).order_by(PublishingTask.updated_at.desc()), limit, offset)
 
 
 @app.post("/api/publishing-tasks", response_model=PublishingTaskOut)
 def save_publishing_task(payload: PublishingTaskIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, PublishingTask, payload.id, payload.model_dump(exclude={"id"}), "PublishingTask")
-    return item
+    return save_publishing_task_record(db, payload.id, payload.model_dump(exclude={"id"}))
 
 
 @app.put("/api/publishing-tasks/{record_id}", response_model=PublishingTaskOut)
 def update_publishing_task(record_id: str, payload: PublishingTaskIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, PublishingTask, record_id, payload.model_dump(exclude={"id"}), "PublishingTask")
-    return item
+    return save_publishing_task_record(db, record_id, payload.model_dump(exclude={"id"}))
+
+
+@app.post("/api/publishing-tasks/{record_id}/tracking/start", response_model=AnalyticsRecordOut)
+def start_publishing_tracking(record_id: str, workspace_id: str = DEFAULT_WORKSPACE_ID, db: Session = Depends(get_db)):
+    return start_tracking(db, record_id, workspace_id)
 
 
 @app.get("/api/tracking-snapshots", response_model=list[TrackingSnapshotOut])
-def list_tracking_snapshots(limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    return list_records(db, select(TrackingSnapshot).order_by(TrackingSnapshot.updated_at.desc()), limit, offset)
+def list_tracking_snapshots(workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
+    return list_records(db, select(TrackingSnapshot).where(TrackingSnapshot.workspace_id == workspace_id).order_by(TrackingSnapshot.recorded_at.desc()), limit, offset)
 
 
 @app.post("/api/tracking-snapshots", response_model=TrackingSnapshotOut)
 def save_tracking_snapshot(payload: TrackingSnapshotIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, TrackingSnapshot, payload.id, payload.model_dump(exclude={"id"}), "TrackingSnapshot")
-    return item
+    return append_tracking_snapshot(db, payload.id, payload.model_dump(exclude={"id"}))
 
 
 @app.put("/api/tracking-snapshots/{record_id}", response_model=TrackingSnapshotOut)
 def update_tracking_snapshot(record_id: str, payload: TrackingSnapshotIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, TrackingSnapshot, record_id, payload.model_dump(exclude={"id"}), "TrackingSnapshot")
-    return item
+    return append_tracking_snapshot(db, record_id, payload.model_dump(exclude={"id"}))
 
 
 @app.get("/api/analytics-records", response_model=list[AnalyticsRecordOut])
-def list_analytics_records(limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    return list_records(db, select(AnalyticsRecord).order_by(AnalyticsRecord.updated_at.desc()), limit, offset)
+def list_analytics_records(workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
+    return list_records(db, select(AnalyticsRecord).where(AnalyticsRecord.workspace_id == workspace_id).order_by(AnalyticsRecord.updated_at.desc()), limit, offset)
 
 
 @app.post("/api/analytics-records", response_model=AnalyticsRecordOut)
 def save_analytics_record(payload: AnalyticsRecordIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, AnalyticsRecord, payload.id, payload.model_dump(exclude={"id"}), "AnalyticsRecord")
-    return item
+    return save_analytics(db, payload.id, payload.model_dump(exclude={"id"}))
 
 
 @app.put("/api/analytics-records/{record_id}", response_model=AnalyticsRecordOut)
 def update_analytics_record(record_id: str, payload: AnalyticsRecordIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, AnalyticsRecord, record_id, payload.model_dump(exclude={"id"}), "AnalyticsRecord")
-    return item
+    return save_analytics(db, record_id, payload.model_dump(exclude={"id"}))
 
 
 @app.get("/api/experience-records", response_model=list[ExperienceRecordOut])
-def list_experience_records(limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    return list_records(db, select(ExperienceRecord).order_by(ExperienceRecord.updated_at.desc()), limit, offset)
+def list_experience_records(workspace_id: str = DEFAULT_WORKSPACE_ID, limit: int = Query(100, le=500), offset: int = 0, db: Session = Depends(get_db)):
+    return list_records(db, select(ExperienceRecord).where(ExperienceRecord.workspace_id == workspace_id).order_by(ExperienceRecord.updated_at.desc()), limit, offset)
 
 
 @app.post("/api/experience-records", response_model=ExperienceRecordOut)
 def save_experience_record(payload: ExperienceRecordIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, ExperienceRecord, payload.id, payload.model_dump(exclude={"id"}), "ExperienceRecord")
-    return item
+    return save_experience(db, payload.id, payload.model_dump(exclude={"id"}))
 
 
 @app.put("/api/experience-records/{record_id}", response_model=ExperienceRecordOut)
 def update_experience_record(record_id: str, payload: ExperienceRecordIn, db: Session = Depends(get_db)):
-    item, _, _ = upsert(db, ExperienceRecord, record_id, payload.model_dump(exclude={"id"}), "ExperienceRecord")
-    return item
+    return save_experience(db, record_id, payload.model_dump(exclude={"id"}))
 
 
 def topic_from_local(item: dict[str, Any]) -> TopicIn | None:
@@ -452,50 +497,97 @@ def creator_profile_from_local(item: dict[str, Any] | None) -> CreatorProfileIn 
     )
 
 
-def platform_version_id(content_id: str, platform: str, content_type: str) -> str:
+def platform_version_id(content_id: str, platform: str, content_type: str, snapshot: dict[str, Any] | None = None) -> str:
     safe_platform = (platform or "unknown").replace(" ", "_")
     safe_type = (content_type or "draft").replace(" ", "_")
-    return f"pv_{content_id}_{safe_platform}_{safe_type}"
+    suffix = f"_{stable_hash(snapshot)[:12]}" if snapshot else ""
+    return f"pv_{content_id}_{safe_platform}_{safe_type}{suffix}"
+
+
+def local_platform_snapshot(content: dict[str, Any], snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = snapshot or {}
+    platform = source.get("platform") or content.get("studioPlatform") or (content.get("targetPlatforms") or ["小红书"])[0]
+    content_type = source.get("contentType") or source.get("format") or content.get("studioFormat") or content.get("contentType") or "口播稿"
+    return {
+        "title": source.get("title") or content.get("draftTitle") or content.get("title") or "",
+        "hook": source.get("hook") or content.get("draftHook") or content.get("recommendedHook") or "",
+        "body": source.get("body") or content.get("draftBody") or content.get("body") or "",
+        "tags": source.get("tags") if isinstance(source.get("tags"), list) else content.get("draftTags") if isinstance(content.get("draftTags"), list) else content.get("tags") if isinstance(content.get("tags"), list) else [],
+        "platform": platform,
+        "contentType": content_type,
+        "sourceUrl": source.get("sourceUrl") or content.get("sourceUrl") or "",
+    }
+
+
+def platform_version_from_snapshot(
+    content_id: str,
+    snapshot: dict[str, Any],
+    *,
+    source: str,
+    status: str = "DRAFT",
+    immutable: bool = False,
+) -> PlatformVersionIn:
+    platform = snapshot.get("platform") or ""
+    content_type = snapshot.get("contentType") or ""
+    return PlatformVersionIn(
+        id=platform_version_id(content_id, platform, content_type, snapshot),
+        content_id=content_id,
+        platform=platform,
+        content_type=content_type,
+        title=snapshot.get("title") or "",
+        hook=snapshot.get("hook") or "",
+        body=snapshot.get("body") or "",
+        tags=snapshot.get("tags") if isinstance(snapshot.get("tags"), list) else [],
+        status=canonical_status(status),
+        is_immutable=immutable,
+        raw={"source": source, "sourceUrl": snapshot.get("sourceUrl") or ""},
+    )
 
 
 def platform_versions_from_local(payload: LocalStorageBusinessImportIn) -> list[PlatformVersionIn]:
     versions: dict[str, PlatformVersionIn] = {}
+    content_lookup = {item.get("id"): item for item in payload.contentItems if item.get("id")}
     for content in payload.contentItems:
         content_id = content.get("id")
         if not content_id:
             continue
-        platform = content.get("studioPlatform") or (content.get("targetPlatforms") or ["小红书"])[0]
-        content_type = content.get("studioFormat") or content.get("contentType") or "口播稿"
-        record_id = platform_version_id(content_id, platform, content_type)
-        versions[record_id] = PlatformVersionIn(
-            id=record_id,
-            content_id=content_id,
-            platform=platform,
-            content_type=content_type,
-            title=content.get("draftTitle") or content.get("title") or "",
-            hook=content.get("draftHook") or content.get("recommendedHook") or "",
-            body=content.get("draftBody") or content.get("body") or "",
-            tags=content.get("draftTags") if isinstance(content.get("draftTags"), list) else content.get("tags") if isinstance(content.get("tags"), list) else [],
-            status=content.get("approvalStatus") or "DRAFT",
-            raw={"source": "contentDraft", **content},
-        )
+        current_snapshot = local_platform_snapshot(content)
+        current = platform_version_from_snapshot(content_id, current_snapshot, source="contentDraft", status=content.get("approvalStatus") or "DRAFT")
+        versions[current.id] = current
+        if content.get("approvalSnapshot"):
+            approved_snapshot = local_platform_snapshot(content, content.get("approvalSnapshot"))
+            approved = platform_version_from_snapshot(
+                content_id,
+                approved_snapshot,
+                source="approvalSnapshot",
+                status=content.get("approvalStatus") or "APPROVED",
+                immutable=canonical_status(content.get("approvalStatus")) in {"APPROVED", "READY_TO_PUBLISH"},
+            )
+            versions[approved.id] = approved
+    for job in payload.publishJobs:
+        content_id = job.get("contentId")
+        content = content_lookup.get(content_id)
+        if not content_id or not content:
+            continue
+        job_snapshot = local_platform_snapshot(content, {
+            "title": job.get("titleSnapshot"),
+            "body": job.get("bodySnapshot"),
+            "tags": job.get("tagsSnapshot"),
+            "platform": job.get("platform"),
+            "contentType": job.get("contentType"),
+            "sourceUrl": content.get("sourceUrl"),
+        })
+        published = platform_version_from_snapshot(content_id, job_snapshot, source="publishingSnapshot", status="APPROVED", immutable=True)
+        versions[published.id] = published
     for asset in payload.generatedAssets:
         content_id = asset.get("contentId")
         if not content_id:
             continue
         platform = asset.get("platform") or ""
         content_type = asset.get("assetType") or ""
-        record_id = f"pv_asset_{asset.get('id')}"
-        versions[record_id] = PlatformVersionIn(
-            id=record_id,
-            content_id=content_id,
-            platform=platform,
-            content_type=content_type,
-            title=asset.get("assetType") or "",
-            body=asset.get("content") or "",
-            status=asset.get("status") or "DRAFT",
-            raw={"source": "generatedAsset", **asset},
-        )
+        snapshot = {"title": asset.get("assetType") or "", "hook": "", "body": asset.get("content") or "", "tags": [], "platform": platform, "contentType": content_type, "sourceUrl": ""}
+        version = platform_version_from_snapshot(content_id, snapshot, source="generatedAsset", status=asset.get("status") or "DRAFT")
+        versions[version.id] = version
     return list(versions.values())
 
 
@@ -503,10 +595,14 @@ def approval_from_content(content: dict[str, Any]) -> ApprovalRecordIn | None:
     content_id = content.get("id")
     if not content_id:
         return None
+    snapshot = local_platform_snapshot(content, content.get("approvalSnapshot") or None)
+    version_id = platform_version_id(content_id, snapshot["platform"], snapshot["contentType"], snapshot)
+    status = canonical_status(content.get("approvalStatus") or "DRAFT")
     return ApprovalRecordIn(
-        id=f"approval_{content_id}",
+        id=f"approval_{content_id}_{version_id[-12:]}",
         content_id=content_id,
-        status=content.get("approvalStatus") or "DRAFT",
+        platform_version_id=version_id,
+        status=status,
         notes=content.get("approvalNotes") or "",
         reviewed_at=content.get("approvalReviewedAt") or None,
         approved_at=content.get("approvedAt") or None,
@@ -517,25 +613,36 @@ def approval_from_content(content: dict[str, Any]) -> ApprovalRecordIn | None:
     )
 
 
-def publishing_from_local(job: dict[str, Any]) -> PublishingTaskIn | None:
+def publishing_from_local(job: dict[str, Any], content_lookup: dict[str, dict[str, Any]]) -> PublishingTaskIn | None:
     job_id = job.get("id")
     content_id = job.get("contentId")
     if not job_id or not content_id:
         return None
     platform = job.get("platform") or ""
     content_type = job.get("contentType") or "口播稿"
+    content = content_lookup.get(content_id) or {}
+    snapshot = local_platform_snapshot(content, {
+        "title": job.get("titleSnapshot"),
+        "body": job.get("bodySnapshot"),
+        "tags": job.get("tagsSnapshot"),
+        "platform": platform,
+        "contentType": content_type,
+        "sourceUrl": content.get("sourceUrl"),
+    })
+    status = canonical_status(job.get("status") or "DRAFT")
     return PublishingTaskIn(
         id=job_id,
         content_id=content_id,
-        platform_version_id=platform_version_id(content_id, platform, content_type),
+        platform_version_id=platform_version_id(content_id, platform, content_type, snapshot),
         platform=platform,
         content_type=content_type,
         scheduled_at=job.get("scheduledAt") or "",
-        actual_published_at=job.get("actualPublishedAt") or "",
-        status=job.get("status") or "DRAFT",
+        actual_published_at=job.get("actualPublishedAt") or (job.get("scheduledAt") if status == "PUBLISHED" and job.get("url") else ""),
+        status=status,
         url=job.get("url") or "",
         notes=job.get("notes") or "",
-        raw=job,
+        version_snapshot=snapshot,
+        raw={**job, "migrationSource": "localStorage"},
     )
 
 
@@ -556,7 +663,7 @@ def analytics_from_local(record: dict[str, Any]) -> AnalyticsRecordIn | None:
         shares=int(record.get("shares") or 0),
         saves=int(record.get("saves") or 0),
         followers_gained=int(record.get("followersGained") or 0),
-        tracking_status=record.get("trackingStatus") or "NOT_STARTED",
+        tracking_status=canonical_status(record.get("trackingStatus") or "NOT_STARTED"),
         performance_analysis=record.get("performanceAnalysis") or record.get("aiPerformanceReview") or "",
         raw=record,
     )
@@ -571,33 +678,39 @@ def tracking_from_analytics(record: dict[str, Any]) -> list[TrackingSnapshotIn]:
     for checkpoint in record.get("checkpoints") or []:
         checkpoint_id = checkpoint.get("id") or "checkpoint"
         metrics = checkpoint.get("metrics") or {}
+        status = canonical_status(checkpoint.get("status") or "PENDING")
+        if status == "PENDING" and not metrics:
+            continue
+        snapshot_key = stable_hash({"checkpoint": checkpoint_id, "metrics": metrics, "updatedAt": checkpoint.get("updatedAt")})[:12]
         snapshots.append(TrackingSnapshotIn(
-            id=f"track_{analytics_id}_{checkpoint_id}",
+            id=f"track_{analytics_id}_{checkpoint_id}_{snapshot_key}",
             publishing_task_id=publish_job_id,
             analytics_record_id=analytics_id,
             checkpoint_id=checkpoint_id,
             label=checkpoint.get("label") or checkpoint_id,
             due_at=checkpoint.get("dueAt") or "",
-            status=checkpoint.get("status") or "PENDING",
+            status=status,
             stats_date=metrics.get("statsDate") or record.get("statsDate") or "",
             metrics=metrics,
+            recorded_at=checkpoint.get("updatedAt") or None,
             raw=checkpoint,
         ))
     return snapshots
 
 
-def experience_from_local(item: dict[str, Any]) -> ExperienceRecordIn | None:
+def experience_from_local(item: dict[str, Any], publishing_lookup: dict[str, PublishingTaskIn]) -> ExperienceRecordIn | None:
     item_id = item.get("id")
     if not item_id:
         return None
     content_id = item.get("contentId") or None
     platform = item.get("platform") or ""
     content_type = item.get("contentType") or ""
+    publishing = publishing_lookup.get(item.get("publishJobId"))
     return ExperienceRecordIn(
         id=item_id,
         content_id=content_id,
         topic_id=item.get("topicId") or None,
-        platform_version_id=platform_version_id(content_id, platform, content_type) if content_id else None,
+        platform_version_id=publishing.platform_version_id if publishing else None,
         publishing_task_id=item.get("publishJobId") or None,
         analytics_record_id=item.get("analyticsRecordId") or None,
         platform=platform,
@@ -612,7 +725,14 @@ def experience_from_local(item: dict[str, Any]) -> ExperienceRecordIn | None:
     )
 
 
-def import_bucket(db: Session, items: list[dict[str, Any]], parser, model, entity_type: str) -> ImportBucketSummary:
+def record_state(item: Any) -> str:
+    if item is None:
+        return ""
+    values = {column.name: getattr(item, column.name) for column in item.__table__.columns if column.name not in {"created_at", "updated_at"}}
+    return comparable_values(values)
+
+
+def import_bucket(db: Session, items: list[dict[str, Any]], parser, model, entity_type: str, saver=None) -> ImportBucketSummary:
     summary = ImportBucketSummary()
     for raw_item in items:
         try:
@@ -620,95 +740,136 @@ def import_bucket(db: Session, items: list[dict[str, Any]], parser, model, entit
             if not parsed:
                 summary.failed += 1
                 continue
-            exists = db.get(model, parsed.id) is not None
-            _, created, changed = upsert(db, model, parsed.id, parsed.model_dump(exclude={"id"}), entity_type)
-            if created:
+            existing = db.get(model, parsed.id)
+            before = record_state(existing)
+            with db.begin_nested():
+                if saver:
+                    saved = saver(db, parsed.id, parsed.model_dump(exclude={"id"}), commit=False)
+                else:
+                    saved, _, _ = upsert(db, model, parsed.id, parsed.model_dump(exclude={"id"}), entity_type, commit=False)
+            after = record_state(saved)
+            if existing is None and saved.id == parsed.id:
                 summary.added += 1
-            elif changed:
+            elif before != after:
                 summary.updated += 1
-            elif exists:
-                summary.skipped += 1
             else:
-                summary.failed += 1
+                summary.skipped += 1
         except Exception:
-            db.rollback()
             summary.failed += 1
     return summary
 
 
-def import_records(db: Session, records: list[Any], model, entity_type: str) -> ImportBucketSummary:
+def import_records(db: Session, records: list[Any], model, entity_type: str, saver=None) -> ImportBucketSummary:
     summary = ImportBucketSummary()
     for parsed in records:
         try:
-            exists = db.get(model, parsed.id) is not None
-            _, created, changed = upsert(db, model, parsed.id, parsed.model_dump(exclude={"id"}), entity_type)
-            if created:
+            existing = db.get(model, parsed.id)
+            before = record_state(existing)
+            with db.begin_nested():
+                if saver:
+                    saved = saver(db, parsed.id, parsed.model_dump(exclude={"id"}), commit=False)
+                else:
+                    saved, _, _ = upsert(db, model, parsed.id, parsed.model_dump(exclude={"id"}), entity_type, commit=False)
+            after = record_state(saved)
+            if existing is None and saved.id == parsed.id:
                 summary.added += 1
-            elif changed:
+            elif before != after:
                 summary.updated += 1
-            elif exists:
-                summary.skipped += 1
             else:
-                summary.failed += 1
+                summary.skipped += 1
         except Exception:
-            db.rollback()
             summary.failed += 1
     return summary
 
 
 @app.post("/api/import/localstorage-core", response_model=ImportSummary)
 def import_localstorage_core(payload: LocalStorageCoreImportIn, db: Session = Depends(get_db)):
+    ensure_workspace(db)
     creator_records = [record for record in [creator_profile_from_local(payload.creatorMemory)] if record]
+
+    def save_imported_knowledge(session: Session, record_id: str, values: dict[str, Any], *, commit: bool = False):
+        validate_knowledge_links(session, values)
+        saved, _, _ = upsert(
+            session,
+            KnowledgeEntry,
+            record_id,
+            values,
+            "KnowledgeEntry",
+            create_action="knowledge_created",
+            update_action="knowledge_updated",
+            commit=commit,
+        )
+        assert_knowledge_type_boundary(saved)
+        return saved
+
     summary = ImportSummary(
         topics=import_bucket(db, payload.topics, topic_from_local, Topic, "Topic"),
-        contents=import_bucket(db, payload.contentItems, content_from_local, Content, "Content"),
-        knowledge=import_bucket(db, payload.knowledgeItems, knowledge_from_local, KnowledgeEntry, "KnowledgeEntry"),
+        contents=import_bucket(db, payload.contentItems, content_from_local, Content, "Content", save_content),
+        knowledge=import_bucket(db, payload.knowledgeItems, knowledge_from_local, KnowledgeEntry, "KnowledgeEntry", save_imported_knowledge),
         creator_memory=import_records(db, creator_records, CreatorProfile, "CreatorProfile"),
     )
-    log_activity(db, "import_localstorage_core", "Database", "localStorage", summary.model_dump())
+    log_activity(db, "import_localstorage_core", "Database", "localStorage", summary.model_dump(), workspace_id=DEFAULT_WORKSPACE_ID)
     db.commit()
     return summary
 
 
 @app.post("/api/import/localstorage-business", response_model=BusinessImportSummary)
 def import_localstorage_business(payload: LocalStorageBusinessImportIn, db: Session = Depends(get_db)):
+    ensure_workspace(db)
+    content_lookup = {item.get("id"): item for item in payload.contentItems if item.get("id")}
     platform_versions = platform_versions_from_local(payload)
     approvals = [record for record in (approval_from_content(item) for item in payload.contentItems) if record]
-    publishing_tasks = [record for record in (publishing_from_local(item) for item in payload.publishJobs) if record]
+    publishing_tasks = [record for record in (publishing_from_local(item, content_lookup) for item in payload.publishJobs) if record]
     analytics_records = [record for record in (analytics_from_local(item) for item in payload.analyticsRecords) if record]
     tracking_snapshots = [snapshot for item in payload.analyticsRecords for snapshot in tracking_from_analytics(item)]
-    experience_records = [record for record in (experience_from_local(item) for item in payload.experienceItems) if record]
+    publishing_lookup = {item.id: item for item in publishing_tasks}
+    experience_records = [record for record in (experience_from_local(item, publishing_lookup) for item in payload.experienceItems) if record]
+
+    version_id_map: dict[str, str] = {}
+
+    def save_imported_version(session: Session, record_id: str, values: dict[str, Any], *, commit: bool = False):
+        saved = save_platform_version_record(session, record_id, values, commit=commit)
+        version_id_map[record_id] = saved.id
+        return saved
+
+    platform_summary = import_records(db, platform_versions, PlatformVersion, "PlatformVersion", save_imported_version)
+    approvals = [record.model_copy(update={"platform_version_id": version_id_map.get(record.platform_version_id, record.platform_version_id)}) for record in approvals]
+    publishing_tasks = [record.model_copy(update={"platform_version_id": version_id_map.get(record.platform_version_id, record.platform_version_id)}) for record in publishing_tasks]
+    publishing_lookup = {item.id: item for item in publishing_tasks}
+    experience_records = [record.model_copy(update={
+        "platform_version_id": publishing_lookup.get(record.publishing_task_id).platform_version_id if publishing_lookup.get(record.publishing_task_id) else record.platform_version_id
+    }) for record in experience_records]
 
     summary = BusinessImportSummary(
-        platform_versions=import_records(db, platform_versions, PlatformVersion, "PlatformVersion"),
-        approvals=import_records(db, approvals, ApprovalRecord, "ApprovalRecord"),
-        publishing_tasks=import_records(db, publishing_tasks, PublishingTask, "PublishingTask"),
-        analytics_records=import_records(db, analytics_records, AnalyticsRecord, "AnalyticsRecord"),
-        tracking_snapshots=import_records(db, tracking_snapshots, TrackingSnapshot, "TrackingSnapshot"),
-        experience_records=import_records(db, experience_records, ExperienceRecord, "ExperienceRecord"),
+        platform_versions=platform_summary,
+        approvals=import_records(db, approvals, ApprovalRecord, "ApprovalRecord", save_approval_record),
+        publishing_tasks=import_records(db, publishing_tasks, PublishingTask, "PublishingTask", save_publishing_task_record),
+        analytics_records=import_records(db, analytics_records, AnalyticsRecord, "AnalyticsRecord", save_analytics),
+        tracking_snapshots=import_records(db, tracking_snapshots, TrackingSnapshot, "TrackingSnapshot", append_tracking_snapshot),
+        experience_records=import_records(db, experience_records, ExperienceRecord, "ExperienceRecord", save_experience),
     )
-    log_activity(db, "import_localstorage_business", "Database", "localStorage", summary.model_dump())
+    log_activity(db, "import_localstorage_business", "Database", "localStorage", summary.model_dump(), workspace_id=DEFAULT_WORKSPACE_ID)
     db.commit()
     return summary
 
 
 @app.get("/api/knowledge/{knowledge_id}/export.md", response_class=PlainTextResponse)
-def export_knowledge_markdown(knowledge_id: str, db: Session = Depends(get_db)):
+def export_knowledge_markdown(knowledge_id: str, workspace_id: str = DEFAULT_WORKSPACE_ID, db: Session = Depends(get_db)):
     item = db.get(KnowledgeEntry, knowledge_id)
-    if not item:
+    if not item or item.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Knowledge entry not found")
-    log_activity(db, "export_markdown", "KnowledgeEntry", knowledge_id, {"format": "obsidian"})
+    log_activity(db, "export_markdown", "KnowledgeEntry", knowledge_id, {"format": "obsidian"}, workspace_id=workspace_id)
     db.commit()
     return PlainTextResponse(knowledge_to_markdown(item), media_type="text/markdown; charset=utf-8")
 
 
 @app.post("/api/knowledge/export/markdown", response_model=MarkdownExportResponse)
-def export_knowledge_batch_markdown(payload: MarkdownExportRequest, db: Session = Depends(get_db)):
-    statement = select(KnowledgeEntry)
+def export_knowledge_batch_markdown(payload: MarkdownExportRequest, workspace_id: str = DEFAULT_WORKSPACE_ID, db: Session = Depends(get_db)):
+    statement = select(KnowledgeEntry).where(KnowledgeEntry.workspace_id == workspace_id)
     if payload.ids:
         statement = statement.where(KnowledgeEntry.id.in_(payload.ids))
     items = list(db.scalars(statement.order_by(KnowledgeEntry.updated_at.desc())).all())
     files = [MarkdownFile(filename=safe_filename(item.title), content=knowledge_to_markdown(item)) for item in items]
-    log_activity(db, "export_markdown", "KnowledgeEntry", "batch", {"count": len(files)})
+    log_activity(db, "export_markdown", "KnowledgeEntry", "batch", {"count": len(files)}, workspace_id=workspace_id)
     db.commit()
     return MarkdownExportResponse(files=files)

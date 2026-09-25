@@ -366,6 +366,9 @@ function normalizeContent(item = {}) {
   const targetPlatforms = safeTargetPlatforms(item.targetPlatforms).length ? safeTargetPlatforms(item.targetPlatforms) : [platformFromLegacy(item.fitPlatform || item.targetPlatform || "抖音")];
   return {
     id: item.id || uid("content"),
+    workspaceId: item.workspaceId || "default",
+    revision: Math.max(1, Number(item.revision) || 1),
+    contentHash: item.contentHash || "",
     title: item.title || "未命名 Content",
     status: Object.values(CONTENT_STATUS).includes(item.status) ? item.status : CONTENT_STATUS.DISCOVERED,
     sourcePlatform: item.sourcePlatform || item.platform || "Reddit",
@@ -425,6 +428,10 @@ function normalizeContent(item = {}) {
     approvalSnapshot: item.approvalSnapshot || null,
     approvalInvalidatedAt: item.approvalInvalidatedAt || "",
     approvalInvalidationReason: item.approvalInvalidationReason || "",
+    approvalRecordId: item.approvalRecordId || "",
+    approvedPlatformVersionId: item.approvedPlatformVersionId || "",
+    approvedContentRevision: Math.max(0, Number(item.approvedContentRevision) || 0),
+    approvalSnapshotHash: item.approvalSnapshotHash || "",
     publishedPlatforms: Array.isArray(item.publishedPlatforms) ? item.publishedPlatforms : [],
     copyrightStatus: item.copyrightStatus || "待检查",
     statusHistory: Array.isArray(item.statusHistory) ? item.statusHistory : [{ status: item.status || CONTENT_STATUS.DISCOVERED, at: createdAt, note: "初始化" }],
@@ -453,6 +460,7 @@ function normalizeTopic(item = {}) {
   const status = Object.values(TOPIC_STATUS).includes(item.status) ? item.status : (item.status === "TRENDING" || item.status === "NEW" ? TOPIC_STATUS.DISCOVERED : TOPIC_STATUS.DISCOVERED);
   return {
     id: item.id || uid("topic"),
+    workspaceId: item.workspaceId || "default",
     source,
     sourceType: RESEARCH_SOURCE_TYPES.includes(item.sourceType) ? item.sourceType : (source === "GitHub" ? "github" : "mock"),
     sourceProvider: item.sourceProvider || "",
@@ -637,6 +645,27 @@ function normalizeGeneratedAsset(item = {}) {
   };
 }
 
+function normalizePlatformVersion(item = {}) {
+  const createdAt = item.createdAt || now();
+  return {
+    id: item.id || uid("platform_version"),
+    workspaceId: item.workspaceId || "default",
+    contentId: item.contentId || "",
+    platform: item.platform || "",
+    contentType: item.contentType || "",
+    title: item.title || "",
+    hook: item.hook || "",
+    body: item.body || "",
+    tags: Array.isArray(item.tags) ? item.tags : splitTags(item.tags),
+    status: item.status || "DRAFT",
+    revision: Math.max(1, Number(item.revision) || 1),
+    contentHash: item.contentHash || "",
+    isImmutable: Boolean(item.isImmutable),
+    createdAt,
+    updatedAt: item.updatedAt || createdAt
+  };
+}
+
 function normalizeVideoProject(item = {}) {
   const createdAt = item.createdAt || now();
   const base = {
@@ -662,7 +691,12 @@ function normalizePublishJob(item = {}) {
   const createdAt = item.createdAt || now();
   return {
     id: item.id || uid("job"),
+    workspaceId: item.workspaceId || "default",
     contentId: item.contentId || "",
+    platformVersionId: item.platformVersionId || "",
+    approvalRecordId: item.approvalRecordId || "",
+    contentRevision: Math.max(1, Number(item.contentRevision) || 1),
+    versionSnapshot: item.versionSnapshot || {},
     platform: CONTENT_STUDIO_PLATFORMS.includes(item.platform) ? item.platform : "小红书",
     contentType: item.contentType || item.format || "口播稿",
     scheduledAt: item.scheduledAt || "",
@@ -743,6 +777,7 @@ function normalizeAnalyticsRecord(item = {}) {
     : (item.trackingStartedAt ? (finishedCount === checkpoints.length ? TRACKING_STATUS.COMPLETED : TRACKING_STATUS.TRACKING) : TRACKING_STATUS.NOT_STARTED);
   return {
     id: item.id || uid("analytics"),
+    workspaceId: item.workspaceId || "default",
     publishJobId: item.publishJobId || "",
     contentId: item.contentId || "",
     sourceTopicId: item.sourceTopicId || "",
@@ -766,6 +801,7 @@ function normalizeAnalyticsRecord(item = {}) {
     trackingStatus,
     trackingStartedAt: item.trackingStartedAt || "",
     checkpoints,
+    trackingHistory: Array.isArray(item.trackingHistory) ? item.trackingHistory.map(entry => ({ ...entry })) : [],
     checkpointChanges: item.checkpointChanges || {},
     performanceAnalysis: item.performanceAnalysis || "",
     performanceAnalysisUpdatedAt: item.performanceAnalysisUpdatedAt || "",
@@ -781,7 +817,9 @@ function normalizeExperience(item = {}) {
   const createdAt = item.createdAt || now();
   return {
     id: item.id || uid("experience"),
+    workspaceId: item.workspaceId || "default",
     publishJobId: item.publishJobId || "",
+    platformVersionId: item.platformVersionId || "",
     analyticsRecordId: item.analyticsRecordId || "",
     contentId: item.contentId || "",
     contentTitle: item.contentTitle || "",
@@ -860,6 +898,9 @@ function normalizeBackendStatus(item = {}) {
     lastAction: item.lastAction || "",
     lastError: item.lastError || "",
     lastSummary: item.lastSummary || "",
+    authority: item.authority || "local-fallback",
+    pendingRecovery: Boolean(item.pendingRecovery),
+    lastPulledAt: item.lastPulledAt || "",
     updatedAt: item.updatedAt || ""
   };
 }
@@ -1010,6 +1051,7 @@ function normalizeKnowledge(item = {}) {
   const linkedContentIds = Array.isArray(item.linkedContentIds) ? item.linkedContentIds : item.linkedContentId ? [item.linkedContentId] : [];
   return {
     id: item.id || uid("knowledge"),
+    workspaceId: item.workspaceId || "default",
     title: item.title || "未命名知识",
     knowledgeType: normalizeKnowledgeType(item.knowledgeType || item.knowledge_type, source),
     source,
@@ -1075,6 +1117,15 @@ class SupabaseProvider extends StorageProvider {
   save() { return false; }
 }
 
+class BackendApiError extends Error {
+  constructor(message, status = 0, detail = "") {
+    super(message);
+    this.name = "BackendApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 class ApiClient {
   constructor(configGetter = () => normalizeBackendApiConfig(db.settings?.backendApiConfig)) {
     this.configGetter = configGetter;
@@ -1090,11 +1141,44 @@ class ApiClient {
       ...options,
       headers: { "Content-Type": "application/json", ...(options.headers || {}) }
     });
-    if (!response.ok) throw new Error(`Backend API HTTP ${response.status}`);
+    if (!response.ok) {
+      let detail = "";
+      try { detail = (await response.json())?.detail || ""; } catch { detail = await response.text().catch(() => ""); }
+      throw new BackendApiError(detail || `Backend API HTTP ${response.status}`, response.status, detail);
+    }
     const type = response.headers.get("content-type") || "";
     return type.includes("application/json") ? response.json() : response.text();
   }
   health() { return this.request("/api/health"); }
+  topicPayload(item) {
+    const record = normalizeTopic(item);
+    return { id: record.id, workspace_id: record.workspaceId, source: record.source, title: record.title, url: record.url, author: record.author, category: record.category, status: record.status, score: record.score, raw: record };
+  }
+  contentPayload(item) {
+    const record = normalizeContent(item);
+    return {
+      id: record.id,
+      workspace_id: record.workspaceId,
+      topic_id: record.sourceTopicId || record.primarySourceTopicId || null,
+      title: record.title,
+      status: record.status,
+      platform: record.studioPlatform,
+      content_type: record.studioFormat,
+      source_url: record.sourceUrl,
+      revision: record.revision,
+      content_hash: record.contentHash,
+      raw: record
+    };
+  }
+  saveTopic(item) { return this.request("/api/topics", { method: "POST", body: JSON.stringify(this.topicPayload(item)) }); }
+  saveContent(item) { return this.request("/api/contents", { method: "POST", body: JSON.stringify(this.contentPayload(item)) }); }
+  savePlatformVersion(payload) { return this.request("/api/platform-versions", { method: "POST", body: JSON.stringify(payload) }); }
+  saveApproval(payload) { return this.request("/api/approvals", { method: "POST", body: JSON.stringify(payload) }); }
+  savePublishingTask(payload) { return this.request("/api/publishing-tasks", { method: "POST", body: JSON.stringify(payload) }); }
+  startTracking(jobId) { return this.request(`/api/publishing-tasks/${encodeURIComponent(jobId)}/tracking/start`, { method: "POST" }); }
+  saveTrackingSnapshot(payload) { return this.request("/api/tracking-snapshots", { method: "POST", body: JSON.stringify(payload) }); }
+  saveAnalytics(payload) { return this.request("/api/analytics-records", { method: "POST", body: JSON.stringify(payload) }); }
+  saveExperience(payload) { return this.request("/api/experience-records", { method: "POST", body: JSON.stringify(payload) }); }
   corePayload(data = db) {
     return {
       topics: data.topics || [],
@@ -1142,6 +1226,7 @@ class ApiClient {
     const record = normalizeKnowledge(item);
     return {
       id: record.id,
+      workspace_id: record.workspaceId,
       topic_id: record.linkedTopicId || null,
       content_id: record.linkedContentIds[0] || null,
       title: record.title,
@@ -1167,6 +1252,7 @@ class ApiClient {
       method: "PUT",
       body: JSON.stringify({
         id: "default",
+        workspace_id: "default",
         account_positioning: memory.accountPositioning,
         target_audience: memory.targetAudience,
         content_pillars: memory.contentPillars,
@@ -1186,14 +1272,12 @@ class ApiClient {
 const storageProvider = new LocalStorageProvider(STORAGE_KEY);
 const apiClient = new ApiClient();
 const backendApiProvider = apiClient;
-let backendSyncTimer = null;
 let backendBootstrapDone = false;
 let db = migrateDatabase(storageProvider.load());
 saveDb();
 
 function saveDb() {
   storageProvider.save(db);
-  scheduleBackendSync();
   renderHealth();
 }
 
@@ -1204,15 +1288,68 @@ function updateBackendStatus(patch = {}) {
   return db.settings.backendStatus;
 }
 
-function scheduleBackendSync() {
+function backendWritesEnabled() {
   const config = normalizeBackendApiConfig(db.settings?.backendApiConfig);
-  if (!config.enabled || !config.syncOnSave) return;
-  clearTimeout(backendSyncTimer);
-  backendSyncTimer = setTimeout(() => {
-    backendApiProvider.importAllLocalStorage(db)
-      .then(summary => updateBackendStatus({ lastSuccess: true, lastAction: "syncOnSave", lastError: "", lastSummary: JSON.stringify(summary) }))
-      .catch(error => updateBackendStatus({ lastSuccess: false, lastAction: "syncOnSave", lastError: error.message || String(error), lastSummary: "已保留 localStorage 本地备份" }));
-  }, 800);
+  return config.enabled && config.syncOnSave;
+}
+
+function isBackendUnavailable(error) {
+  return !(error instanceof BackendApiError) || !error.status || error.status >= 500;
+}
+
+async function runBackendWrite(action, requestFactory) {
+  if (!backendWritesEnabled()) return null;
+  try {
+    const result = await requestFactory();
+    updateBackendStatus({ lastSuccess: true, lastAction: action, lastError: "", lastSummary: "PostgreSQL write confirmed", authority: "postgresql" });
+    return result;
+  } catch (error) {
+    const unavailable = isBackendUnavailable(error);
+    updateBackendStatus({
+      lastSuccess: false,
+      lastAction: action,
+      lastError: error.message || String(error),
+      lastSummary: unavailable ? "后端不可用；变更保存在 localStorage，等待恢复/迁移" : "后端拒绝了不符合业务规则的写入",
+      authority: unavailable ? "local-fallback" : "postgresql",
+      pendingRecovery: unavailable || normalizeBackendStatus(db.settings?.backendStatus).pendingRecovery
+    });
+    if (!unavailable) throw error;
+    return null;
+  }
+}
+
+function scheduleEntityWrite(action, requestFactory) {
+  if (!backendWritesEnabled()) return;
+  runBackendWrite(action, requestFactory).catch(async error => {
+    if (isBackendUnavailable(error)) return;
+    try {
+      const snapshot = await apiClient.pullCoreData();
+      mergeBackendCoreData(snapshot, { authoritative: true });
+      updateBackendStatus({
+        lastSuccess: false,
+        lastAction: `${action}.reverted`,
+        lastError: error.message || String(error),
+        lastSummary: "后端拒绝写入；已用 PostgreSQL 权威快照还原本地缓存",
+        authority: "postgresql",
+        pendingRecovery: false,
+        lastPulledAt: now()
+      });
+    } catch (pullError) {
+      updateBackendStatus({
+        lastSuccess: false,
+        lastAction: `${action}.recoveryFailed`,
+        lastError: pullError.message || String(pullError),
+        lastSummary: "写入被拒绝且权威快照拉取失败；请刷新或手动拉取数据库",
+        authority: "local-fallback",
+        pendingRecovery: true
+      });
+    }
+  });
+}
+
+function scheduleCollectionWrite(collectionName, record) {
+  if (collectionName === "topics") scheduleEntityWrite("topic.write", () => apiClient.saveTopic(record));
+  if (collectionName === "contentItems") scheduleEntityWrite("content.write", () => apiClient.saveContent(record));
 }
 
 function upsertById(list, item) {
@@ -1221,89 +1358,112 @@ function upsertById(list, item) {
   else list.unshift(item);
 }
 
-function mergeBackendCoreData(snapshot = {}) {
-  (snapshot.topics || []).forEach(item => upsertById(db.topics, normalizeTopic({ ...(item.raw || {}), id: item.id, source: item.source, title: item.title, url: item.url, author: item.author, category: item.category, status: item.status, score: item.score })));
-  (snapshot.contents || []).forEach(item => upsertById(db.contentItems, normalizeContent({ ...(item.raw || {}), id: item.id, sourceTopicId: item.topic_id || item.raw?.sourceTopicId, title: item.title, status: item.status, studioPlatform: item.platform, studioFormat: item.content_type, sourceUrl: item.source_url })));
-  (snapshot.knowledgeItems || []).forEach(item => upsertById(db.knowledgeItems, normalizeKnowledge({
-    ...(item.raw || {}),
-    id: item.id,
+function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
+  const topics = (snapshot.topics || []).map(item => normalizeTopic({ ...(item.raw || {}), id: item.id, workspaceId: item.workspace_id, source: item.source, title: item.title, url: item.url, author: item.author, category: item.category, status: item.status, score: item.score, createdAt: item.created_at, updatedAt: item.updated_at }));
+  const contents = (snapshot.contents || []).map(item => normalizeContent({ ...(item.raw || {}), id: item.id, workspaceId: item.workspace_id, revision: item.revision, contentHash: item.content_hash, sourceTopicId: item.topic_id || item.raw?.sourceTopicId, title: item.title, status: item.status, studioPlatform: item.platform, studioFormat: item.content_type, sourceUrl: item.source_url, createdAt: item.created_at, updatedAt: item.updated_at }));
+  const knowledgeItems = (snapshot.knowledgeItems || []).map(item => normalizeKnowledge({
+    ...(item.raw || {}), id: item.id, workspaceId: item.workspace_id,
     linkedTopicId: item.topic_id || item.raw?.linkedTopicId,
     linkedContentIds: item.content_id ? [item.content_id] : item.raw?.linkedContentIds,
-    title: item.title,
-    knowledgeType: item.knowledge_type,
-    source: item.source || item.raw?.source,
-    sourceUrl: item.source_url || item.raw?.sourceUrl,
-    tags: item.tags,
-    confidence: item.confidence,
-    status: item.status,
-    summary: item.body,
-    createdAt: item.created_at,
-    updatedAt: item.updated_at
-  })));
-  if (snapshot.creatorMemory) db.settings.creatorMemory = normalizeCreatorMemory(snapshot.creatorMemory);
+    title: item.title, knowledgeType: item.knowledge_type, source: item.source || item.raw?.source,
+    sourceUrl: item.source_url || item.raw?.sourceUrl, tags: item.tags, confidence: item.confidence,
+    status: item.status, summary: item.body, createdAt: item.created_at, updatedAt: item.updated_at
+  }));
+  const platformVersions = (snapshot.platformVersions || []).map(item => normalizePlatformVersion({
+    ...(item.raw || {}), id: item.id, workspaceId: item.workspace_id, contentId: item.content_id,
+    platform: item.platform, contentType: item.content_type, title: item.title, hook: item.hook,
+    body: item.body, tags: item.tags, status: item.status, revision: item.revision,
+    contentHash: item.content_hash, isImmutable: item.is_immutable, createdAt: item.created_at, updatedAt: item.updated_at
+  }));
+  const approvalsByContent = new Map();
   (snapshot.approvals || []).forEach(item => {
-    const content = db.contentItems.find(existing => existing.id === item.content_id);
-    if (!content) return;
+    const prior = approvalsByContent.get(item.content_id);
+    const active = ["APPROVED", "READY_TO_PUBLISH"].includes(String(item.status || "").toUpperCase()) && !item.invalidated_at;
+    if (!prior || (active && !prior.active)) approvalsByContent.set(item.content_id, { item, active });
+  });
+  contents.forEach(content => {
+    const approval = approvalsByContent.get(content.id)?.item;
+    if (!approval) return;
     Object.assign(content, normalizeContent({
       ...content,
-      approvalStatus: item.status,
-      approvalNotes: item.notes,
-      approvalReviewedAt: item.reviewed_at || item.raw?.approvalReviewedAt || "",
-      approvedAt: item.approved_at || item.raw?.approvedAt || "",
-      approvalInvalidatedAt: item.invalidated_at || item.raw?.approvalInvalidatedAt || "",
-      approvalInvalidationReason: item.invalidation_reason || item.raw?.approvalInvalidationReason || "",
-      approvalSnapshot: item.snapshot || item.raw?.approvalSnapshot || null
+      approvalStatus: approval.status,
+      approvalNotes: approval.notes,
+      approvalReviewedAt: approval.reviewed_at || approval.raw?.approvalReviewedAt || "",
+      approvedAt: approval.approved_at || approval.raw?.approvedAt || "",
+      approvalInvalidatedAt: approval.invalidated_at || approval.raw?.approvalInvalidatedAt || "",
+      approvalInvalidationReason: approval.invalidation_reason || approval.raw?.approvalInvalidationReason || "",
+      approvalSnapshot: approval.snapshot || approval.raw?.approvalSnapshot || null,
+      approvalRecordId: approval.id,
+      approvedPlatformVersionId: approval.platform_version_id || "",
+      approvedContentRevision: approval.platform_version_revision || 0,
+      approvalSnapshotHash: approval.snapshot_hash || ""
     }));
   });
-  (snapshot.publishingTasks || []).forEach(item => upsertById(db.publishJobs, normalizePublishJob({ ...(item.raw || {}), id: item.id, contentId: item.content_id, platform: item.platform, contentType: item.content_type, scheduledAt: item.scheduled_at, actualPublishedAt: item.actual_published_at, status: item.status, url: item.url, notes: item.notes })));
+  const publishJobs = (snapshot.publishingTasks || []).map(item => normalizePublishJob({
+    ...(item.raw || {}), id: item.id, workspaceId: item.workspace_id, contentId: item.content_id,
+    platformVersionId: item.platform_version_id, approvalRecordId: item.approval_record_id,
+    contentRevision: item.content_revision, versionSnapshot: item.version_snapshot,
+    platform: item.platform, contentType: item.content_type, scheduledAt: item.scheduled_at,
+    actualPublishedAt: item.actual_published_at, status: item.status, url: item.url, notes: item.notes,
+    createdAt: item.created_at, updatedAt: item.updated_at
+  }));
   const trackingByAnalytics = (snapshot.trackingSnapshots || []).reduce((acc, item) => {
-    const analyticsId = item.analytics_record_id;
-    if (!analyticsId) return acc;
-    acc[analyticsId] = acc[analyticsId] || [];
-    acc[analyticsId].push({
-      id: item.checkpoint_id,
-      label: item.label,
-      dueAt: item.due_at,
-      status: item.status,
-      metrics: item.metrics || null,
-      updatedAt: item.updated_at || ""
+    if (!item.analytics_record_id) return acc;
+    acc[item.analytics_record_id] = acc[item.analytics_record_id] || [];
+    acc[item.analytics_record_id].push({
+      snapshotId: item.id, id: item.checkpoint_id, label: item.label, dueAt: item.due_at,
+      status: item.status, metrics: item.metrics || null, sequence: item.sequence || 1,
+      recordedAt: item.recorded_at || item.updated_at || "", updatedAt: item.updated_at || ""
     });
     return acc;
   }, {});
-  (snapshot.analyticsRecords || []).forEach(item => upsertById(db.analyticsRecords, normalizeAnalyticsRecord({
-    ...(item.raw || {}),
-    id: item.id,
-    publishJobId: item.publishing_task_id || item.raw?.publishJobId,
-    contentId: item.content_id || item.raw?.contentId,
-    platform: item.platform,
-    contentType: item.content_type,
-    statsDate: item.stats_date,
-    views: item.views,
-    likes: item.likes,
-    comments: item.comments,
-    shares: item.shares,
-    saves: item.saves,
-    followersGained: item.followers_gained,
-    trackingStatus: item.tracking_status,
-    performanceAnalysis: item.performance_analysis,
-    checkpoints: trackingByAnalytics[item.id] || item.raw?.checkpoints || []
-  })));
-  (snapshot.experienceRecords || []).forEach(item => upsertById(db.experienceItems, normalizeExperience({
-    ...(item.raw || {}),
-    id: item.id,
-    contentId: item.content_id || item.raw?.contentId,
-    topicId: item.topic_id || item.raw?.topicId,
+  Object.values(trackingByAnalytics).forEach(history => history.sort((a, b) => (b.sequence || 0) - (a.sequence || 0) || new Date(b.recordedAt) - new Date(a.recordedAt)));
+  const analyticsRecords = (snapshot.analyticsRecords || []).map(item => {
+    const history = trackingByAnalytics[item.id] || [];
+    const latestByCheckpoint = [...history.reduce((map, entry) => {
+      if (!map.has(entry.id)) map.set(entry.id, entry);
+      return map;
+    }, new Map()).values()];
+    return normalizeAnalyticsRecord({
+      ...(item.raw || {}), id: item.id, workspaceId: item.workspace_id,
+      publishJobId: item.publishing_task_id || item.raw?.publishJobId,
+      contentId: item.content_id || item.raw?.contentId, platform: item.platform,
+      contentType: item.content_type, statsDate: item.stats_date, views: item.views,
+      likes: item.likes, comments: item.comments, shares: item.shares, saves: item.saves,
+      followersGained: item.followers_gained, trackingStatus: item.tracking_status,
+      performanceAnalysis: item.performance_analysis,
+      checkpoints: latestByCheckpoint.length ? latestByCheckpoint : item.raw?.checkpoints || [],
+      trackingHistory: history, createdAt: item.created_at, updatedAt: item.updated_at
+    });
+  });
+  const experienceItems = (snapshot.experienceRecords || []).map(item => normalizeExperience({
+    ...(item.raw || {}), id: item.id, workspaceId: item.workspace_id,
+    contentId: item.content_id || item.raw?.contentId, topicId: item.topic_id || item.raw?.topicId,
     publishJobId: item.publishing_task_id || item.raw?.publishJobId,
     analyticsRecordId: item.analytics_record_id || item.raw?.analyticsRecordId,
-    platform: item.platform,
-    contentType: item.content_type,
-    topicCategory: item.topic_category,
-    performanceResult: item.performance_result,
-    effectivePractices: item.effective_practices || [],
-    improvements: item.improvements || [],
-    reviewSummary: item.review_summary,
-    reviewedAt: item.reviewed_at
-  })));
+    platform: item.platform, contentType: item.content_type, topicCategory: item.topic_category,
+    performanceResult: item.performance_result, effectivePractices: item.effective_practices || [],
+    improvements: item.improvements || [], reviewSummary: item.review_summary,
+    reviewedAt: item.reviewed_at, createdAt: item.created_at, updatedAt: item.updated_at
+  }));
+  if (authoritative) {
+    db.topics = topics;
+    db.contentItems = contents;
+    db.knowledgeItems = knowledgeItems;
+    db.platformVersions = platformVersions;
+    db.publishJobs = publishJobs;
+    db.analyticsRecords = analyticsRecords;
+    db.experienceItems = experienceItems;
+  } else {
+    topics.forEach(item => upsertById(db.topics, item));
+    contents.forEach(item => upsertById(db.contentItems, item));
+    knowledgeItems.forEach(item => upsertById(db.knowledgeItems, item));
+    platformVersions.forEach(item => upsertById(db.platformVersions, item));
+    publishJobs.forEach(item => upsertById(db.publishJobs, item));
+    analyticsRecords.forEach(item => upsertById(db.analyticsRecords, item));
+    experienceItems.forEach(item => upsertById(db.experienceItems, item));
+  }
+  if (snapshot.creatorMemory) db.settings.creatorMemory = normalizeCreatorMemory(snapshot.creatorMemory);
   storageProvider.save(db);
   render();
   return snapshot;
@@ -1313,24 +1473,36 @@ async function bootstrapBackendCoreData() {
   const config = normalizeBackendApiConfig(db.settings?.backendApiConfig);
   if (backendBootstrapDone || !config.enabled) return;
   backendBootstrapDone = true;
+  const status = normalizeBackendStatus(db.settings?.backendStatus);
+  if (status.pendingRecovery) {
+    updateBackendStatus({ lastSuccess: false, lastAction: "bootstrapDeferred", lastSummary: "存在离线变更；请先执行数据迁移，再从 PostgreSQL 拉取", authority: "local-fallback" });
+    return;
+  }
   try {
     const snapshot = await apiClient.pullCoreData();
-    mergeBackendCoreData(snapshot);
-    updateBackendStatus({ lastSuccess: true, lastAction: "bootstrapPull", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Contents ${snapshot.contents.length} · Publishing ${snapshot.publishingTasks?.length || 0} · Analytics ${snapshot.analyticsRecords?.length || 0}` });
+    const backendEmpty = !(snapshot.topics?.length || snapshot.contents?.length || snapshot.knowledgeItems?.length);
+    const localHasData = Boolean(db.topics?.length || db.contentItems?.length || db.knowledgeItems?.length);
+    if (backendEmpty && localHasData) {
+      updateBackendStatus({ lastSuccess: true, lastAction: "bootstrapDeferred", lastError: "", lastSummary: "PostgreSQL 为空；请先执行 Migrate Business Data，localStorage 暂作为待迁移恢复区", authority: "local-fallback", pendingRecovery: true });
+      return;
+    }
+    mergeBackendCoreData(snapshot, { authoritative: true });
+    updateBackendStatus({ lastSuccess: true, lastAction: "bootstrapPull", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Contents ${snapshot.contents.length} · Publishing ${snapshot.publishingTasks?.length || 0} · Analytics ${snapshot.analyticsRecords?.length || 0}`, authority: "postgresql", pendingRecovery: false, lastPulledAt: now() });
   } catch (error) {
-    updateBackendStatus({ lastSuccess: false, lastAction: "bootstrapPull", lastError: error.message || String(error), lastSummary: "后端不可用，继续使用 localStorage" });
+    updateBackendStatus({ lastSuccess: false, lastAction: "bootstrapPull", lastError: error.message || String(error), lastSummary: "后端不可用，继续使用 localStorage cache/fallback", authority: "local-fallback" });
   }
 }
 
 function migrateDatabase(raw) {
   const source = raw && raw.contentItems ? raw : createInitialData();
   const newDb = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     contentItems: [],
     topics: [],
     topicClusters: [],
     dailyBriefs: [],
     generatedAssets: [],
+    platformVersions: [],
     archivedGeneratedAssets: [],
     videoProjects: [],
     publishJobs: [],
@@ -1363,6 +1535,7 @@ function migrateDatabase(raw) {
   };
 
   const existingAssets = Array.isArray(source.generatedAssets) ? source.generatedAssets : [];
+  const existingPlatformVersions = Array.isArray(source.platformVersions) ? source.platformVersions : [];
   const existingTopics = Array.isArray(source.topics) ? source.topics : createMockTopics();
   const existingArchived = Array.isArray(source.archivedGeneratedAssets) ? source.archivedGeneratedAssets : [];
   const existingVideoProjects = Array.isArray(source.videoProjects) ? source.videoProjects : [];
@@ -1406,6 +1579,7 @@ function migrateDatabase(raw) {
     const asset = normalizeGeneratedAsset(item);
     if (newDb.contentItems.some(content => content.id === asset.contentId)) upsertGeneratedAsset(newDb.generatedAssets, asset);
   });
+  existingPlatformVersions.forEach(item => newDb.platformVersions.push(normalizePlatformVersion(item)));
   existingArchived.forEach(item => newDb.archivedGeneratedAssets.push(item));
   existingVideoProjects.forEach(item => {
     const project = normalizeVideoProject(item);
@@ -1456,6 +1630,7 @@ function createCrudStore(collectionName, normalizer) {
       const record = normalizer({ ...item, id: item.id || uid(collectionName), createdAt: now(), updatedAt: now() });
       db[collectionName].unshift(record);
       saveDb();
+      scheduleCollectionWrite(collectionName, record);
       return record;
     },
     update(id, patch) {
@@ -1463,6 +1638,7 @@ function createCrudStore(collectionName, normalizer) {
       if (index < 0) return null;
       db[collectionName][index] = normalizer({ ...db[collectionName][index], ...patch, updatedAt: now() });
       saveDb();
+      scheduleCollectionWrite(collectionName, db[collectionName][index]);
       return db[collectionName][index];
     },
     remove(id) {
@@ -1481,6 +1657,7 @@ const ContentStore = {
     const content = normalizeContent({ ...item, id: uid("content"), createdAt: now(), updatedAt: now() });
     db.contentItems.unshift(content);
     saveDb();
+    scheduleCollectionWrite("contentItems", content);
     return content;
   },
   update(id, patch) {
@@ -1489,8 +1666,21 @@ const ContentStore = {
     const current = db.contentItems[index];
     const nextStatus = patch.status && patch.status !== current.status;
     const statusHistory = nextStatus ? [{ status: patch.status, at: now(), note: "状态更新" }, ...(current.statusHistory || [])] : current.statusHistory;
-    db.contentItems[index] = normalizeContent({ ...current, ...patch, statusHistory, updatedAt: now() });
+    let candidate = normalizeContent({ ...current, ...patch, statusHistory, updatedAt: now() });
+    if (["APPROVED", "READY_TO_PUBLISH"].includes(current.approvalStatus) && current.approvalSnapshot && ApprovalService.signature(current.approvalSnapshot) !== ApprovalService.currentSignature(candidate)) {
+      candidate = normalizeContent({
+        ...candidate,
+        approvalStatus: "DRAFT",
+        approvedAt: "",
+        approvalInvalidatedAt: now(),
+        approvalInvalidationReason: "批准后内容、平台版本或来源发生修改，需要重新审核。",
+        approvalNotes: `${candidate.approvalNotes || ""}${candidate.approvalNotes ? "\n" : ""}批准后内容发生修改，需要重新审核。`.trim(),
+        status: CONTENT_STATUS.DRAFT
+      });
+    }
+    db.contentItems[index] = candidate;
     saveDb();
+    scheduleCollectionWrite("contentItems", db.contentItems[index]);
     return db.contentItems[index];
   },
   remove(id) {
@@ -2437,7 +2627,7 @@ const ApprovalService = {
     return this.signature(this.snapshot(content));
   },
   isApproved(content) {
-    return ["APPROVED", "READY_TO_PUBLISH"].includes(content?.approvalStatus);
+    return ["APPROVED", "READY_TO_PUBLISH"].includes(content?.approvalStatus) && Boolean(content?.approvalSnapshot);
   },
   isModifiedAfterApproval(content) {
     if (!this.isApproved(content) || !content.approvalSnapshot) return false;
@@ -2454,28 +2644,102 @@ const ApprovalService = {
       approvalNotes: `${content.approvalNotes || ""}${content.approvalNotes ? "\n" : ""}${reason}`.trim()
     });
   },
-  submit(contentId, notes = "") {
-    return ContentStore.update(contentId, { approvalStatus: "IN_REVIEW", approvalReviewedAt: now(), approvalNotes: notes, status: CONTENT_STATUS.IN_REVIEW });
+  platformVersionPayload(content, snapshot, id = "") {
+    const versionId = id || `pv_${content.id}_${simpleHash(JSON.stringify({ ...snapshot, capturedAt: undefined }))}`;
+    return {
+      id: versionId,
+      workspace_id: content.workspaceId || "default",
+      content_id: content.id,
+      platform: snapshot.platform || content.studioPlatform,
+      content_type: snapshot.format || content.studioFormat,
+      title: snapshot.title || content.title,
+      hook: snapshot.hook || "",
+      body: snapshot.body || "",
+      tags: snapshot.tags || [],
+      status: "DRAFT",
+      revision: Math.max(1, Number(content.revision) || 1),
+      content_hash: "",
+      is_immutable: false,
+      raw: { source: "contentStudio", sourceUrl: snapshot.sourceUrl || content.sourceUrl }
+    };
   },
-  requestChanges(contentId, notes = "") {
-    return ContentStore.update(contentId, { approvalStatus: "CHANGES_REQUESTED", approvalReviewedAt: now(), approvalNotes: notes, approvedAt: "", status: CONTENT_STATUS.CHANGES_REQUESTED });
+  approvalPayload(content, status, notes, platformVersionId = "", approvalId = "") {
+    return {
+      id: approvalId || content.approvalRecordId || `approval_${content.id}_${platformVersionId ? simpleHash(platformVersionId) : "current"}`,
+      workspace_id: content.workspaceId || "default",
+      content_id: content.id,
+      platform_version_id: platformVersionId || content.approvedPlatformVersionId || null,
+      platform_version_revision: content.approvedContentRevision || 0,
+      snapshot_hash: content.approvalSnapshotHash || "",
+      status,
+      notes,
+      reviewed_at: now(),
+      approved_at: status === "APPROVED" ? now() : (content.approvedAt || null),
+      invalidated_at: status === "DRAFT" ? now() : null,
+      invalidation_reason: status === "DRAFT" ? (notes || "人工撤销批准") : "",
+      snapshot: content.approvalSnapshot || {},
+      raw: { actionSource: "ContentStudio" }
+    };
   },
-  approve(contentId, notes = "") {
+  async persistStatus(contentId, status, notes = "") {
     const content = ContentStore.getById(contentId);
     if (!content) return null;
-    return ContentStore.update(contentId, {
-      approvalStatus: "APPROVED",
-      approvalReviewedAt: now(),
+    let serverApproval = null;
+    let platformVersionId = content.approvedPlatformVersionId || "";
+    let snapshot = content.approvalSnapshot || this.snapshot(content);
+    if (backendWritesEnabled()) {
+      const serverContent = await runBackendWrite("content.prepareApproval", () => apiClient.saveContent(content));
+      if (serverContent) {
+        content.revision = serverContent.revision || content.revision;
+        content.contentHash = serverContent.content_hash || content.contentHash;
+      }
+      if (status === "APPROVED") {
+        snapshot = this.snapshot(content);
+        const version = await runBackendWrite("platformVersion.create", () => apiClient.savePlatformVersion(this.platformVersionPayload(content, snapshot)));
+        platformVersionId = version?.id || this.platformVersionPayload(content, snapshot).id;
+        if (version) {
+          upsertById(db.platformVersions, normalizePlatformVersion({
+            ...(version.raw || {}), id: version.id, workspaceId: version.workspace_id, contentId: version.content_id,
+            platform: version.platform, contentType: version.content_type, title: version.title, hook: version.hook,
+            body: version.body, tags: version.tags, status: version.status, revision: version.revision,
+            contentHash: version.content_hash, isImmutable: version.is_immutable,
+            createdAt: version.created_at, updatedAt: version.updated_at
+          }));
+        }
+      }
+      const payload = this.approvalPayload({ ...content, approvalSnapshot: snapshot }, status, notes, platformVersionId);
+      serverApproval = await runBackendWrite("approval.write", () => apiClient.saveApproval(payload));
+    }
+    const approvalAt = status === "APPROVED" ? (serverApproval?.approved_at || now()) : "";
+    const patch = {
+      approvalStatus: status,
+      approvalReviewedAt: serverApproval?.reviewed_at || now(),
       approvalNotes: notes,
-      approvedAt: now(),
-      approvalSnapshot: this.snapshot(content),
-      approvalInvalidatedAt: "",
-      approvalInvalidationReason: "",
-      status: CONTENT_STATUS.APPROVED
-    });
+      approvedAt: approvalAt,
+      approvalSnapshot: status === "APPROVED" ? (serverApproval?.snapshot || snapshot) : content.approvalSnapshot,
+      approvalInvalidatedAt: status === "DRAFT" ? (serverApproval?.invalidated_at || now()) : "",
+      approvalInvalidationReason: status === "DRAFT" ? (notes || "人工撤销批准") : "",
+      approvalRecordId: serverApproval?.id || content.approvalRecordId || this.approvalPayload(content, status, notes, platformVersionId).id,
+      approvedPlatformVersionId: platformVersionId,
+      approvedContentRevision: serverApproval?.platform_version_revision || content.revision,
+      approvalSnapshotHash: serverApproval?.snapshot_hash || content.approvalSnapshotHash,
+      status: status === "APPROVED" ? CONTENT_STATUS.APPROVED : status === "IN_REVIEW" ? CONTENT_STATUS.IN_REVIEW : status === "CHANGES_REQUESTED" ? CONTENT_STATUS.CHANGES_REQUESTED : CONTENT_STATUS.DRAFT
+    };
+    const saved = ContentStore.update(contentId, patch);
+    storageProvider.save(db);
+    return saved;
+  },
+  submit(contentId, notes = "") {
+    return this.persistStatus(contentId, "IN_REVIEW", notes);
+  },
+  requestChanges(contentId, notes = "") {
+    return this.persistStatus(contentId, "CHANGES_REQUESTED", notes);
+  },
+  approve(contentId, notes = "") {
+    return this.persistStatus(contentId, "APPROVED", notes);
   },
   revoke(contentId, notes = "") {
-    return ContentStore.update(contentId, { approvalStatus: "DRAFT", approvalReviewedAt: now(), approvalNotes: notes || "已撤销批准。", approvedAt: "", approvalInvalidatedAt: now(), approvalInvalidationReason: "人工撤销批准", status: CONTENT_STATUS.DRAFT });
+    return this.persistStatus(contentId, "DRAFT", notes || "已撤销批准。");
   },
   markReady(contentId) {
     const content = ContentStore.getById(contentId);
@@ -3069,6 +3333,7 @@ const SourceIngestionService = {
       }
     });
     saveDb();
+    results.forEach(topic => scheduleCollectionWrite("topics", topic));
     return options.withStats ? stats : results;
   },
   async refreshSource(sourceId, options = {}) {
@@ -3148,6 +3413,8 @@ const PublishingService = {
     const selectedType = contentType || content.studioFormat || draft.format || "口播稿";
     return {
       content,
+      platformVersionId: content.approvedPlatformVersionId || "",
+      approvalRecordId: content.approvalRecordId || "",
       platform: selectedPlatform,
       contentType: selectedType,
       title: content.draftTitle || draft.title || content.title,
@@ -3185,13 +3452,20 @@ const PublishingService = {
       job.status !== PUBLISH_STATUS.CANCELLED
     ) || null;
   },
-  createOrUpdate(payload, existingId = "") {
+  async createOrUpdate(payload, existingId = "") {
     const version = this.getPlatformVersion(payload.contentId, payload.platform, payload.contentType);
     if (!version) throw new Error("找不到来源 Content");
     const check = this.preflight(payload);
     if (!ApprovalService.isApproved(ContentStore.getById(payload.contentId))) throw new Error("该内容尚未完成最终审核。");
-    const record = {
+    const existing = existingId ? PublishJobStore.getById(existingId) : null;
+    const record = normalizePublishJob({
+      ...(existing || {}),
+      id: existing?.id || uid("job"),
       ...payload,
+      platformVersionId: version.platformVersionId,
+      approvalRecordId: version.approvalRecordId,
+      contentRevision: version.content.revision,
+      versionSnapshot: version.content.approvalSnapshot || {},
       platform: version.platform,
       contentType: version.contentType,
       titleSnapshot: version.title,
@@ -3199,22 +3473,71 @@ const PublishingService = {
       tagsSnapshot: version.tags,
       checklist: check.missing,
       lastCheckAt: now()
-    };
+    });
     const duplicate = this.findDuplicate(record, existingId);
     if (duplicate) {
       appState.selectedPublishJobId = duplicate.id;
       appState.editPublishJobId = duplicate.id;
       return duplicate;
     }
-    const job = existingId ? PublishJobStore.update(existingId, record) : PublishJobStore.create(record);
+    let serverJob = null;
+    if (backendWritesEnabled()) {
+      serverJob = await runBackendWrite("publishing.write", () => apiClient.savePublishingTask({
+        id: record.id,
+        workspace_id: record.workspaceId,
+        content_id: record.contentId,
+        platform_version_id: record.platformVersionId || null,
+        approval_record_id: record.approvalRecordId || null,
+        content_revision: record.contentRevision,
+        version_snapshot: record.versionSnapshot,
+        platform: record.platform,
+        content_type: record.contentType,
+        scheduled_at: record.scheduledAt,
+        actual_published_at: record.actualPublishedAt,
+        status: record.status,
+        url: record.url,
+        notes: record.notes,
+        raw: record
+      }));
+    }
+    const persisted = serverJob ? normalizePublishJob({
+      ...(serverJob.raw || record), id: serverJob.id, workspaceId: serverJob.workspace_id,
+      contentId: serverJob.content_id, platformVersionId: serverJob.platform_version_id,
+      approvalRecordId: serverJob.approval_record_id, contentRevision: serverJob.content_revision,
+      versionSnapshot: serverJob.version_snapshot, platform: serverJob.platform,
+      contentType: serverJob.content_type, scheduledAt: serverJob.scheduled_at,
+      actualPublishedAt: serverJob.actual_published_at, status: serverJob.status,
+      url: serverJob.url, notes: serverJob.notes, createdAt: serverJob.created_at, updatedAt: serverJob.updated_at
+    }) : record;
+    const localExisting = PublishJobStore.getById(persisted.id);
+    const job = localExisting ? PublishJobStore.update(localExisting.id, persisted) : PublishJobStore.create(persisted);
     appState.selectedPublishJobId = job.id;
     if ([PUBLISH_STATUS.DRAFT, PUBLISH_STATUS.READY].includes(job.status)) ApprovalService.markReady(job.contentId);
     if ([PUBLISH_STATUS.READY, PUBLISH_STATUS.SCHEDULED].includes(job.status)) ContentStore.update(job.contentId, { status: CONTENT_STATUS.SCHEDULED });
-    if (job.status === PUBLISH_STATUS.PUBLISHED) this.markPublished(job.id, { actualPublishedAt: job.actualPublishedAt, url: job.url, notes: job.notes });
+    if (job.status === PUBLISH_STATUS.PUBLISHED) await this.markPublished(job.id, { actualPublishedAt: job.actualPublishedAt, url: job.url, notes: job.notes }, { skipBackend: Boolean(serverJob) });
     return PublishJobStore.getById(job.id);
   },
-  markPublished(jobId, patch = {}) {
-    const job = PublishJobStore.update(jobId, { ...patch, status: PUBLISH_STATUS.PUBLISHED, actualPublishedAt: patch.actualPublishedAt || now() });
+  async markPublished(jobId, patch = {}, options = {}) {
+    const current = PublishJobStore.getById(jobId);
+    if (!current) return null;
+    const candidate = normalizePublishJob({ ...current, ...patch, status: PUBLISH_STATUS.PUBLISHED, actualPublishedAt: patch.actualPublishedAt || now() });
+    if (!candidate.url) throw new Error("标记 Published 前必须填写发布链接。");
+    let serverJob = null;
+    if (backendWritesEnabled() && !options.skipBackend) {
+      serverJob = await runBackendWrite("publishing.markPublished", () => apiClient.savePublishingTask({
+        id: candidate.id, workspace_id: candidate.workspaceId, content_id: candidate.contentId,
+        platform_version_id: candidate.platformVersionId || null, approval_record_id: candidate.approvalRecordId || null,
+        content_revision: candidate.contentRevision, version_snapshot: candidate.versionSnapshot,
+        platform: candidate.platform, content_type: candidate.contentType, scheduled_at: candidate.scheduledAt,
+        actual_published_at: candidate.actualPublishedAt, status: PUBLISH_STATUS.PUBLISHED,
+        url: candidate.url, notes: candidate.notes, raw: candidate
+      }));
+    }
+    const job = PublishJobStore.update(jobId, serverJob ? {
+      ...candidate, approvalRecordId: serverJob.approval_record_id, platformVersionId: serverJob.platform_version_id,
+      contentRevision: serverJob.content_revision, versionSnapshot: serverJob.version_snapshot,
+      actualPublishedAt: serverJob.actual_published_at, status: serverJob.status, url: serverJob.url, notes: serverJob.notes
+    } : candidate);
     if (!job) return null;
     const content = ContentStore.getById(job.contentId);
     if (content) {
@@ -3277,6 +3600,28 @@ const AnalyticsStore = {
     return record;
   }
 };
+
+async function persistAnalyticsRecord(record, action = "analytics.update") {
+  if (!record || !backendWritesEnabled()) return null;
+  return runBackendWrite(action, () => apiClient.saveAnalytics({
+    id: record.id,
+    workspace_id: record.workspaceId || "default",
+    publishing_task_id: record.publishJobId,
+    content_id: record.contentId,
+    platform: record.platform,
+    content_type: record.contentType,
+    stats_date: record.statsDate,
+    views: record.views,
+    likes: record.likes,
+    comments: record.comments,
+    shares: record.shares,
+    saves: record.saves,
+    followers_gained: record.followersGained,
+    tracking_status: record.trackingStatus,
+    performance_analysis: record.performanceAnalysis,
+    raw: { ...record, sourceSnapshotId: record.trackingHistory?.at(-1)?.snapshotId || "" }
+  }));
+}
 
 const ExperienceStore = {
   ...createCrudStore("experienceItems", normalizeExperience),
@@ -3361,14 +3706,18 @@ const TrackingService = {
     if (!job.actualPublishedAt || !job.url) throw new Error("请先填写实际发布时间和发布链接");
     return job;
   },
-  start(jobId) {
+  async start(jobId) {
     const job = this.ensurePublishedJob(jobId);
     const existing = AnalyticsStore.getByPublishJobId(jobId);
     if (existing?.trackingStartedAt) return existing;
     const content = ContentStore.getById(job.contentId);
+    let serverRecord = null;
+    if (backendWritesEnabled()) serverRecord = await runBackendWrite("tracking.start", () => apiClient.startTracking(jobId));
     const record = AnalyticsStore.upsertForJob(jobId, {
+      id: serverRecord?.id || existing?.id || `analytics_${jobId}`,
+      workspaceId: serverRecord?.workspace_id || "default",
       trackingStatus: TRACKING_STATUS.TRACKING,
-      trackingStartedAt: now(),
+      trackingStartedAt: serverRecord?.raw?.trackingStartedAt || now(),
       sourceTopicId: content?.sourceTopicId || "",
       sourceClusterId: content?.sourceClusterId || "",
       checkpoints: defaultTrackingCheckpoints(job.actualPublishedAt),
@@ -3377,10 +3726,27 @@ const TrackingService = {
     if (content) ContentStore.update(content.id, { status: CONTENT_STATUS.TRACKING });
     return AnalyticsStore.getByPublishJobId(record.publishJobId);
   },
-  updateCheckpoint(jobId, checkpointId, metrics = {}) {
+  async updateCheckpoint(jobId, checkpointId, metrics = {}) {
     const job = this.ensurePublishedJob(jobId);
-    const record = AnalyticsStore.getByPublishJobId(jobId) || this.start(jobId);
+    const record = AnalyticsStore.getByPublishJobId(jobId) || await this.start(jobId);
     const normalizedMetrics = normalizeTrackingMetrics({ ...metrics, updatedAt: now() });
+    const snapshotId = uid("tracking_snapshot");
+    let serverSnapshot = null;
+    if (backendWritesEnabled()) {
+      serverSnapshot = await runBackendWrite("tracking.snapshot", () => apiClient.saveTrackingSnapshot({
+        id: snapshotId,
+        workspace_id: record.workspaceId || "default",
+        publishing_task_id: job.id,
+        analytics_record_id: record.id,
+        checkpoint_id: checkpointId,
+        label: TRACKING_CHECKPOINTS.find(point => point.id === checkpointId)?.label || checkpointId,
+        due_at: record.checkpoints?.find(point => point.id === checkpointId)?.dueAt || "",
+        status: CHECKPOINT_STATUS.DONE,
+        stats_date: normalizedMetrics.statsDate,
+        metrics: normalizedMetrics,
+        raw: { source: "PublishingCenter" }
+      }));
+    }
     const checkpoints = (record.checkpoints || defaultTrackingCheckpoints(job.actualPublishedAt)).map(point =>
       point.id === checkpointId
         ? { ...point, status: CHECKPOINT_STATUS.DONE, metrics: normalizedMetrics, updatedAt: now() }
@@ -3392,15 +3758,35 @@ const TrackingService = {
     return AnalyticsStore.upsertForJob(jobId, {
       ...normalizedMetrics,
       checkpoints,
+      trackingHistory: [...(record.trackingHistory || []), {
+        snapshotId: serverSnapshot?.id || snapshotId,
+        id: checkpointId,
+        label: serverSnapshot?.label || TRACKING_CHECKPOINTS.find(point => point.id === checkpointId)?.label || checkpointId,
+        status: CHECKPOINT_STATUS.DONE,
+        metrics: normalizedMetrics,
+        sequence: serverSnapshot?.sequence || ((record.trackingHistory || []).filter(item => item.id === checkpointId).length + 1),
+        recordedAt: serverSnapshot?.recorded_at || now()
+      }],
       trackingStatus,
       trackingStartedAt: record.trackingStartedAt || now(),
       checkpointChanges: this.calculateChanges(checkpoints),
       lastMetricsAt: now()
     });
   },
-  skipCheckpoint(jobId, checkpointId) {
+  async skipCheckpoint(jobId, checkpointId) {
     const job = this.ensurePublishedJob(jobId);
-    const record = AnalyticsStore.getByPublishJobId(jobId) || this.start(jobId);
+    const record = AnalyticsStore.getByPublishJobId(jobId) || await this.start(jobId);
+    const snapshotId = uid("tracking_snapshot");
+    let serverSnapshot = null;
+    if (backendWritesEnabled()) {
+      serverSnapshot = await runBackendWrite("tracking.skip", () => apiClient.saveTrackingSnapshot({
+        id: snapshotId, workspace_id: record.workspaceId || "default", publishing_task_id: job.id,
+        analytics_record_id: record.id, checkpoint_id: checkpointId,
+        label: TRACKING_CHECKPOINTS.find(point => point.id === checkpointId)?.label || checkpointId,
+        due_at: record.checkpoints?.find(point => point.id === checkpointId)?.dueAt || "",
+        status: CHECKPOINT_STATUS.SKIPPED, stats_date: localDateString(), metrics: {}, raw: { source: "PublishingCenter" }
+      }));
+    }
     const checkpoints = (record.checkpoints || defaultTrackingCheckpoints(job.actualPublishedAt)).map(point =>
       point.id === checkpointId ? { ...point, status: CHECKPOINT_STATUS.SKIPPED, updatedAt: now() } : point
     );
@@ -3409,6 +3795,12 @@ const TrackingService = {
       : TRACKING_STATUS.TRACKING;
     return AnalyticsStore.upsertForJob(jobId, {
       checkpoints,
+      trackingHistory: [...(record.trackingHistory || []), {
+        snapshotId: serverSnapshot?.id || snapshotId, id: checkpointId,
+        label: serverSnapshot?.label || checkpointId, status: CHECKPOINT_STATUS.SKIPPED,
+        metrics: null, sequence: serverSnapshot?.sequence || ((record.trackingHistory || []).filter(item => item.id === checkpointId).length + 1),
+        recordedAt: serverSnapshot?.recorded_at || now()
+      }],
       trackingStatus,
       trackingStartedAt: record.trackingStartedAt || now(),
       checkpointChanges: this.calculateChanges(checkpoints)
@@ -3481,12 +3873,14 @@ const TrackingService = {
         aiReview = "";
       }
     }
-    return AnalyticsStore.upsertForJob(jobId, {
+    const saved = AnalyticsStore.upsertForJob(jobId, {
       performanceAnalysis: local,
       performanceAnalysisUpdatedAt: now(),
       aiPerformanceReview: aiReview,
       aiPerformanceReviewUpdatedAt: aiReview ? now() : record.aiPerformanceReviewUpdatedAt
     });
+    await persistAnalyticsRecord(saved, "analytics.performanceReview");
+    return saved;
   }
 };
 
@@ -3567,20 +3961,22 @@ const LearningService = {
         aiSummary = "";
       }
     }
-    return AnalyticsStore.upsertForJob(jobId, {
+    const saved = AnalyticsStore.upsertForJob(jobId, {
       performanceAnalysis: local.summary,
       performanceAnalysisUpdatedAt: now(),
       aiPerformanceReview: aiSummary || record.aiPerformanceReview,
       aiPerformanceReviewUpdatedAt: aiSummary ? now() : record.aiPerformanceReviewUpdatedAt
     });
+    await persistAnalyticsRecord(saved, "learning.performanceReview");
+    return saved;
   },
-  saveExperience(jobId) {
+  async saveExperience(jobId) {
     const record = this.enrichedRecordByJob(jobId);
     if (!record || !this.hasTrackingData(record)) throw new Error("请先完成追踪数据并生成复盘");
     const local = this.buildLocalReview(record);
     const content = record.content || ContentStore.getById(record.contentId);
     const topic = record.topic || (content?.sourceTopicId ? TopicStore.getById(content.sourceTopicId) : null);
-    return ExperienceStore.upsertExperience({
+    const experience = ExperienceStore.upsertExperience({
       publishJobId: record.publishJobId,
       analyticsRecordId: record.id,
       contentId: record.contentId,
@@ -3609,6 +4005,33 @@ const LearningService = {
       },
       reviewedAt: now()
     });
+    if (backendWritesEnabled()) {
+      const job = record.job || PublishJobStore.getById(jobId);
+      const serverExperience = await runBackendWrite("experience.write", () => apiClient.saveExperience({
+        id: experience.id,
+        workspace_id: experience.workspaceId || "default",
+        content_id: experience.contentId || null,
+        topic_id: experience.topicId || null,
+        platform_version_id: job?.platformVersionId || null,
+        publishing_task_id: experience.publishJobId || null,
+        analytics_record_id: experience.analyticsRecordId || null,
+        platform: experience.platform,
+        content_type: experience.contentType,
+        topic_category: experience.topicCategory,
+        performance_result: experience.performanceResult,
+        effective_practices: experience.effectivePractices,
+        improvements: experience.improvements,
+        review_summary: experience.reviewSummary,
+        reviewed_at: experience.reviewedAt,
+        raw: experience
+      }));
+      if (serverExperience && serverExperience.id !== experience.id) {
+        db.experienceItems = db.experienceItems.filter(item => item.id !== experience.id);
+        db.experienceItems.unshift(normalizeExperience({ ...experience, id: serverExperience.id }));
+        saveDb();
+      }
+    }
+    return experience;
   },
   referencesForContent(contentId, platform = "") {
     const content = ContentStore.getById(contentId);
@@ -3777,15 +4200,18 @@ const KnowledgeRetrieval = {
 };
 
 const KnowledgeBrainService = {
-  backendEnabled() { return normalizeBackendApiConfig(db.settings?.backendApiConfig).enabled; },
+  backendEnabled() { return backendWritesEnabled(); },
   async save(payload, id = "") {
+    const previous = id ? KnowledgeStore.getById(id) : null;
     const record = id ? KnowledgeStore.update(id, payload) : KnowledgeStore.create(payload);
     if (!record || !this.backendEnabled()) return record;
     try {
-      await backendApiProvider.saveKnowledge(record);
-      updateBackendStatus({ lastSuccess: true, lastAction: "saveKnowledge", lastError: "", lastSummary: `${record.knowledgeType} · ${record.title}` });
+      await runBackendWrite("knowledge.write", () => backendApiProvider.saveKnowledge(record));
     } catch (error) {
-      updateBackendStatus({ lastSuccess: false, lastAction: "saveKnowledge", lastError: error.message || String(error), lastSummary: "Knowledge 已保存在 localStorage，等待后端恢复" });
+      if (previous) upsertById(db.knowledgeItems, previous);
+      else db.knowledgeItems = db.knowledgeItems.filter(item => item.id !== record.id);
+      saveDb();
+      throw error;
     }
     return record;
   },
@@ -3793,10 +4219,10 @@ const KnowledgeBrainService = {
     const record = KnowledgeStore.update(id, { status: KNOWLEDGE_STATUS.ARCHIVED });
     if (!record || !this.backendEnabled()) return record;
     try {
-      await backendApiProvider.archiveKnowledge(id);
-      updateBackendStatus({ lastSuccess: true, lastAction: "archiveKnowledge", lastError: "", lastSummary: record.title });
+      await runBackendWrite("knowledge.archive", () => backendApiProvider.archiveKnowledge(id));
     } catch (error) {
-      updateBackendStatus({ lastSuccess: false, lastAction: "archiveKnowledge", lastError: error.message || String(error), lastSummary: "归档状态已保存在 localStorage" });
+      KnowledgeStore.update(id, { status: KNOWLEDGE_STATUS.ACTIVE });
+      throw error;
     }
     return record;
   },
@@ -3804,15 +4230,17 @@ const KnowledgeBrainService = {
     return this.save({ status: KNOWLEDGE_STATUS.ACTIVE }, id);
   },
   async saveCreatorMemory(payload) {
+    const previous = normalizeCreatorMemory(db.settings.creatorMemory);
     const memory = normalizeCreatorMemory({ ...db.settings.creatorMemory, ...payload, updatedAt: now() });
     db.settings.creatorMemory = memory;
     saveDb();
     if (!this.backendEnabled()) return memory;
     try {
-      await backendApiProvider.saveCreatorMemory(memory);
-      updateBackendStatus({ lastSuccess: true, lastAction: "saveCreatorMemory", lastError: "", lastSummary: "Creator Memory 已同步" });
+      await runBackendWrite("creatorMemory.write", () => backendApiProvider.saveCreatorMemory(memory));
     } catch (error) {
-      updateBackendStatus({ lastSuccess: false, lastAction: "saveCreatorMemory", lastError: error.message || String(error), lastSummary: "Creator Memory 已保存在 localStorage" });
+      db.settings.creatorMemory = previous;
+      saveDb();
+      throw error;
     }
     return memory;
   }
@@ -4850,12 +5278,13 @@ window.TaskExecutor = TaskExecutor;
 // =========================
 function createInitialData() {
   return {
-    schemaVersion: 5,
+    schemaVersion: 7,
     contentItems: createMockContents(),
     topics: createMockTopics(),
     topicClusters: [],
     dailyBriefs: [],
     generatedAssets: [],
+    platformVersions: [],
     archivedGeneratedAssets: [],
     videoProjects: [],
     publishJobs: [],
@@ -6356,11 +6785,11 @@ function renderSettingsV2() {
     </div>
     <div class="card">
       <h3>Backend & Database</h3>
-      <p>Phase 7 使用 FastAPI + PostgreSQL。localStorage 会继续保留为本地备份；API Key 和平台 Token 不进入前端代码。</p>
+      <p>后端可用时 PostgreSQL 是权威数据源；localStorage 只作为页面缓存、离线 fallback 和待恢复迁移区，不再在每次保存时全量回灌数据库。</p>
       <div class="form-grid">
         <div><label>启用 Backend API</label><select id="backendEnabled"><option value="false" ${!backendConfig.enabled ? "selected" : ""}>关闭</option><option value="true" ${backendConfig.enabled ? "selected" : ""}>启用</option></select></div>
         <div><label>Backend Base URL</label><input id="backendBaseUrl" value="${escapeHtml(backendConfig.baseUrl)}" placeholder="http://localhost:8000" /></div>
-        <div><label>保存时同步</label><select id="backendSyncOnSave"><option value="true" ${backendConfig.syncOnSave ? "selected" : ""}>启用</option><option value="false" ${!backendConfig.syncOnSave ? "selected" : ""}>关闭</option></select></div>
+        <div><label>实体级写入同步</label><select id="backendSyncOnSave"><option value="true" ${backendConfig.syncOnSave ? "selected" : ""}>启用</option><option value="false" ${!backendConfig.syncOnSave ? "selected" : ""}>关闭</option></select></div>
       </div>
       <div class="toolbar" style="margin-top:12px">
         <button class="btn" data-save-backend-settings>保存后端设置</button>
@@ -6376,6 +6805,9 @@ function renderSettingsV2() {
       <h3>Backend 状态</h3>
       ${kv("启用状态", backendConfig.enabled ? "已启用" : "未启用")}
       ${kv("Base URL", backendConfig.baseUrl)}
+      ${kv("Authoritative Source", backendStatus.authority === "postgresql" ? "PostgreSQL" : "localStorage fallback")}
+      ${kv("待恢复数据", backendStatus.pendingRecovery ? "有，请先迁移再拉取" : "无")}
+      ${kv("最近数据库拉取", backendStatus.lastPulledAt ? new Date(backendStatus.lastPulledAt).toLocaleString("zh-CN") : "—")}
       ${kv("最近动作", backendStatus.lastAction || "—")}
       ${kv("最近成功", backendStatus.updatedAt ? (backendStatus.lastSuccess ? "成功" : "失败") : "暂无")}
       ${kv("最近摘要", backendStatus.lastSummary || "—")}
@@ -6895,19 +7327,23 @@ document.addEventListener("click", async event => {
     return render();
   }
   if (target.dataset.submitReview) {
-    ApprovalService.submit(target.dataset.submitReview, document.getElementById("approvalNotes")?.value.trim() || "");
+    try { await ApprovalService.submit(target.dataset.submitReview, document.getElementById("approvalNotes")?.value.trim() || ""); }
+    catch (error) { alert(error.message || "提交审核失败。"); }
     return render();
   }
   if (target.dataset.requestChanges) {
-    ApprovalService.requestChanges(target.dataset.requestChanges, document.getElementById("approvalNotes")?.value.trim() || "需要修改后重新提交。");
+    try { await ApprovalService.requestChanges(target.dataset.requestChanges, document.getElementById("approvalNotes")?.value.trim() || "需要修改后重新提交。"); }
+    catch (error) { alert(error.message || "保存审核意见失败。"); }
     return render();
   }
   if (target.dataset.approveContent) {
-    ApprovalService.approve(target.dataset.approveContent, document.getElementById("approvalNotes")?.value.trim() || "人工审核通过。");
+    try { await ApprovalService.approve(target.dataset.approveContent, document.getElementById("approvalNotes")?.value.trim() || "人工审核通过。"); }
+    catch (error) { alert(error.message || "批准失败。"); }
     return render();
   }
   if (target.dataset.revokeApproval) {
-    ApprovalService.revoke(target.dataset.revokeApproval, document.getElementById("approvalNotes")?.value.trim() || "人工撤销批准。");
+    try { await ApprovalService.revoke(target.dataset.revokeApproval, document.getElementById("approvalNotes")?.value.trim() || "人工撤销批准。"); }
+    catch (error) { alert(error.message || "撤销批准失败。"); }
     return render();
   }
   if (target.dataset.studioAddPublish) {
@@ -6915,7 +7351,7 @@ document.addEventListener("click", async event => {
     const draft = ContentStudioService.collectDraftFromForm(contentId);
     const saved = ContentStudioService.saveDraft(contentId, draft);
     try {
-      const job = PublishingService.createOrUpdate({
+      const job = await PublishingService.createOrUpdate({
         contentId,
         platform: saved.studioPlatform,
         contentType: saved.studioFormat,
@@ -6973,7 +7409,7 @@ document.addEventListener("click", async event => {
     const existingId = appState.editPublishJobId === "__new__" ? "" : (appState.editPublishJobId || appState.selectedPublishJobId || "");
     let job;
     try {
-      job = PublishingService.createOrUpdate(payload, existingId);
+      job = await PublishingService.createOrUpdate(payload, existingId);
     } catch (error) {
       const content = ContentStore.getById(payload.contentId);
       if (content) ContentStore.update(content.id, { approvalInvalidationReason: error.message || "该内容尚未完成最终审核。" });
@@ -6990,16 +7426,20 @@ document.addEventListener("click", async event => {
   if (target.dataset.cancelPublish !== undefined) { appState.editPublishJobId = null; return render(); }
   if (target.dataset.removeJob) { PublishJobStore.remove(target.dataset.removeJob); return render(); }
   if (target.dataset.markPublished) {
-    PublishingService.markPublished(target.dataset.markPublished, {
-      actualPublishedAt: document.getElementById("publishActualAt")?.value || now(),
-      url: document.getElementById("publishUrl")?.value.trim() || "",
-      notes: document.getElementById("publishNotes")?.value.trim() || ""
-    });
+    try {
+      await PublishingService.markPublished(target.dataset.markPublished, {
+        actualPublishedAt: document.getElementById("publishActualAt")?.value || now(),
+        url: document.getElementById("publishUrl")?.value.trim() || "",
+        notes: document.getElementById("publishNotes")?.value.trim() || ""
+      });
+    } catch (error) {
+      alert(error.message || "标记发布失败。");
+    }
     return render();
   }
   if (target.dataset.startTracking) {
     try {
-      const record = TrackingService.start(target.dataset.startTracking);
+      const record = await TrackingService.start(target.dataset.startTracking);
       appState.selectedAnalyticsJobId = record.publishJobId;
     } catch (error) {
       alert(error.message || "启动追踪失败。");
@@ -7008,7 +7448,7 @@ document.addEventListener("click", async event => {
   }
   if (target.dataset.updateTracking) {
     try {
-      const record = TrackingService.updateCheckpoint(target.dataset.updateTracking, document.getElementById("trackingCheckpointId")?.value || "24h", {
+      const record = await TrackingService.updateCheckpoint(target.dataset.updateTracking, document.getElementById("trackingCheckpointId")?.value || "24h", {
         statsDate: localDateString(),
         views: Number(document.getElementById("trackingViews")?.value) || 0,
         likes: Number(document.getElementById("trackingLikes")?.value) || 0,
@@ -7025,7 +7465,7 @@ document.addEventListener("click", async event => {
   }
   if (target.dataset.skipTracking) {
     try {
-      const record = TrackingService.skipCheckpoint(target.dataset.skipTracking, document.getElementById("trackingCheckpointId")?.value || "24h");
+      const record = await TrackingService.skipCheckpoint(target.dataset.skipTracking, document.getElementById("trackingCheckpointId")?.value || "24h");
       appState.selectedAnalyticsJobId = record.publishJobId;
     } catch (error) {
       alert(error.message || "跳过检查点失败。");
@@ -7052,7 +7492,7 @@ document.addEventListener("click", async event => {
   }
   if (target.dataset.saveExperience) {
     try {
-      LearningService.saveExperience(target.dataset.saveExperience);
+      await LearningService.saveExperience(target.dataset.saveExperience);
     } catch (error) {
       alert(error.message || "保存经验失败。");
     }
@@ -7093,6 +7533,35 @@ document.addEventListener("click", async event => {
       shares: Number(document.getElementById("analyticsShares").value) || 0,
       followersGained: Number(document.getElementById("analyticsFollowers").value) || 0
     });
+    if (backendWritesEnabled()) {
+      try {
+        const serverRecord = await runBackendWrite("analytics.update", () => apiClient.saveAnalytics({
+          id: record.id,
+          workspace_id: record.workspaceId || "default",
+          publishing_task_id: record.publishJobId,
+          content_id: record.contentId,
+          platform: record.platform,
+          content_type: record.contentType,
+          stats_date: record.statsDate,
+          views: record.views,
+          likes: record.likes,
+          comments: record.comments,
+          shares: record.shares,
+          saves: record.saves,
+          followers_gained: record.followersGained,
+          tracking_status: record.trackingStatus,
+          performance_analysis: record.performanceAnalysis,
+          raw: record
+        }));
+        if (serverRecord && serverRecord.id !== record.id) {
+          db.analyticsRecords = db.analyticsRecords.filter(item => item.id !== record.id);
+          db.analyticsRecords.unshift(normalizeAnalyticsRecord({ ...record, id: serverRecord.id }));
+          saveDb();
+        }
+      } catch (error) {
+        alert(error.message || "Analytics 保存被后端拒绝。");
+      }
+    }
     appState.selectedAnalyticsJobId = record.publishJobId;
     return render();
   }
@@ -7129,27 +7598,43 @@ document.addEventListener("click", async event => {
       linkedContentIds: document.getElementById("knowledgeRelatedContent").value ? [document.getElementById("knowledgeRelatedContent").value] : []
     };
     if (!payload.title) return alert("请填写知识标题。");
-    await KnowledgeBrainService.save(payload, appState.editKnowledgeId || "");
-    appState.editKnowledgeId = null;
+    try {
+      await KnowledgeBrainService.save(payload, appState.editKnowledgeId || "");
+      appState.editKnowledgeId = null;
+    } catch (error) {
+      alert(error.message || "Knowledge 保存被后端拒绝。");
+    }
     return render();
   }
   if (target.dataset.saveCreatorMemory !== undefined) {
-    await KnowledgeBrainService.saveCreatorMemory({
-      accountPositioning: document.getElementById("creatorAccountPositioning").value.trim(),
-      targetAudience: document.getElementById("creatorTargetAudience").value.trim(),
-      contentPillars: splitTags(document.getElementById("creatorContentPillars").value),
-      toneStyle: document.getElementById("creatorToneStyle").value.trim(),
-      preferredFormats: splitTags(document.getElementById("creatorPreferredFormats").value),
-      topicsToAvoid: splitTags(document.getElementById("creatorTopicsToAvoid").value),
-      platformPreferences: splitTags(document.getElementById("creatorPlatformPreferences").value)
-    });
+    try {
+      await KnowledgeBrainService.saveCreatorMemory({
+        accountPositioning: document.getElementById("creatorAccountPositioning").value.trim(),
+        targetAudience: document.getElementById("creatorTargetAudience").value.trim(),
+        contentPillars: splitTags(document.getElementById("creatorContentPillars").value),
+        toneStyle: document.getElementById("creatorToneStyle").value.trim(),
+        preferredFormats: splitTags(document.getElementById("creatorPreferredFormats").value),
+        topicsToAvoid: splitTags(document.getElementById("creatorTopicsToAvoid").value),
+        platformPreferences: splitTags(document.getElementById("creatorPlatformPreferences").value)
+      });
+    } catch (error) {
+      alert(error.message || "Creator Memory 保存被后端拒绝。");
+    }
     return render();
   }
   if (target.dataset.editKnowledge) { appState.editKnowledgeId = target.dataset.editKnowledge; return render(); }
   if (target.dataset.cancelKnowledge !== undefined) { appState.editKnowledgeId = null; return render(); }
-  if (target.dataset.archiveKnowledge) { await KnowledgeBrainService.archive(target.dataset.archiveKnowledge); if (appState.editKnowledgeId === target.dataset.archiveKnowledge) appState.editKnowledgeId = null; return render(); }
-  if (target.dataset.restoreKnowledge) { await KnowledgeBrainService.restore(target.dataset.restoreKnowledge); return render(); }
-  if (target.dataset.removeKnowledge) { await KnowledgeBrainService.archive(target.dataset.removeKnowledge); return render(); }
+  if (target.dataset.archiveKnowledge || target.dataset.restoreKnowledge || target.dataset.removeKnowledge) {
+    const knowledgeId = target.dataset.archiveKnowledge || target.dataset.restoreKnowledge || target.dataset.removeKnowledge;
+    try {
+      if (target.dataset.restoreKnowledge) await KnowledgeBrainService.restore(knowledgeId);
+      else await KnowledgeBrainService.archive(knowledgeId);
+      if (appState.editKnowledgeId === knowledgeId) appState.editKnowledgeId = null;
+    } catch (error) {
+      alert(error.message || "Knowledge 状态更新被后端拒绝。");
+    }
+    return render();
+  }
   if (target.dataset.saveFeedSource !== undefined) {
     db.settings.feedCorsProxyUrl = document.getElementById("feedCorsProxyUrl").value.trim();
     const payload = collectFeedSourceForm();
@@ -7213,6 +7698,8 @@ document.addEventListener("click", async event => {
       updatedAt: now()
     });
     saveDb();
+    backendBootstrapDone = false;
+    if (db.settings.backendApiConfig.enabled) await bootstrapBackendCoreData();
     return render();
   }
   if (target.dataset.testBackendApi !== undefined) {
@@ -7234,7 +7721,7 @@ document.addEventListener("click", async event => {
   if (target.dataset.importLocalstorageBackend !== undefined) {
     try {
       const summary = await backendApiProvider.importLocalStorage(db);
-      updateBackendStatus({ lastSuccess: true, lastAction: "importLocalStorage", lastError: "", lastSummary: JSON.stringify(summary) });
+      updateBackendStatus({ lastSuccess: true, lastAction: "importLocalStorage", lastError: "", lastSummary: JSON.stringify(summary), authority: "postgresql" });
     } catch (error) {
       updateBackendStatus({ lastSuccess: false, lastAction: "importLocalStorage", lastError: error.message || String(error), lastSummary: "导入失败，localStorage 未丢失" });
     }
@@ -7243,7 +7730,9 @@ document.addEventListener("click", async event => {
   if (target.dataset.migrateBusinessData !== undefined) {
     try {
       const summary = await backendApiProvider.importAllLocalStorage(db);
-      updateBackendStatus({ lastSuccess: true, lastAction: "migrateBusinessData", lastError: "", lastSummary: JSON.stringify(summary) });
+      const snapshot = await backendApiProvider.pullCoreData();
+      mergeBackendCoreData(snapshot, { authoritative: true });
+      updateBackendStatus({ lastSuccess: true, lastAction: "migrateBusinessData", lastError: "", lastSummary: JSON.stringify(summary), authority: "postgresql", pendingRecovery: false, lastPulledAt: now() });
     } catch (error) {
       updateBackendStatus({ lastSuccess: false, lastAction: "migrateBusinessData", lastError: error.message || String(error), lastSummary: "业务数据迁移失败，localStorage 未丢失" });
     }
@@ -7252,8 +7741,8 @@ document.addEventListener("click", async event => {
   if (target.dataset.pullBackendCore !== undefined) {
     try {
       const snapshot = await backendApiProvider.pullCoreData();
-      mergeBackendCoreData(snapshot);
-      updateBackendStatus({ lastSuccess: true, lastAction: "pullCoreData", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Contents ${snapshot.contents.length} · Publishing ${snapshot.publishingTasks?.length || 0} · Analytics ${snapshot.analyticsRecords?.length || 0}` });
+      mergeBackendCoreData(snapshot, { authoritative: true });
+      updateBackendStatus({ lastSuccess: true, lastAction: "pullCoreData", lastError: "", lastSummary: `Topics ${snapshot.topics.length} · Contents ${snapshot.contents.length} · Publishing ${snapshot.publishingTasks?.length || 0} · Analytics ${snapshot.analyticsRecords?.length || 0}`, authority: "postgresql", pendingRecovery: false, lastPulledAt: now() });
     } catch (error) {
       updateBackendStatus({ lastSuccess: false, lastAction: "pullCoreData", lastError: error.message || String(error), lastSummary: "读取失败，继续使用本地数据" });
     }

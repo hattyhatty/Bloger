@@ -119,6 +119,61 @@ def test_knowledge_brain_retrieval_archive_and_creator_memory(client):
     assert {"knowledge_created", "knowledge_updated", "knowledge_archived", "creator_memory_updated"} <= activity_actions
 
 
+def test_knowledge_and_workspace_integrity(client):
+    client.post("/api/topics", json={"id": "topic_other", "workspace_id": "other", "title": "Other Topic"})
+    cross_workspace = client.post("/api/contents", json={
+        "id": "content_cross",
+        "workspace_id": "default",
+        "topic_id": "topic_other",
+        "title": "Cross workspace content",
+    })
+    assert cross_workspace.status_code == 409
+
+    missing_source_fact = client.post("/api/knowledge", json={
+        "id": "fact_without_source",
+        "title": "Unverified claim",
+        "knowledge_type": "Fact",
+        "body": "This must not be stored as a verified fact.",
+    })
+    assert missing_source_fact.status_code == 409
+    assert client.get("/api/knowledge", params={"workspace_id": "default"}).json() == []
+
+    inference = client.post("/api/knowledge", json={
+        "id": "inference_ok",
+        "title": "A hypothesis",
+        "knowledge_type": "Inference",
+        "body": "Needs verification.",
+        "confidence": 45,
+    })
+    assert inference.status_code == 200
+    deleted = client.delete("/api/knowledge/inference_ok").json()
+    assert deleted == {"ok": True, "archived": True}
+    assert client.get("/api/knowledge", params={"status": "ARCHIVED"}).json()[0]["id"] == "inference_ok"
+
+
+def test_unapproved_content_cannot_enter_publishing(client):
+    client.post("/api/contents", json={"id": "content_unapproved", "title": "Unapproved"})
+    client.post("/api/platform-versions", json={
+        "id": "pv_unapproved",
+        "content_id": "content_unapproved",
+        "platform": "小红书",
+        "content_type": "短帖",
+        "title": "Title",
+        "body": "Body",
+    })
+    response = client.post("/api/publishing-tasks", json={
+        "id": "job_unapproved",
+        "content_id": "content_unapproved",
+        "platform_version_id": "pv_unapproved",
+        "platform": "小红书",
+        "content_type": "短帖",
+        "scheduled_at": "2026-09-25T19:00",
+        "status": "READY",
+    })
+    assert response.status_code == 409
+    assert client.get("/api/publishing-tasks").json() == []
+
+
 def test_localstorage_import_is_idempotent(client):
     payload = {
         "topics": [{"id": "topic_1", "title": "Topic", "category": "GPT"}],
@@ -138,76 +193,117 @@ def test_localstorage_import_is_idempotent(client):
 
 def test_business_workflow_crud_and_activity(client):
     client.post("/api/topics", json={"id": "topic_biz", "title": "Business Topic", "category": "AI Agent"})
-    client.post("/api/contents", json={"id": "content_biz", "topic_id": "topic_biz", "title": "Business Content", "status": "APPROVED"})
+    content_payload = {
+        "id": "content_biz",
+        "topic_id": "topic_biz",
+        "title": "Business Content",
+        "status": "DRAFT",
+        "platform": "抖音",
+        "content_type": "口播稿",
+        "source_url": "https://example.com/source",
+        "raw": {"draftTitle": "标题", "draftBody": "脚本", "studioPlatform": "抖音", "studioFormat": "口播稿"},
+    }
+    created_content = client.post("/api/contents", json=content_payload).json()
+    assert created_content["revision"] == 1
+    assert created_content["content_hash"]
 
     platform_version = {
-        "id": "pv_content_biz_抖音_口播稿",
+        "id": "pv_content_biz_douyin_r1",
         "content_id": "content_biz",
         "platform": "抖音",
         "content_type": "口播稿",
         "title": "标题",
+        "hook": "Hook",
         "body": "脚本",
-        "status": "Approved",
+        "tags": ["AI"],
+        "status": "DRAFT",
+        "raw": {"sourceUrl": "https://example.com/source"},
     }
-    assert client.post("/api/platform-versions", json=platform_version).status_code == 200
+    saved_version = client.post("/api/platform-versions", json=platform_version).json()
+    assert saved_version["revision"] == 1
 
     approval = {
         "id": "approval_content_biz",
         "content_id": "content_biz",
-        "status": "Approved",
+        "platform_version_id": "pv_content_biz_douyin_r1",
+        "status": "APPROVED",
         "notes": "通过",
         "approved_at": "2026-08-15T19:00:00Z",
-        "snapshot": {"title": "Business Content"},
     }
-    assert client.post("/api/approvals", json=approval).json()["status"] == "Approved"
+    approved = client.post("/api/approvals", json=approval).json()
+    assert approved["status"] == "APPROVED"
+    assert approved["platform_version_id"] == saved_version["id"]
+    assert approved["snapshot"]["contentHash"] == saved_version["content_hash"]
+
+    duplicate_approval = client.post("/api/approvals", json={**approval, "id": "approval_retry"}).json()
+    assert duplicate_approval["id"] == "approval_content_biz"
+
+    immutable_change = client.put("/api/platform-versions/pv_content_biz_douyin_r1", json={**platform_version, "body": "静默改写"})
+    assert immutable_change.status_code == 409
+    client.post("/api/contents", json={"id": "content_other", "title": "Other Content"})
+    rebound_version = client.put("/api/platform-versions/pv_content_biz_douyin_r1", json={**platform_version, "content_id": "content_other"})
+    assert rebound_version.status_code == 409
 
     publishing = {
         "id": "pub_biz",
         "content_id": "content_biz",
-        "platform_version_id": "pv_content_biz_抖音_口播稿",
+        "platform_version_id": "pv_content_biz_douyin_r1",
         "platform": "抖音",
         "content_type": "口播稿",
         "scheduled_at": "2026-08-16T19:00",
-        "status": "Published",
+        "status": "READY",
+    }
+    ready = client.post("/api/publishing-tasks", json=publishing).json()
+    assert ready["status"] == "READY"
+    assert ready["approval_record_id"] == approved["id"]
+    assert ready["version_snapshot"]["contentHash"] == saved_version["content_hash"]
+    duplicate_publish = client.post("/api/publishing-tasks", json={**publishing, "id": "pub_retry"}).json()
+    assert duplicate_publish["id"] == "pub_biz"
+
+    assert client.post("/api/publishing-tasks/pub_biz/tracking/start").status_code == 409
+    assert client.put("/api/publishing-tasks/pub_biz", json={**publishing, "status": "PUBLISHED"}).status_code == 409
+    published_payload = {
+        **publishing,
+        "status": "PUBLISHED",
+        "actual_published_at": "2026-08-16T19:05:00Z",
         "url": "https://example.com/post",
     }
-    assert client.post("/api/publishing-tasks", json=publishing).json()["status"] == "Published"
+    published = client.put("/api/publishing-tasks/pub_biz", json=published_payload).json()
+    assert published["status"] == "PUBLISHED"
 
-    analytics = {
-        "id": "analytics_pub_biz",
-        "publishing_task_id": "pub_biz",
-        "content_id": "content_biz",
-        "platform": "抖音",
-        "content_type": "口播稿",
-        "stats_date": "2026-08-17",
-        "views": 1000,
-        "likes": 120,
-        "comments": 18,
-        "shares": 25,
-        "saves": 40,
-        "followers_gained": 9,
-        "tracking_status": "Tracking",
-    }
-    assert client.post("/api/analytics-records", json=analytics).json()["views"] == 1000
+    analytics = client.post("/api/publishing-tasks/pub_biz/tracking/start").json()
+    assert analytics["tracking_status"] == "TRACKING"
+    assert client.post("/api/publishing-tasks/pub_biz/tracking/start").json()["id"] == analytics["id"]
 
     snapshot = {
-        "id": "track_analytics_pub_biz_24h",
+        "id": "track_analytics_pub_biz_24h_v1",
         "publishing_task_id": "pub_biz",
-        "analytics_record_id": "analytics_pub_biz",
+        "analytics_record_id": analytics["id"],
         "checkpoint_id": "24h",
         "label": "发布后 24 小时",
         "status": "DONE",
         "metrics": {"views": 1000, "likes": 120},
     }
-    assert client.post("/api/tracking-snapshots", json=snapshot).json()["status"] == "DONE"
+    first_snapshot = client.post("/api/tracking-snapshots", json=snapshot).json()
+    assert first_snapshot["sequence"] == 1
+    second_snapshot = client.post("/api/tracking-snapshots", json={
+        **snapshot,
+        "id": "track_analytics_pub_biz_24h_v2",
+        "metrics": {"views": 1400, "likes": 180},
+    }).json()
+    assert second_snapshot["sequence"] == 2
+    assert client.put("/api/tracking-snapshots/track_analytics_pub_biz_24h_v1", json={**snapshot, "metrics": {"views": 9999}}).status_code == 409
+    analytics_latest = client.get("/api/analytics-records").json()[0]
+    assert analytics_latest["views"] == 1400
+    assert len(client.get("/api/tracking-snapshots").json()) == 2
 
     experience = {
         "id": "exp_pub_biz",
         "content_id": "content_biz",
         "topic_id": "topic_biz",
-        "platform_version_id": "pv_content_biz_抖音_口播稿",
+        "platform_version_id": "pv_content_biz_douyin_r1",
         "publishing_task_id": "pub_biz",
-        "analytics_record_id": "analytics_pub_biz",
+        "analytics_record_id": analytics["id"],
         "platform": "抖音",
         "content_type": "口播稿",
         "topic_category": "AI Agent",
@@ -216,14 +312,29 @@ def test_business_workflow_crud_and_activity(client):
         "improvements": ["补充案例"],
     }
     assert client.post("/api/experience-records", json=experience).json()["performance_result"] == "high"
+    assert client.post("/api/experience-records", json={**experience, "id": "exp_retry"}).json()["id"] == "exp_pub_biz"
 
     assert client.get("/api/publishing-tasks").json()[0]["content_id"] == "content_biz"
-    assert client.get("/api/tracking-snapshots").json()[0]["analytics_record_id"] == "analytics_pub_biz"
+    assert client.get("/api/tracking-snapshots").json()[0]["analytics_record_id"] == analytics["id"]
     assert client.get("/api/experience-records").json()[0]["topic_id"] == "topic_biz"
 
+    changed_content = client.put("/api/contents/content_biz", json={
+        **content_payload,
+        "raw": {**content_payload["raw"], "draftBody": "批准后修改的新脚本"},
+    }).json()
+    assert changed_content["revision"] == 2
+    assert client.get("/api/approvals").json()[0]["status"] == "DRAFT"
+    historical_job = client.get("/api/publishing-tasks").json()[0]
+    assert historical_job["version_snapshot"]["body"] == "脚本"
+    historical_revision = historical_job["content_revision"]
+    resaved_published_job = client.put("/api/publishing-tasks/pub_biz", json={**published_payload, "notes": "补充发布备注"}).json()
+    assert resaved_published_job["content_revision"] == historical_revision
+    assert resaved_published_job["version_snapshot"]["body"] == "脚本"
+    assert resaved_published_job["approval_record_id"] == approved["id"]
+
     activity = client.get("/api/activity-logs").json()
-    entity_types = {item["entity_type"] for item in activity}
-    assert {"ApprovalRecord", "PublishingTask", "TrackingSnapshot", "AnalyticsRecord", "ExperienceRecord"} <= entity_types
+    activity_actions = {item["action"] for item in activity}
+    assert {"content_approved", "publishing_task_created", "content_published", "tracking_started", "tracking_snapshot_created", "analytics_updated", "performance_review_generated", "approval_invalidated"} <= activity_actions
 
 
 def test_business_localstorage_import_is_idempotent(client):
