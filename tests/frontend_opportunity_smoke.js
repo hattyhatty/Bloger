@@ -52,8 +52,8 @@ vm.runInThisContext(source, { filename: "app.js" });
   assert.equal(window.OpportunityStore.forTopic(topic.id).length, analyzed.length);
   assert.equal(
     analyzed[0].overallScore,
-    window.OpportunityScoring.calculate(analyzed[0]),
-    "local score should use the transparent scoring policy",
+    Math.max(0, Math.min(100, window.OpportunityScoring.calculate(analyzed[0]) + analyzed[0].learningAdjustment + analyzed[0].explorationBonus)),
+    "local score should expose base score plus bounded learning and exploration adjustments",
   );
 
   const saved = await window.OpportunityService.setStatus(analyzed[0].id, "saved");

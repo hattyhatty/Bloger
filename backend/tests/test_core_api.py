@@ -784,3 +784,177 @@ def test_creator_intelligence_learning_lifecycle_and_integrations(client):
 
     assert client.post(f"/api/creator-learnings/{platform_learning['id']}/archive", params={"workspace_id": "other"}).status_code == 409
     assert client.patch(f"/api/strategy-suggestions/{platform_suggestion['id']}", json={"workspace_id": "other", "decision": "accepted"}).status_code == 409
+
+
+def create_video_plan_fixture(client, suffix="main", workspace_id="default"):
+    topic_id = f"topic_video_{suffix}"
+    content_id = f"content_video_{suffix}"
+    assert client.post("/api/topics", json={
+        "id": topic_id,
+        "workspace_id": workspace_id,
+        "title": "AI 视频制作工作流",
+        "category": "AI Video",
+    }).status_code == 200
+    content = client.post("/api/contents", json={
+        "id": content_id,
+        "workspace_id": workspace_id,
+        "topic_id": topic_id,
+        "title": "用 AI 做一条可靠的短视频",
+        "platform": "抖音",
+        "content_type": "口播稿",
+        "source_url": "https://example.com/video-source",
+        "raw": {
+            "draftTitle": "用 AI 做短视频的正确顺序",
+            "draftHook": "别再一键生成整条视频了",
+            "draftBody": "先做概念，再写脚本，然后拆分镜头。",
+            "selectedAngle": "可靠的人机协作视频流程",
+        },
+    }).json()
+    response = client.post("/api/video-plans", json={
+        "workspace_id": workspace_id,
+        "content_id": content_id,
+        "video_concept": "用清晰的工作流解释 AI 视频规划",
+        "target_platform": "抖音",
+        "target_duration_seconds": 60,
+        "content_format": "口播",
+        "visual_style": "现代、克制、清晰",
+        "aspect_ratio": "9:16",
+    })
+    assert response.status_code == 200, response.text
+    return content, response.json()
+
+
+def test_video_plan_version_binding_script_storyboard_shots_and_prompts(client):
+    content, plan = create_video_plan_fixture(client)
+    assert plan["content_revision"] == content["revision"] == 1
+    assert plan["content_snapshot"]["draftTitle"] == "用 AI 做短视频的正确顺序"
+    assert plan["content_changed"] is False
+
+    # Create is idempotent for the same Content revision.
+    duplicate = client.post("/api/video-plans", json={
+        "content_id": content["id"],
+        "video_concept": "a repeated request must not create a second plan",
+    }).json()
+    assert duplicate["id"] == plan["id"]
+    assert len(client.get("/api/video-plans", params={"content_id": content["id"]}).json()) == 1
+    assert client.patch(f"/api/video-plans/{plan['id']}/status", json={"status": "planned"}).status_code == 409
+
+    context = client.get(f"/api/video-plans/{plan['id']}/context").json()
+    assert context["content"]["id"] == content["id"]
+    assert context["creator_memory"]["workspace_id"] == "default"
+
+    script_response = client.put(f"/api/video-plans/{plan['id']}/script", json={
+        "hook": "别再一键生成整条视频了",
+        "narration_dialogue": "一个稳定的 AI 视频，从计划开始。",
+        "main_story_flow": "概念 → 脚本 → 分镜 → Prompt",
+        "ending_cta": "保存这套流程，下次直接复用。",
+        "estimated_duration_seconds": 60,
+        "operation": "generated",
+    })
+    assert script_response.status_code == 200, script_response.text
+    script = script_response.json()
+    assert script["source_context"]["contentRevision"] == 1
+    assert client.patch(f"/api/video-plans/{plan['id']}/status", json={"status": "planned"}).status_code == 200
+    assert client.patch(f"/api/video-plans/{plan['id']}/status", json={"status": "in_production"}).status_code == 409
+
+    storyboard_response = client.post(f"/api/video-plans/{plan['id']}/storyboard/generate", json={
+        "recurring_character_description": "一位 30 岁的中文 AI 创作者",
+        "clothing": "深色简洁衬衫",
+        "environment": "现代家庭工作室",
+        "visual_style": "真实、自然、轻电影感",
+        "reference_notes": "人物面部、服装与房间布局保持一致",
+        "shots": [
+            {"estimated_duration_seconds": 5, "scene_description": "创作者看向镜头提出问题", "action": "抬手指向一键生成按钮", "camera_framing": "中近景", "narration_dialogue": "别再一键生成整条视频了"},
+            {"estimated_duration_seconds": 20, "scene_description": "流程卡片依次出现", "action": "拖动四张流程卡片", "camera_framing": "俯拍", "narration_dialogue": "先概念，再脚本，然后分镜"},
+            {"estimated_duration_seconds": 8, "scene_description": "创作者总结", "action": "保存工作流模板", "camera_framing": "中景", "narration_dialogue": "让每一步都能人工检查"},
+        ],
+    })
+    assert storyboard_response.status_code == 200, storyboard_response.text
+    workspace = storyboard_response.json()
+    assert workspace["script"]["id"] == script["id"]
+    assert [shot["shot_number"] for shot in workspace["shots"]] == [1, 2, 3]
+    assert workspace["shots"][0]["subject_character"] == "一位 30 岁的中文 AI 创作者"
+    assert workspace["shots"][0]["environment"] == "现代家庭工作室"
+    assert client.patch(f"/api/video-plans/{plan['id']}/status", json={"status": "in_production"}).status_code == 200
+    assert client.patch(f"/api/video-plans/{plan['id']}/status", json={"status": "ready_for_review"}).status_code == 409
+
+    storyboard_id = workspace["storyboard"]["id"]
+    added = client.post(f"/api/video-storyboards/{storyboard_id}/shots", json={
+        "estimated_duration_seconds": 7,
+        "scene_description": "片尾行动提示",
+        "narration_dialogue": "下一条视频就从计划开始",
+    }).json()
+    assert added["shot_number"] == 4
+    updated = client.put(f"/api/video-shots/{added['id']}", json={
+        **{key: added[key] for key in (
+            "shot_number", "estimated_duration_seconds", "scene_description", "subject_character", "action", "environment",
+            "camera_framing", "camera_movement", "lighting_mood", "narration_dialogue", "transition", "generation_notes", "raw"
+        )},
+        "scene_description": "片尾显示可复用的视频计划",
+    }).json()
+    assert updated["scene_description"] == "片尾显示可复用的视频计划"
+
+    shot_ids = [shot["id"] for shot in workspace["shots"]] + [added["id"]]
+    reordered = client.post(f"/api/video-storyboards/{storyboard_id}/shots/reorder", json={
+        "shot_ids": list(reversed(shot_ids)),
+    })
+    assert reordered.status_code == 200, reordered.text
+    assert [shot["id"] for shot in reordered.json()] == list(reversed(shot_ids))
+    invalid_reorder = client.post(f"/api/video-storyboards/{storyboard_id}/shots/reorder", json={"shot_ids": shot_ids[:2]})
+    assert invalid_reorder.status_code == 409
+
+    prompt_payload = {
+        "prompt_target": "Generic",
+        "generic_video_prompt": "Vertical medium shot of a Chinese AI creator in a modern home studio.",
+        "image_reference_prompt": "same creator, dark shirt, same studio",
+        "negative_instructions": "avoid text artifacts and character drift",
+        "continuity_notes": "preserve face, clothing and room layout",
+        "operation": "generated",
+    }
+    generic = client.put(f"/api/video-shots/{added['id']}/prompt", json=prompt_payload).json()
+    kling = client.put(f"/api/video-shots/{added['id']}/prompt", json={**prompt_payload, "prompt_target": "Kling"}).json()
+    regenerated = client.put(f"/api/video-shots/{added['id']}/prompt", json={
+        **prompt_payload,
+        "generic_video_prompt": "Updated vertical cinematic medium shot.",
+    }).json()
+    assert generic["revision"] == 1
+    assert regenerated["revision"] == 2
+    assert kling["revision"] == 1
+    assert regenerated["source_shot_hash"]
+    for shot in workspace["shots"]:
+        response = client.put(f"/api/video-shots/{shot['id']}/prompt", json={**prompt_payload, "generic_video_prompt": f"Prompt for shot {shot['shot_number']}"})
+        assert response.status_code == 200
+    assert client.patch(f"/api/video-plans/{plan['id']}/status", json={"status": "ready_for_review"}).status_code == 200
+
+    assert client.delete(f"/api/video-shots/{workspace['shots'][1]['id']}").status_code == 200
+    after_delete = client.get(f"/api/video-plans/{plan['id']}/workspace").json()
+    assert [shot["shot_number"] for shot in after_delete["shots"]] == [1, 2, 3]
+
+    # Updating upstream Content creates a new revision without mutating the old plan snapshot.
+    changed_content = client.put(f"/api/contents/{content['id']}", json={
+        **{key: content[key] for key in ("id", "workspace_id", "topic_id", "title", "status", "platform", "content_type", "source_url", "raw")},
+        "title": "更新后的 AI 视频工作流",
+        "raw": {**content["raw"], "draftTitle": "更新后的 AI 视频工作流"},
+    }).json()
+    assert changed_content["revision"] == 2
+    old_plan = client.get(f"/api/video-plans/{plan['id']}/workspace").json()["plan"]
+    assert old_plan["content_changed"] is True
+    assert old_plan["content_snapshot"]["title"] == "用 AI 做一条可靠的短视频"
+    new_plan = client.post("/api/video-plans", json={"content_id": content["id"]}).json()
+    assert new_plan["id"] != plan["id"]
+    assert new_plan["content_revision"] == 2
+
+    actions = {item["action"] for item in client.get("/api/activity-logs", params={"limit": 500}).json()}
+    assert {
+        "video_plan_created", "video_script_generated", "video_storyboard_generated", "video_shot_added",
+        "video_shot_updated", "video_shots_reordered", "video_shot_removed", "video_prompt_generated",
+        "video_prompt_regenerated",
+    } <= actions
+
+
+def test_video_planner_workspace_isolation_and_invalid_references(client):
+    _, plan = create_video_plan_fixture(client, "other", "other")
+    assert client.get(f"/api/video-plans/{plan['id']}/workspace", params={"workspace_id": "default"}).status_code == 409
+    assert client.put(f"/api/video-plans/{plan['id']}/script", json={"workspace_id": "default", "hook": "cross workspace"}).status_code == 409
+    assert client.post("/api/video-plans", json={"workspace_id": "default", "content_id": "content_video_other"}).status_code == 409
+    assert client.post("/api/video-plans", json={"content_id": "missing_content"}).status_code == 409

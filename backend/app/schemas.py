@@ -251,6 +251,219 @@ class CreatorIntelligenceOut(BaseModel):
     summary: JsonDict = Field(default_factory=dict)
 
 
+VideoPlanStatus = Literal["draft", "planned", "in_production", "ready_for_review"]
+VideoPromptTarget = Literal["Generic", "Seedance", "Kling", "Veo", "Runway"]
+
+
+class VideoPlanCreateIn(BaseModel):
+    id: str | None = None
+    workspace_id: str = "default"
+    content_id: str
+    video_concept: str = ""
+    target_platform: str = "抖音"
+    target_duration_seconds: int = Field(default=60, ge=1, le=14400)
+    content_format: str = "口播"
+    visual_style: str = ""
+    aspect_ratio: str = "9:16"
+    raw: JsonDict = Field(default_factory=dict)
+
+
+class VideoPlanUpdateIn(BaseModel):
+    workspace_id: str = "default"
+    video_concept: str = ""
+    target_platform: str = "抖音"
+    target_duration_seconds: int = Field(default=60, ge=1, le=14400)
+    content_format: str = "口播"
+    visual_style: str = ""
+    aspect_ratio: str = "9:16"
+    status: VideoPlanStatus = "draft"
+    raw: JsonDict = Field(default_factory=dict)
+
+
+class VideoPlanStatusIn(BaseModel):
+    workspace_id: str = "default"
+    status: VideoPlanStatus
+
+
+class VideoPlanOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    content_id: str
+    opportunity_id: str | None = None
+    content_revision: int
+    content_hash: str = ""
+    content_snapshot: JsonDict = Field(default_factory=dict)
+    content_changed: bool = False
+    video_concept: str = ""
+    target_platform: str = "抖音"
+    target_duration_seconds: int = 60
+    content_format: str = "口播"
+    visual_style: str = ""
+    aspect_ratio: str = "9:16"
+    status: VideoPlanStatus = "draft"
+    raw: JsonDict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VideoScriptIn(BaseModel):
+    id: str | None = None
+    workspace_id: str = "default"
+    hook: str = ""
+    narration_dialogue: str = ""
+    main_story_flow: str = ""
+    ending_cta: str = ""
+    estimated_duration_seconds: int = Field(default=60, ge=1, le=14400)
+    operation: Literal["manual", "generated"] = "manual"
+    raw: JsonDict = Field(default_factory=dict)
+
+
+class VideoScriptOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    plan_id: str
+    hook: str = ""
+    narration_dialogue: str = ""
+    main_story_flow: str = ""
+    ending_cta: str = ""
+    estimated_duration_seconds: int = 60
+    source_context: JsonDict = Field(default_factory=dict)
+    revision: int = 1
+    raw: JsonDict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VideoShotIn(BaseModel):
+    id: str | None = None
+    workspace_id: str = "default"
+    shot_number: int | None = Field(default=None, ge=1)
+    estimated_duration_seconds: int = Field(default=5, ge=1, le=3600)
+    scene_description: str = ""
+    subject_character: str = ""
+    action: str = ""
+    environment: str = ""
+    camera_framing: str = ""
+    camera_movement: str = ""
+    lighting_mood: str = ""
+    narration_dialogue: str = ""
+    transition: str = ""
+    generation_notes: str = ""
+    raw: JsonDict = Field(default_factory=dict)
+
+
+class VideoShotOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    storyboard_id: str
+    shot_number: int
+    estimated_duration_seconds: int = 5
+    scene_description: str = ""
+    subject_character: str = ""
+    action: str = ""
+    environment: str = ""
+    camera_framing: str = ""
+    camera_movement: str = ""
+    lighting_mood: str = ""
+    narration_dialogue: str = ""
+    transition: str = ""
+    generation_notes: str = ""
+    raw: JsonDict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VideoStoryboardIn(BaseModel):
+    id: str | None = None
+    workspace_id: str = "default"
+    recurring_character_description: str = ""
+    clothing: str = ""
+    environment: str = ""
+    visual_style: str = ""
+    reference_notes: str = ""
+    operation: Literal["manual", "generated"] = "manual"
+    raw: JsonDict = Field(default_factory=dict)
+
+
+class VideoStoryboardGenerateIn(VideoStoryboardIn):
+    shots: list[VideoShotIn] = Field(min_length=1, max_length=100)
+
+
+class VideoStoryboardOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    plan_id: str
+    script_id: str
+    recurring_character_description: str = ""
+    clothing: str = ""
+    environment: str = ""
+    visual_style: str = ""
+    reference_notes: str = ""
+    revision: int = 1
+    raw: JsonDict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VideoShotReorderIn(BaseModel):
+    workspace_id: str = "default"
+    shot_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class VideoPromptIn(BaseModel):
+    id: str | None = None
+    workspace_id: str = "default"
+    prompt_target: VideoPromptTarget = "Generic"
+    generic_video_prompt: str = ""
+    image_reference_prompt: str = ""
+    negative_instructions: str = ""
+    continuity_notes: str = ""
+    operation: Literal["manual", "generated"] = "manual"
+    raw: JsonDict = Field(default_factory=dict)
+
+
+class VideoPromptOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    shot_id: str
+    prompt_target: VideoPromptTarget = "Generic"
+    generic_video_prompt: str = ""
+    image_reference_prompt: str = ""
+    negative_instructions: str = ""
+    continuity_notes: str = ""
+    source_shot_hash: str = ""
+    revision: int = 1
+    raw: JsonDict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VideoPlannerWorkspaceOut(BaseModel):
+    plan: VideoPlanOut
+    script: VideoScriptOut | None = None
+    storyboard: VideoStoryboardOut | None = None
+    shots: list[VideoShotOut] = Field(default_factory=list)
+    prompts: list[VideoPromptOut] = Field(default_factory=list)
+
+
+class VideoPlanContextOut(BaseModel):
+    content: ContentOut
+    opportunity: ContentOpportunityOut | None = None
+    creator_memory: CreatorProfileOut
+    knowledge: list[KnowledgeEntryOut] = Field(default_factory=list)
+    learnings: list[CreatorLearningOut] = Field(default_factory=list)
+
+
 class OpportunityContextOut(BaseModel):
     topic: TopicOut
     knowledge: list[KnowledgeEntryOut] = Field(default_factory=list)

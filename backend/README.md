@@ -1,4 +1,4 @@
-# AI Content OS Backend — Phase 7F
+# AI Content OS Backend — Phase 8A
 
 FastAPI + PostgreSQL backend for the AI Content OS core workflow and Knowledge Brain, with server-side workflow validation, immutable published-version history, and idempotent business operations.
 
@@ -14,6 +14,7 @@ The database persists:
 - Workspace (the minimal ownership boundary; this phase still uses one default workspace)
 - ContentOpportunity and its relevant Knowledge / Creator Learning links
 - CreatorLearning / CreatorLearningEvidence / StrategySuggestion
+- VideoProductionPlan / VideoScript / VideoStoryboard / VideoShot / VideoGenerationPrompt
 
 Real platform APIs, auth, multi-user SaaS, schedulers, vector databases, and cloud deployment remain intentionally out of scope.
 
@@ -62,6 +63,17 @@ Open:
 - `POST /api/creator-learnings/{learning_id}/archive`
 - `GET /api/strategy-suggestions`
 - `PATCH /api/strategy-suggestions/{suggestion_id}`
+- `GET/POST/PUT /api/video-plans`
+- `PATCH /api/video-plans/{plan_id}/status`
+- `GET /api/video-plans/{plan_id}/workspace`
+- `GET /api/video-plans/{plan_id}/context`
+- `PUT /api/video-plans/{plan_id}/script`
+- `PUT /api/video-plans/{plan_id}/storyboard`
+- `POST /api/video-plans/{plan_id}/storyboard/generate`
+- `POST /api/video-storyboards/{storyboard_id}/shots`
+- `POST /api/video-storyboards/{storyboard_id}/shots/reorder`
+- `PUT/DELETE /api/video-shots/{shot_id}`
+- `PUT /api/video-shots/{shot_id}/prompt`
 - `GET /api/activity-logs`
 - `GET/POST/PUT /api/platform-versions`
 - `GET/POST/PUT /api/approvals`
@@ -87,7 +99,7 @@ Import is idempotent by original ID:
 
 ## Source of truth and offline fallback
 
-When the API is healthy, PostgreSQL is authoritative for Topic, Content, Knowledge, Creator Memory, Opportunity, Approval, Publishing, Tracking, Analytics, Experience, Creator Learning, and Strategy Suggestion data. The frontend keeps localStorage only as:
+When the API is healthy, PostgreSQL is authoritative for Topic, Content, Knowledge, Creator Memory, Opportunity, Approval, Publishing, Tracking, Analytics, Experience, Creator Learning, Strategy Suggestion, and Video Production Planner data. The frontend keeps localStorage only as:
 
 - a local cache for fast rendering
 - a temporary offline fallback when the API is unavailable
@@ -128,6 +140,16 @@ The service layer in `app/workflow.py` enforces the business chain independently
 - Develop carries relevant Learning IDs and guidance into Content, but Content Studio never overwrites the user's draft automatically
 - Strategy Suggestions require Accept / Reject / Ignore; Creator Memory changes only after an explicit Accept
 - Learning entries mirrored to Knowledge Brain always retain type `Learning`, evidence IDs, metrics, and confidence; they are never promoted to `Fact`
+
+## Video Production Planner integrity
+
+- every Video Plan binds an immutable Content revision, hash, and snapshot; later Content edits only mark the Plan as changed
+- Script, Storyboard, ordered Shots, and per-target Prompts are independent relational records rather than a Content JSON blob
+- plan status advancement is validated server-side: Script → Storyboard/Shots → at least one Prompt per Shot
+- Shot order is unique inside one Storyboard and reorder requests must include every Shot exactly once
+- each Shot has at most one Prompt per target (`Generic`, `Seedance`, `Kling`, `Veo`, `Runway`); regeneration updates only that target
+- Prompt source hashes preserve traceability to structured Shot and consistency inputs
+- no video/image generation provider is called in Phase 8A
 
 ## Security
 

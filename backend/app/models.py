@@ -84,6 +84,7 @@ class Content(Base, TimestampMixin):
     analytics_records: Mapped[list["AnalyticsRecord"]] = relationship(back_populates="content", cascade="all, delete-orphan")
     experience_records: Mapped[list["ExperienceRecord"]] = relationship(back_populates="content")
     developed_opportunities: Mapped[list["ContentOpportunity"]] = relationship(back_populates="developed_content")
+    video_production_plans: Mapped[list["VideoProductionPlan"]] = relationship(back_populates="content", cascade="all, delete-orphan")
 
 
 class KnowledgeEntry(Base, TimestampMixin):
@@ -440,6 +441,132 @@ class StrategySuggestion(Base, TimestampMixin):
     raw: Mapped[dict] = mapped_column(JsonType, default=dict)
 
     creator_profile: Mapped[CreatorProfile] = relationship(back_populates="strategy_suggestions")
+
+
+class VideoProductionPlan(Base, TimestampMixin):
+    __tablename__ = "video_production_plans"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "content_id", "content_revision", name="uq_video_plan_content_revision"),
+        CheckConstraint("status IN ('draft', 'planned', 'in_production', 'ready_for_review')", name="ck_video_plan_status"),
+        CheckConstraint("target_duration_seconds BETWEEN 1 AND 14400", name="ck_video_plan_duration"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    content_id: Mapped[str] = mapped_column(String(128), ForeignKey("contents.id"), index=True)
+    opportunity_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("content_opportunities.id"), nullable=True, index=True)
+    content_revision: Mapped[int] = mapped_column(Integer)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
+    content_snapshot: Mapped[dict] = mapped_column(JsonType, default=dict)
+    video_concept: Mapped[str] = mapped_column(Text, default="")
+    target_platform: Mapped[str] = mapped_column(String(64), index=True, default="抖音")
+    target_duration_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    content_format: Mapped[str] = mapped_column(String(128), default="口播")
+    visual_style: Mapped[str] = mapped_column(Text, default="")
+    aspect_ratio: Mapped[str] = mapped_column(String(32), default="9:16")
+    status: Mapped[str] = mapped_column(String(32), index=True, default="draft")
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    content: Mapped[Content] = relationship(back_populates="video_production_plans")
+    opportunity: Mapped[ContentOpportunity | None] = relationship()
+    script: Mapped["VideoScript | None"] = relationship(back_populates="plan", cascade="all, delete-orphan", uselist=False)
+    storyboard: Mapped["VideoStoryboard | None"] = relationship(back_populates="plan", cascade="all, delete-orphan", uselist=False)
+
+    @property
+    def content_changed(self) -> bool:
+        return bool(self.content and (self.content.revision != self.content_revision or (self.content_hash and self.content.content_hash != self.content_hash)))
+
+
+class VideoScript(Base, TimestampMixin):
+    __tablename__ = "video_scripts"
+    __table_args__ = (UniqueConstraint("plan_id", name="uq_video_script_plan"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    plan_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_production_plans.id", ondelete="CASCADE"), index=True)
+    hook: Mapped[str] = mapped_column(Text, default="")
+    narration_dialogue: Mapped[str] = mapped_column(Text, default="")
+    main_story_flow: Mapped[str] = mapped_column(Text, default="")
+    ending_cta: Mapped[str] = mapped_column(Text, default="")
+    estimated_duration_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    source_context: Mapped[dict] = mapped_column(JsonType, default=dict)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    plan: Mapped[VideoProductionPlan] = relationship(back_populates="script")
+    storyboards: Mapped[list["VideoStoryboard"]] = relationship(back_populates="script")
+
+
+class VideoStoryboard(Base, TimestampMixin):
+    __tablename__ = "video_storyboards"
+    __table_args__ = (UniqueConstraint("plan_id", name="uq_video_storyboard_plan"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    plan_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_production_plans.id", ondelete="CASCADE"), index=True)
+    script_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_scripts.id"), index=True)
+    recurring_character_description: Mapped[str] = mapped_column(Text, default="")
+    clothing: Mapped[str] = mapped_column(Text, default="")
+    environment: Mapped[str] = mapped_column(Text, default="")
+    visual_style: Mapped[str] = mapped_column(Text, default="")
+    reference_notes: Mapped[str] = mapped_column(Text, default="")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    plan: Mapped[VideoProductionPlan] = relationship(back_populates="storyboard")
+    script: Mapped[VideoScript] = relationship(back_populates="storyboards")
+    shots: Mapped[list["VideoShot"]] = relationship(back_populates="storyboard", cascade="all, delete-orphan", order_by="VideoShot.shot_number")
+
+
+class VideoShot(Base, TimestampMixin):
+    __tablename__ = "video_shots"
+    __table_args__ = (
+        UniqueConstraint("storyboard_id", "shot_number", name="uq_video_shot_number"),
+        CheckConstraint("shot_number >= 1", name="ck_video_shot_number"),
+        CheckConstraint("estimated_duration_seconds BETWEEN 1 AND 3600", name="ck_video_shot_duration"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    storyboard_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_storyboards.id", ondelete="CASCADE"), index=True)
+    shot_number: Mapped[int] = mapped_column(Integer)
+    estimated_duration_seconds: Mapped[int] = mapped_column(Integer, default=5)
+    scene_description: Mapped[str] = mapped_column(Text, default="")
+    subject_character: Mapped[str] = mapped_column(Text, default="")
+    action: Mapped[str] = mapped_column(Text, default="")
+    environment: Mapped[str] = mapped_column(Text, default="")
+    camera_framing: Mapped[str] = mapped_column(String(128), default="")
+    camera_movement: Mapped[str] = mapped_column(String(128), default="")
+    lighting_mood: Mapped[str] = mapped_column(Text, default="")
+    narration_dialogue: Mapped[str] = mapped_column(Text, default="")
+    transition: Mapped[str] = mapped_column(String(128), default="")
+    generation_notes: Mapped[str] = mapped_column(Text, default="")
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    storyboard: Mapped[VideoStoryboard] = relationship(back_populates="shots")
+    prompts: Mapped[list["VideoGenerationPrompt"]] = relationship(back_populates="shot", cascade="all, delete-orphan")
+
+
+class VideoGenerationPrompt(Base, TimestampMixin):
+    __tablename__ = "video_generation_prompts"
+    __table_args__ = (
+        UniqueConstraint("shot_id", "prompt_target", name="uq_video_prompt_shot_target"),
+        CheckConstraint("prompt_target IN ('Generic', 'Seedance', 'Kling', 'Veo', 'Runway')", name="ck_video_prompt_target"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    shot_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_shots.id", ondelete="CASCADE"), index=True)
+    prompt_target: Mapped[str] = mapped_column(String(32), index=True, default="Generic")
+    generic_video_prompt: Mapped[str] = mapped_column(Text, default="")
+    image_reference_prompt: Mapped[str] = mapped_column(Text, default="")
+    negative_instructions: Mapped[str] = mapped_column(Text, default="")
+    continuity_notes: Mapped[str] = mapped_column(Text, default="")
+    source_shot_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    shot: Mapped[VideoShot] = relationship(back_populates="prompts")
 
 
 class ActivityLog(Base):

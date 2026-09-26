@@ -25,6 +25,7 @@ from .models import (
     StrategySuggestion,
     Topic,
     TrackingSnapshot,
+    VideoProductionPlan,
     Workspace,
 )
 from .obsidian import knowledge_to_markdown, safe_filename
@@ -71,6 +72,22 @@ from .schemas import (
     TopicOut,
     TrackingSnapshotIn,
     TrackingSnapshotOut,
+    VideoPlanContextOut,
+    VideoPlanCreateIn,
+    VideoPlanOut,
+    VideoPlannerWorkspaceOut,
+    VideoPlanStatusIn,
+    VideoPlanUpdateIn,
+    VideoPromptIn,
+    VideoPromptOut,
+    VideoScriptIn,
+    VideoScriptOut,
+    VideoShotIn,
+    VideoShotOut,
+    VideoShotReorderIn,
+    VideoStoryboardGenerateIn,
+    VideoStoryboardIn,
+    VideoStoryboardOut,
 )
 from .opportunity import (
     analyze_opportunities,
@@ -107,10 +124,24 @@ from .workflow import (
     stable_hash,
     validate_knowledge_links,
 )
+from .video_planner import (
+    add_shot,
+    create_video_plan,
+    get_plan_workspace,
+    remove_shot,
+    reorder_shots,
+    save_shot_prompt,
+    save_storyboard,
+    save_video_script,
+    set_video_plan_status,
+    update_shot,
+    update_video_plan,
+    video_plan_context,
+)
 
 
 settings = get_settings()
-app = FastAPI(title="AI Content OS Backend", version="0.7.4")
+app = FastAPI(title="AI Content OS Backend", version="0.8.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins or ["*"],
@@ -129,7 +160,7 @@ async def workflow_conflict_handler(_: Request, error: WorkflowConflict):
 
 @app.get("/api/health")
 def api_health() -> dict[str, str]:
-    return {"status": "ok", "service": "ai-content-os-backend", "phase": "7F", "sourceOfTruth": "postgresql"}
+    return {"status": "ok", "service": "ai-content-os-backend", "phase": "8A", "sourceOfTruth": "postgresql"}
 
 
 @app.get("/health")
@@ -464,6 +495,103 @@ def get_creator_intelligence(workspace_id: str = DEFAULT_WORKSPACE_ID, db: Sessi
 def refresh_creator_intelligence(payload: CreatorIntelligenceGenerateIn, db: Session = Depends(get_db)):
     learnings, suggestions, summary = generate_creator_intelligence(db, payload.workspace_id)
     return {"learnings": learnings, "strategy_suggestions": suggestions, "summary": summary}
+
+
+@app.get("/api/video-plans", response_model=list[VideoPlanOut])
+def list_video_plans(
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    content_id: str = "",
+    db: Session = Depends(get_db),
+):
+    statement = select(VideoProductionPlan).where(VideoProductionPlan.workspace_id == workspace_id)
+    if content_id:
+        statement = statement.where(VideoProductionPlan.content_id == content_id)
+    return list(db.scalars(statement.order_by(VideoProductionPlan.updated_at.desc())).all())
+
+
+@app.post("/api/video-plans", response_model=VideoPlanOut)
+def create_content_video_plan(payload: VideoPlanCreateIn, db: Session = Depends(get_db)):
+    return create_video_plan(db, payload.model_dump())
+
+
+@app.put("/api/video-plans/{plan_id}", response_model=VideoPlanOut)
+def update_content_video_plan(plan_id: str, payload: VideoPlanUpdateIn, db: Session = Depends(get_db)):
+    return update_video_plan(db, plan_id, payload.model_dump())
+
+
+@app.patch("/api/video-plans/{plan_id}/status", response_model=VideoPlanOut)
+def update_content_video_plan_status(plan_id: str, payload: VideoPlanStatusIn, db: Session = Depends(get_db)):
+    return set_video_plan_status(db, plan_id, payload.workspace_id, payload.status)
+
+
+@app.get("/api/video-plans/{plan_id}/workspace", response_model=VideoPlannerWorkspaceOut)
+def get_content_video_plan_workspace(
+    plan_id: str,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    db: Session = Depends(get_db),
+):
+    return get_plan_workspace(db, plan_id, workspace_id)
+
+
+@app.get("/api/video-plans/{plan_id}/context", response_model=VideoPlanContextOut)
+def get_content_video_plan_context(
+    plan_id: str,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    db: Session = Depends(get_db),
+):
+    return video_plan_context(db, plan_id, workspace_id)
+
+
+@app.put("/api/video-plans/{plan_id}/script", response_model=VideoScriptOut)
+def put_video_script(plan_id: str, payload: VideoScriptIn, db: Session = Depends(get_db)):
+    return save_video_script(db, plan_id, payload.model_dump())
+
+
+@app.put("/api/video-plans/{plan_id}/storyboard", response_model=VideoStoryboardOut)
+def put_video_storyboard(plan_id: str, payload: VideoStoryboardIn, db: Session = Depends(get_db)):
+    return save_storyboard(db, plan_id, payload.model_dump())
+
+
+@app.post("/api/video-plans/{plan_id}/storyboard/generate", response_model=VideoPlannerWorkspaceOut)
+def generate_video_storyboard(plan_id: str, payload: VideoStoryboardGenerateIn, db: Session = Depends(get_db)):
+    values = payload.model_dump(exclude={"shots"})
+    values["operation"] = "generated"
+    save_storyboard(db, plan_id, values, [shot.model_dump() for shot in payload.shots])
+    return get_plan_workspace(db, plan_id, payload.workspace_id)
+
+
+@app.post("/api/video-storyboards/{storyboard_id}/shots", response_model=VideoShotOut)
+def create_video_shot(storyboard_id: str, payload: VideoShotIn, db: Session = Depends(get_db)):
+    return add_shot(db, storyboard_id, payload.model_dump())
+
+
+@app.put("/api/video-shots/{shot_id}", response_model=VideoShotOut)
+def put_video_shot(shot_id: str, payload: VideoShotIn, db: Session = Depends(get_db)):
+    return update_shot(db, shot_id, payload.model_dump())
+
+
+@app.delete("/api/video-shots/{shot_id}")
+def delete_video_shot(
+    shot_id: str,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    db: Session = Depends(get_db),
+):
+    remove_shot(db, shot_id, workspace_id)
+    return {"ok": True}
+
+
+@app.post("/api/video-storyboards/{storyboard_id}/shots/reorder", response_model=list[VideoShotOut])
+def reorder_video_storyboard_shots(
+    storyboard_id: str,
+    payload: VideoShotReorderIn,
+    db: Session = Depends(get_db),
+):
+    return reorder_shots(db, storyboard_id, payload.workspace_id, payload.shot_ids)
+
+
+@app.put("/api/video-shots/{shot_id}/prompt", response_model=VideoPromptOut)
+def put_video_shot_prompt(shot_id: str, payload: VideoPromptIn, db: Session = Depends(get_db)):
+    return save_shot_prompt(db, shot_id, payload.model_dump())
 
 
 @app.get("/api/activity-logs", response_model=list[ActivityLogOut])

@@ -124,6 +124,9 @@ const OPPORTUNITY_STATUS_LABELS = Object.freeze({ candidate: "Candidate", saved:
 const CREATOR_LEARNING_STATUS = Object.freeze({ PROPOSED: "proposed", ACTIVE: "active", WEAKENED: "weakened", ARCHIVED: "archived" });
 const CREATOR_LEARNING_STATUS_LABELS = Object.freeze({ proposed: "Hypothesis", active: "Active", weakened: "Weakened", archived: "Archived" });
 const STRATEGY_SUGGESTION_STATUS_LABELS = Object.freeze({ pending: "Pending", accepted: "Accepted", rejected: "Rejected", ignored: "Ignored" });
+const VIDEO_PLAN_STATUS = Object.freeze({ DRAFT: "draft", PLANNED: "planned", IN_PRODUCTION: "in_production", READY_FOR_REVIEW: "ready_for_review" });
+const VIDEO_PLAN_STATUS_LABELS = Object.freeze({ draft: "Draft", planned: "Planned", in_production: "In Production", ready_for_review: "Ready for Review" });
+const VIDEO_PROMPT_TARGETS = Object.freeze(["Generic", "Seedance", "Kling", "Veo", "Runway"]);
 const LEGACY_LONG_FORM_PLATFORM = ["公", "众", "号"].join("");
 const TASK_STATUS = Object.freeze({ PENDING: "PENDING", RUNNING: "RUNNING", SUCCESS: "SUCCESS", FAILED: "FAILED" });
 const TASK_TYPES = Object.freeze({
@@ -248,7 +251,7 @@ const NAV_ITEMS = [
   ["hotRadar", "◎", "Hot Radar 热点雷达", "Hot Radar", "从外网抓取的热点候选池，本阶段使用 mock 数据。"],
   ["library", "▦", "Content Library 内容库", "Content Library", "所有 Content 对象的数据库视图。"],
   ["workspace", "✎", "Content Workspace 内容工作区", "Content Workspace", "围绕单条 Content 完成分析、生成和审核。"],
-  ["video", "▶", "Video Pipeline 视频流水线", "Video Pipeline", "管理脚本、分镜、配音、字幕、封面和视频就绪状态。"],
+  ["video", "▶", "Video Planner 视频制作规划", "AI Video Production Planner", "把 Content 转成可人工审核的 Concept、Script、Storyboard、Shot List 与 Generation Prompt。"],
   ["publish", "□", "Publishing Center 发布中心", "Publishing Center", "管理平台版本、发布队列、排期和导出。"],
   ["analytics", "↗", "Analytics 数据复盘", "Analytics", "录入小红书、抖音、B站发布数据，并生成 mock 复盘建议。"],
   ["prompts", "#", "Prompt Library 提示词库", "Prompt Library", "把提示词作为可维护的数据对象管理。"],
@@ -278,6 +281,11 @@ const appState = {
   selectedPublishJobId: null,
   publishView: "queue",
   selectedAnalyticsJobId: null,
+  selectedVideoPlanId: null,
+  selectedVideoContentId: null,
+  videoPromptTarget: "Generic",
+  videoPlannerBusy: "",
+  videoPlannerError: "",
   isGeneratingBrief: false,
   briefError: "",
   studioDrafts: {},
@@ -1203,6 +1211,107 @@ function normalizeStrategySuggestion(item = {}) {
   };
 }
 
+function normalizeVideoPlan(item = {}) {
+  const status = String(item.status || "draft").toLowerCase();
+  return {
+    id: item.id || uid("video_plan"),
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    contentId: item.contentId || item.content_id || "",
+    opportunityId: item.opportunityId || item.opportunity_id || "",
+    contentRevision: Math.max(1, Number(item.contentRevision ?? item.content_revision) || 1),
+    contentHash: item.contentHash || item.content_hash || "",
+    contentSnapshot: item.contentSnapshot || item.content_snapshot || {},
+    contentChanged: Boolean(item.contentChanged ?? item.content_changed),
+    videoConcept: item.videoConcept || item.video_concept || "",
+    targetPlatform: item.targetPlatform || item.target_platform || "抖音",
+    targetDurationSeconds: Math.max(1, Number(item.targetDurationSeconds ?? item.target_duration_seconds) || 60),
+    contentFormat: item.contentFormat || item.content_format || "口播",
+    visualStyle: item.visualStyle || item.visual_style || "",
+    aspectRatio: item.aspectRatio || item.aspect_ratio || "9:16",
+    status: Object.values(VIDEO_PLAN_STATUS).includes(status) ? status : VIDEO_PLAN_STATUS.DRAFT,
+    raw: item.raw || {},
+    createdAt: item.createdAt || item.created_at || now(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
+  };
+}
+
+function normalizeVideoScript(item = {}) {
+  return {
+    id: item.id || uid("video_script"),
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    planId: item.planId || item.plan_id || "",
+    hook: item.hook || "",
+    narrationDialogue: item.narrationDialogue || item.narration_dialogue || "",
+    mainStoryFlow: item.mainStoryFlow || item.main_story_flow || "",
+    endingCta: item.endingCta || item.ending_cta || "",
+    estimatedDurationSeconds: Math.max(1, Number(item.estimatedDurationSeconds ?? item.estimated_duration_seconds) || 60),
+    sourceContext: item.sourceContext || item.source_context || {},
+    revision: Math.max(1, Number(item.revision) || 1),
+    raw: item.raw || {},
+    createdAt: item.createdAt || item.created_at || now(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
+  };
+}
+
+function normalizeVideoStoryboard(item = {}) {
+  return {
+    id: item.id || uid("video_storyboard"),
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    planId: item.planId || item.plan_id || "",
+    scriptId: item.scriptId || item.script_id || "",
+    recurringCharacterDescription: item.recurringCharacterDescription || item.recurring_character_description || "",
+    clothing: item.clothing || "",
+    environment: item.environment || "",
+    visualStyle: item.visualStyle || item.visual_style || "",
+    referenceNotes: item.referenceNotes || item.reference_notes || "",
+    revision: Math.max(1, Number(item.revision) || 1),
+    raw: item.raw || {},
+    createdAt: item.createdAt || item.created_at || now(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
+  };
+}
+
+function normalizeVideoShot(item = {}) {
+  return {
+    id: item.id || uid("video_shot"),
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    storyboardId: item.storyboardId || item.storyboard_id || "",
+    shotNumber: Math.max(1, Number(item.shotNumber ?? item.shot_number) || 1),
+    estimatedDurationSeconds: Math.max(1, Number(item.estimatedDurationSeconds ?? item.estimated_duration_seconds) || 5),
+    sceneDescription: item.sceneDescription || item.scene_description || "",
+    subjectCharacter: item.subjectCharacter || item.subject_character || "",
+    action: item.action || "",
+    environment: item.environment || "",
+    cameraFraming: item.cameraFraming || item.camera_framing || "",
+    cameraMovement: item.cameraMovement || item.camera_movement || "",
+    lightingMood: item.lightingMood || item.lighting_mood || "",
+    narrationDialogue: item.narrationDialogue || item.narration_dialogue || "",
+    transition: item.transition || "",
+    generationNotes: item.generationNotes || item.generation_notes || "",
+    raw: item.raw || {},
+    createdAt: item.createdAt || item.created_at || now(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
+  };
+}
+
+function normalizeVideoPrompt(item = {}) {
+  return {
+    id: item.id || uid("video_prompt"),
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    shotId: item.shotId || item.shot_id || "",
+    promptTarget: VIDEO_PROMPT_TARGETS.includes(item.promptTarget || item.prompt_target) ? (item.promptTarget || item.prompt_target) : "Generic",
+    genericVideoPrompt: item.genericVideoPrompt || item.generic_video_prompt || "",
+    imageReferencePrompt: item.imageReferencePrompt || item.image_reference_prompt || "",
+    negativeInstructions: item.negativeInstructions || item.negative_instructions || "",
+    continuityNotes: item.continuityNotes || item.continuity_notes || "",
+    sourceShotHash: item.sourceShotHash || item.source_shot_hash || "",
+    revision: Math.max(1, Number(item.revision) || 1),
+    raw: item.raw || {},
+    createdAt: item.createdAt || item.created_at || now(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
+  };
+}
+
 function platformFromLegacy(platform) {
   if (isTargetPlatform(platform)) return platform;
   if (platform === LEGACY_LONG_FORM_PLATFORM) return "B站";
@@ -1336,6 +1445,43 @@ class ApiClient {
   decideStrategySuggestion(id, decision, workspaceId = "default") {
     return this.request(`/api/strategy-suggestions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ workspace_id: workspaceId, decision }) });
   }
+  getVideoPlans(workspaceId = "default", contentId = "") {
+    const query = new URLSearchParams({ workspace_id: workspaceId });
+    if (contentId) query.set("content_id", contentId);
+    return this.request(`/api/video-plans?${query.toString()}`);
+  }
+  getVideoPlanWorkspace(id, workspaceId = "default") {
+    return this.request(`/api/video-plans/${encodeURIComponent(id)}/workspace?workspace_id=${encodeURIComponent(workspaceId)}`);
+  }
+  getVideoPlanContext(id, workspaceId = "default") {
+    return this.request(`/api/video-plans/${encodeURIComponent(id)}/context?workspace_id=${encodeURIComponent(workspaceId)}`);
+  }
+  createVideoPlan(payload) { return this.request("/api/video-plans", { method: "POST", body: JSON.stringify(payload) }); }
+  updateVideoPlan(id, payload) { return this.request(`/api/video-plans/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) }); }
+  setVideoPlanStatus(id, status, workspaceId = "default") {
+    return this.request(`/api/video-plans/${encodeURIComponent(id)}/status`, { method: "PATCH", body: JSON.stringify({ workspace_id: workspaceId, status }) });
+  }
+  saveVideoScript(planId, payload) { return this.request(`/api/video-plans/${encodeURIComponent(planId)}/script`, { method: "PUT", body: JSON.stringify(payload) }); }
+  saveVideoStoryboard(planId, payload) { return this.request(`/api/video-plans/${encodeURIComponent(planId)}/storyboard`, { method: "PUT", body: JSON.stringify(payload) }); }
+  generateVideoStoryboard(planId, payload) { return this.request(`/api/video-plans/${encodeURIComponent(planId)}/storyboard/generate`, { method: "POST", body: JSON.stringify(payload) }); }
+  addVideoShot(storyboardId, payload) { return this.request(`/api/video-storyboards/${encodeURIComponent(storyboardId)}/shots`, { method: "POST", body: JSON.stringify(payload) }); }
+  updateVideoShot(shotId, payload) { return this.request(`/api/video-shots/${encodeURIComponent(shotId)}`, { method: "PUT", body: JSON.stringify(payload) }); }
+  removeVideoShot(shotId, workspaceId = "default") { return this.request(`/api/video-shots/${encodeURIComponent(shotId)}?workspace_id=${encodeURIComponent(workspaceId)}`, { method: "DELETE" }); }
+  reorderVideoShots(storyboardId, shotIds, workspaceId = "default") {
+    return this.request(`/api/video-storyboards/${encodeURIComponent(storyboardId)}/shots/reorder`, { method: "POST", body: JSON.stringify({ workspace_id: workspaceId, shot_ids: shotIds }) });
+  }
+  saveVideoPrompt(shotId, payload) { return this.request(`/api/video-shots/${encodeURIComponent(shotId)}/prompt`, { method: "PUT", body: JSON.stringify(payload) }); }
+  async getVideoPlannerData(workspaceId = "default") {
+    const plans = await this.getVideoPlans(workspaceId);
+    const workspaces = await Promise.all(plans.map(plan => this.getVideoPlanWorkspace(plan.id, workspaceId)));
+    return {
+      plans,
+      scripts: workspaces.map(item => item.script).filter(Boolean),
+      storyboards: workspaces.map(item => item.storyboard).filter(Boolean),
+      shots: workspaces.flatMap(item => item.shots || []),
+      prompts: workspaces.flatMap(item => item.prompts || [])
+    };
+  }
   corePayload(data = db) {
     return {
       topics: data.topics || [],
@@ -1362,13 +1508,128 @@ class ApiClient {
   importBusinessData(data) {
     return this.request("/api/import/localstorage-business", { method: "POST", body: JSON.stringify(this.businessPayload(data)) });
   }
+  async importVideoPlanner(data = db) {
+    const summary = { added: 0, updated: 0, skipped: 0, failed: 0 };
+    const serverPlans = await this.getVideoPlans("default");
+    for (const rawPlan of data.videoPlans || []) {
+      try {
+        const plan = normalizeVideoPlan(rawPlan);
+        let serverPlan = serverPlans.find(item => item.content_id === plan.contentId && item.content_revision === plan.contentRevision);
+        const existed = Boolean(serverPlan);
+        if (!serverPlan) {
+          serverPlan = await this.createVideoPlan({
+            id: plan.id,
+            workspace_id: plan.workspaceId,
+            content_id: plan.contentId,
+            video_concept: plan.videoConcept,
+            target_platform: plan.targetPlatform,
+            target_duration_seconds: plan.targetDurationSeconds,
+            content_format: plan.contentFormat,
+            visual_style: plan.visualStyle,
+            aspect_ratio: plan.aspectRatio,
+            raw: plan.raw
+          });
+        }
+        if (serverPlan.content_revision !== plan.contentRevision) throw new Error("Content revision mismatch");
+        serverPlan = await this.updateVideoPlan(serverPlan.id, {
+          workspace_id: plan.workspaceId,
+          video_concept: plan.videoConcept,
+          target_platform: plan.targetPlatform,
+          target_duration_seconds: plan.targetDurationSeconds,
+          content_format: plan.contentFormat,
+          visual_style: plan.visualStyle,
+          aspect_ratio: plan.aspectRatio,
+          status: plan.status,
+          raw: plan.raw
+        });
+        const script = (data.videoScripts || []).map(normalizeVideoScript).find(item => item.planId === plan.id);
+        if (script) await this.saveVideoScript(serverPlan.id, {
+          id: script.id,
+          workspace_id: plan.workspaceId,
+          hook: script.hook,
+          narration_dialogue: script.narrationDialogue,
+          main_story_flow: script.mainStoryFlow,
+          ending_cta: script.endingCta,
+          estimated_duration_seconds: script.estimatedDurationSeconds,
+          operation: "manual",
+          raw: script.raw
+        });
+        const storyboard = (data.videoStoryboards || []).map(normalizeVideoStoryboard).find(item => item.planId === plan.id);
+        if (storyboard && script) {
+          const localShots = (data.videoShots || []).map(normalizeVideoShot).filter(item => item.storyboardId === storyboard.id).sort((a, b) => a.shotNumber - b.shotNumber);
+          let workspace = await this.getVideoPlanWorkspace(serverPlan.id, plan.workspaceId);
+          const storyboardPayload = {
+            id: storyboard.id,
+            workspace_id: plan.workspaceId,
+            recurring_character_description: storyboard.recurringCharacterDescription,
+            clothing: storyboard.clothing,
+            environment: storyboard.environment,
+            visual_style: storyboard.visualStyle,
+            reference_notes: storyboard.referenceNotes,
+            operation: "manual",
+            raw: storyboard.raw
+          };
+          if (!workspace.storyboard && localShots.length) {
+            workspace = await this.generateVideoStoryboard(serverPlan.id, {
+              ...storyboardPayload,
+              operation: "generated",
+              shots: localShots.map(shot => ({ id: shot.id, ...this.videoShotPayload(shot) }))
+            });
+          } else {
+            await this.saveVideoStoryboard(serverPlan.id, storyboardPayload);
+            workspace = await this.getVideoPlanWorkspace(serverPlan.id, plan.workspaceId);
+            for (const shot of localShots) {
+              if ((workspace.shots || []).some(item => item.id === shot.id)) await this.updateVideoShot(shot.id, this.videoShotPayload(shot));
+              else await this.addVideoShot(workspace.storyboard.id, { id: shot.id, ...this.videoShotPayload(shot) });
+            }
+            if (localShots.length) await this.reorderVideoShots(workspace.storyboard.id, localShots.map(item => item.id), plan.workspaceId);
+          }
+          for (const prompt of (data.videoPrompts || []).map(normalizeVideoPrompt).filter(item => localShots.some(shot => shot.id === item.shotId))) {
+            await this.saveVideoPrompt(prompt.shotId, {
+              id: prompt.id,
+              workspace_id: plan.workspaceId,
+              prompt_target: prompt.promptTarget,
+              generic_video_prompt: prompt.genericVideoPrompt,
+              image_reference_prompt: prompt.imageReferencePrompt,
+              negative_instructions: prompt.negativeInstructions,
+              continuity_notes: prompt.continuityNotes,
+              operation: "manual",
+              raw: prompt.raw
+            });
+          }
+        }
+        summary[existed ? "updated" : "added"] += 1;
+      } catch { summary.failed += 1; }
+    }
+    if (!(data.videoPlans || []).length) summary.skipped = 0;
+    return summary;
+  }
+  videoShotPayload(shot) {
+    return {
+      workspace_id: shot.workspaceId,
+      shot_number: shot.shotNumber,
+      estimated_duration_seconds: shot.estimatedDurationSeconds,
+      scene_description: shot.sceneDescription,
+      subject_character: shot.subjectCharacter,
+      action: shot.action,
+      environment: shot.environment,
+      camera_framing: shot.cameraFraming,
+      camera_movement: shot.cameraMovement,
+      lighting_mood: shot.lightingMood,
+      narration_dialogue: shot.narrationDialogue,
+      transition: shot.transition,
+      generation_notes: shot.generationNotes,
+      raw: shot.raw
+    };
+  }
   async importAllLocalStorage(data) {
     const core = await this.importLocalStorage(data);
     const business = await this.importBusinessData(data);
-    return { core, business };
+    const videoPlanner = await this.importVideoPlanner(data);
+    return { core, business, videoPlanner };
   }
   async pullCoreData() {
-    const [topics, contents, knowledgeItems, creatorMemory, opportunities, creatorIntelligence, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords] = await Promise.all([
+    const [topics, contents, knowledgeItems, creatorMemory, opportunities, creatorIntelligence, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords, videoPlanner] = await Promise.all([
       this.request("/api/topics?limit=500"),
       this.request("/api/contents?limit=500"),
       this.request("/api/knowledge?limit=500"),
@@ -1380,9 +1641,10 @@ class ApiClient {
       this.request("/api/publishing-tasks?limit=500"),
       this.request("/api/tracking-snapshots?limit=500"),
       this.request("/api/analytics-records?limit=500"),
-      this.request("/api/experience-records?limit=500")
+      this.request("/api/experience-records?limit=500"),
+      this.getVideoPlannerData("default")
     ]);
-    return { topics, contents, knowledgeItems, creatorMemory, opportunities, creatorIntelligence, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords };
+    return { topics, contents, knowledgeItems, creatorMemory, opportunities, creatorIntelligence, platformVersions, approvals, publishingTasks, trackingSnapshots, analyticsRecords, experienceRecords, videoPlanner };
   }
   knowledgePayload(item) {
     const record = normalizeKnowledge(item);
@@ -1628,6 +1890,11 @@ function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
     improvements: item.improvements || [], reviewSummary: item.review_summary,
     reviewedAt: item.reviewed_at, createdAt: item.created_at, updatedAt: item.updated_at
   }));
+  const videoPlans = (snapshot.videoPlanner?.plans || []).map(normalizeVideoPlan);
+  const videoScripts = (snapshot.videoPlanner?.scripts || []).map(normalizeVideoScript);
+  const videoStoryboards = (snapshot.videoPlanner?.storyboards || []).map(normalizeVideoStoryboard);
+  const videoShots = (snapshot.videoPlanner?.shots || []).map(normalizeVideoShot);
+  const videoPrompts = (snapshot.videoPlanner?.prompts || []).map(normalizeVideoPrompt);
   if (authoritative) {
     db.topics = topics;
     db.contentItems = contents;
@@ -1639,6 +1906,11 @@ function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
     db.publishJobs = publishJobs;
     db.analyticsRecords = analyticsRecords;
     db.experienceItems = experienceItems;
+    db.videoPlans = videoPlans;
+    db.videoScripts = videoScripts;
+    db.videoStoryboards = videoStoryboards;
+    db.videoShots = videoShots;
+    db.videoPrompts = videoPrompts;
   } else {
     topics.forEach(item => upsertById(db.topics, item));
     contents.forEach(item => upsertById(db.contentItems, item));
@@ -1650,6 +1922,11 @@ function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
     publishJobs.forEach(item => upsertById(db.publishJobs, item));
     analyticsRecords.forEach(item => upsertById(db.analyticsRecords, item));
     experienceItems.forEach(item => upsertById(db.experienceItems, item));
+    videoPlans.forEach(item => upsertById(db.videoPlans, item));
+    videoScripts.forEach(item => upsertById(db.videoScripts, item));
+    videoStoryboards.forEach(item => upsertById(db.videoStoryboards, item));
+    videoShots.forEach(item => upsertById(db.videoShots, item));
+    videoPrompts.forEach(item => upsertById(db.videoPrompts, item));
   }
   if (snapshot.creatorMemory) db.settings.creatorMemory = normalizeCreatorMemory(snapshot.creatorMemory);
   if (snapshot.creatorIntelligence?.summary) db.settings.creatorIntelligenceSummary = snapshot.creatorIntelligence.summary;
@@ -1685,7 +1962,7 @@ async function bootstrapBackendCoreData() {
 function migrateDatabase(raw) {
   const source = raw && raw.contentItems ? raw : createInitialData();
   const newDb = {
-    schemaVersion: 9,
+    schemaVersion: 10,
     contentItems: [],
     topics: [],
     topicClusters: [],
@@ -1694,6 +1971,11 @@ function migrateDatabase(raw) {
     platformVersions: [],
     archivedGeneratedAssets: [],
     videoProjects: [],
+    videoPlans: [],
+    videoScripts: [],
+    videoStoryboards: [],
+    videoShots: [],
+    videoPrompts: [],
     publishJobs: [],
     analyticsRecords: [],
     experienceItems: [],
@@ -1731,6 +2013,11 @@ function migrateDatabase(raw) {
   const existingTopics = Array.isArray(source.topics) ? source.topics : createMockTopics();
   const existingArchived = Array.isArray(source.archivedGeneratedAssets) ? source.archivedGeneratedAssets : [];
   const existingVideoProjects = Array.isArray(source.videoProjects) ? source.videoProjects : [];
+  const existingVideoPlans = Array.isArray(source.videoPlans) ? source.videoPlans : [];
+  const existingVideoScripts = Array.isArray(source.videoScripts) ? source.videoScripts : [];
+  const existingVideoStoryboards = Array.isArray(source.videoStoryboards) ? source.videoStoryboards : [];
+  const existingVideoShots = Array.isArray(source.videoShots) ? source.videoShots : [];
+  const existingVideoPrompts = Array.isArray(source.videoPrompts) ? source.videoPrompts : [];
   const existingJobs = Array.isArray(source.publishJobs) ? source.publishJobs : [];
   const existingAnalytics = Array.isArray(source.analyticsRecords) ? source.analyticsRecords : [];
   const existingExperiences = Array.isArray(source.experienceItems) ? source.experienceItems : [];
@@ -1780,6 +2067,11 @@ function migrateDatabase(raw) {
     const project = normalizeVideoProject(item);
     if (!newDb.videoProjects.some(existing => existing.contentId === project.contentId)) newDb.videoProjects.push(project);
   });
+  newDb.videoPlans = existingVideoPlans.map(normalizeVideoPlan);
+  newDb.videoScripts = existingVideoScripts.map(normalizeVideoScript);
+  newDb.videoStoryboards = existingVideoStoryboards.map(normalizeVideoStoryboard);
+  newDb.videoShots = existingVideoShots.map(normalizeVideoShot);
+  newDb.videoPrompts = existingVideoPrompts.map(normalizeVideoPrompt);
   existingJobs.forEach(item => newDb.publishJobs.push(normalizePublishJob(item)));
   existingAnalytics.forEach(item => newDb.analyticsRecords.push(normalizeAnalyticsRecord(item)));
   existingExperiences.forEach(item => newDb.experienceItems.push(normalizeExperience(item)));
@@ -1865,6 +2157,11 @@ const ContentStore = {
     const nextStatus = patch.status && patch.status !== current.status;
     const statusHistory = nextStatus ? [{ status: patch.status, at: now(), note: "状态更新" }, ...(current.statusHistory || [])] : current.statusHistory;
     let candidate = normalizeContent({ ...current, ...patch, statusHistory, updatedAt: now() });
+    const contentVersionChanged = ApprovalService.currentSignature(current) !== ApprovalService.currentSignature(candidate);
+    if (contentVersionChanged) {
+      candidate.revision = Math.max(1, Number(current.revision) || 1) + 1;
+      candidate.contentHash = simpleHash(JSON.stringify(ApprovalService.snapshot(candidate)));
+    }
     if (["APPROVED", "READY_TO_PUBLISH"].includes(current.approvalStatus) && current.approvalSnapshot && ApprovalService.signature(current.approvalSnapshot) !== ApprovalService.currentSignature(candidate)) {
       candidate = normalizeContent({
         ...candidate,
@@ -1882,12 +2179,20 @@ const ContentStore = {
     return db.contentItems[index];
   },
   remove(id) {
+    const videoPlanIds = new Set((db.videoPlans || []).filter(item => item.contentId === id).map(item => item.id));
+    const storyboardIds = new Set((db.videoStoryboards || []).filter(item => videoPlanIds.has(item.planId)).map(item => item.id));
+    const shotIds = new Set((db.videoShots || []).filter(item => storyboardIds.has(item.storyboardId)).map(item => item.id));
     db.contentItems = db.contentItems.filter(item => item.id !== id);
     db.generatedAssets = db.generatedAssets.filter(item => item.contentId !== id);
     db.videoProjects = db.videoProjects.filter(item => item.contentId !== id);
     db.publishJobs = db.publishJobs.filter(item => item.contentId !== id);
     db.analyticsRecords = db.analyticsRecords.filter(item => item.contentId !== id);
     db.experienceItems = (db.experienceItems || []).filter(item => item.contentId !== id);
+    db.videoPlans = (db.videoPlans || []).filter(item => !videoPlanIds.has(item.id));
+    db.videoScripts = (db.videoScripts || []).filter(item => !videoPlanIds.has(item.planId));
+    db.videoStoryboards = (db.videoStoryboards || []).filter(item => !videoPlanIds.has(item.planId));
+    db.videoShots = (db.videoShots || []).filter(item => !storyboardIds.has(item.storyboardId));
+    db.videoPrompts = (db.videoPrompts || []).filter(item => !shotIds.has(item.shotId));
     if (appState.selectedContentId === id) appState.selectedContentId = db.contentItems[0]?.id || null;
     saveDb();
   },
@@ -3609,6 +3914,449 @@ const VideoProjectStore = {
   getByContentId(contentId) { return this.getAll().find(item => item.contentId === contentId) || null; },
   ensureForContent(contentId) {
     return this.getByContentId(contentId) || this.create({ contentId });
+  }
+};
+
+const VideoPlanStore = {
+  ...createCrudStore("videoPlans", normalizeVideoPlan),
+  getByContentId(contentId) {
+    return this.getAll().filter(item => item.contentId === contentId).sort((a, b) => b.contentRevision - a.contentRevision || new Date(b.updatedAt) - new Date(a.updatedAt));
+  },
+  getForRevision(contentId, revision) { return this.getByContentId(contentId).find(item => item.contentRevision === revision) || null; }
+};
+const VideoScriptStore = {
+  ...createCrudStore("videoScripts", normalizeVideoScript),
+  getByPlanId(planId) { return this.getAll().find(item => item.planId === planId) || null; }
+};
+const VideoStoryboardStore = {
+  ...createCrudStore("videoStoryboards", normalizeVideoStoryboard),
+  getByPlanId(planId) { return this.getAll().find(item => item.planId === planId) || null; }
+};
+const VideoShotStore = {
+  ...createCrudStore("videoShots", normalizeVideoShot),
+  getByStoryboardId(storyboardId) { return this.getAll().filter(item => item.storyboardId === storyboardId).sort((a, b) => a.shotNumber - b.shotNumber); }
+};
+const VideoPromptStore = {
+  ...createCrudStore("videoPrompts", normalizeVideoPrompt),
+  getByShotId(shotId) { return this.getAll().filter(item => item.shotId === shotId); },
+  getForTarget(shotId, target) { return this.getByShotId(shotId).find(item => item.promptTarget === target) || null; }
+};
+
+const VideoPlannerService = {
+  contentSnapshot(content) {
+    return {
+      id: content.id,
+      revision: content.revision || 1,
+      contentHash: content.contentHash || "",
+      title: content.title,
+      platform: content.studioPlatform || content.targetPlatforms?.[0] || "抖音",
+      contentType: content.studioFormat || content.contentType || "口播",
+      sourceUrl: content.sourceUrl || "",
+      draftTitle: content.draftTitle || content.title,
+      draftHook: content.draftHook || content.recommendedHook || "",
+      draftBody: content.draftBody || content.aiAnalysis || content.originalSummary || "",
+      draftTags: content.draftTags || content.tags || [],
+      selectedAngle: content.selectedAngle || content.recommendedAngle || "",
+      sourceTopicId: content.sourceTopicId || "",
+      sourceOpportunityId: content.sourceOpportunityId || "",
+      relevantKnowledgeIds: content.relevantKnowledgeIds || [],
+      relevantLearningIds: content.relevantLearningIds || []
+    };
+  },
+  decoratePlan(plan) {
+    if (!plan) return null;
+    const content = ContentStore.getById(plan.contentId);
+    return normalizeVideoPlan({
+      ...plan,
+      contentChanged: Boolean(content && ((content.revision || 1) !== plan.contentRevision || (plan.contentHash && content.contentHash && plan.contentHash !== content.contentHash)))
+    });
+  },
+  selectedPlan() {
+    let plan = appState.selectedVideoPlanId ? VideoPlanStore.getById(appState.selectedVideoPlanId) : null;
+    const selectedContentId = appState.selectedVideoContentId || appState.selectedContentId;
+    if (!plan && selectedContentId) {
+      const content = ContentStore.getById(selectedContentId);
+      plan = VideoPlanStore.getForRevision(selectedContentId, content?.revision || 1) || VideoPlanStore.getByContentId(selectedContentId)[0] || null;
+    }
+    if (!plan) plan = VideoPlanStore.getAll().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0] || null;
+    if (plan) {
+      appState.selectedVideoPlanId = plan.id;
+      appState.selectedVideoContentId = plan.contentId;
+    }
+    return this.decoratePlan(plan);
+  },
+  workspace(planId) {
+    const plan = this.decoratePlan(VideoPlanStore.getById(planId));
+    const script = VideoScriptStore.getByPlanId(planId);
+    const storyboard = VideoStoryboardStore.getByPlanId(planId);
+    const shots = storyboard ? VideoShotStore.getByStoryboardId(storyboard.id) : [];
+    const prompts = shots.flatMap(shot => VideoPromptStore.getByShotId(shot.id));
+    return { plan, script, storyboard, shots, prompts };
+  },
+  mergeWorkspace(workspace = {}) {
+    if (workspace.plan) upsertById(db.videoPlans, normalizeVideoPlan(workspace.plan));
+    if (workspace.script) upsertById(db.videoScripts, normalizeVideoScript(workspace.script));
+    if (workspace.storyboard) upsertById(db.videoStoryboards, normalizeVideoStoryboard(workspace.storyboard));
+    (workspace.shots || []).forEach(item => upsertById(db.videoShots, normalizeVideoShot(item)));
+    (workspace.prompts || []).forEach(item => upsertById(db.videoPrompts, normalizeVideoPrompt(item)));
+    saveDb();
+    return workspace.plan ? this.workspace(workspace.plan.id) : null;
+  },
+  localContext(plan) {
+    const content = ContentStore.getById(plan.contentId);
+    const opportunity = content?.sourceOpportunityId ? OpportunityStore.getById(content.sourceOpportunityId) : null;
+    const knowledge = (content?.relevantKnowledgeIds || []).map(id => KnowledgeStore.getById(id)).filter(item => item && item.status === KNOWLEDGE_STATUS.ACTIVE);
+    const learnings = (content?.relevantLearningIds || []).map(id => CreatorLearningStore.getById(id)).filter(item => item && item.status === CREATOR_LEARNING_STATUS.ACTIVE);
+    return { content, opportunity, creatorMemory: normalizeCreatorMemory(db.settings.creatorMemory), knowledge, learnings };
+  },
+  async context(plan) {
+    const server = await runBackendWrite("videoPlan.context", () => apiClient.getVideoPlanContext(plan.id, plan.workspaceId));
+    if (!server) return this.localContext(plan);
+    return {
+      content: normalizeContent({ ...(server.content.raw || {}), id: server.content.id, workspaceId: server.content.workspace_id, revision: server.content.revision, contentHash: server.content.content_hash, title: server.content.title }),
+      opportunity: server.opportunity ? normalizeOpportunity({ ...(server.opportunity.raw || {}), id: server.opportunity.id, topicId: server.opportunity.topic_id, contentOpportunity: server.opportunity.content_opportunity }) : null,
+      creatorMemory: normalizeCreatorMemory(server.creator_memory),
+      knowledge: (server.knowledge || []).map(item => normalizeKnowledge({ ...(item.raw || {}), id: item.id, title: item.title, summary: item.body, knowledgeType: item.knowledge_type, status: item.status })),
+      learnings: (server.learnings || []).map(normalizeCreatorLearning)
+    };
+  },
+  async create(contentId, overrides = {}) {
+    const content = ContentStore.getById(contentId);
+    if (!content) throw new Error("Content 不存在。");
+    const existing = VideoPlanStore.getForRevision(content.id, content.revision || 1);
+    if (existing) {
+      appState.selectedVideoPlanId = existing.id;
+      appState.selectedVideoContentId = content.id;
+      return this.decoratePlan(existing);
+    }
+    const payload = {
+      workspace_id: content.workspaceId || "default",
+      content_id: content.id,
+      video_concept: overrides.videoConcept || content.selectedAngle || content.recommendedAngle || content.draftTitle || content.title,
+      target_platform: overrides.targetPlatform || content.studioPlatform || content.targetPlatforms?.find(item => ["抖音", "B站"].includes(item)) || "抖音",
+      target_duration_seconds: Number(overrides.targetDurationSeconds) || (content.studioPlatform === "B站" ? 300 : 60),
+      content_format: overrides.contentFormat || content.studioFormat || "口播",
+      visual_style: overrides.visualStyle || "真实、现代、信息层次清晰",
+      aspect_ratio: overrides.aspectRatio || (content.studioPlatform === "B站" ? "16:9" : "9:16"),
+      raw: {}
+    };
+    const server = await runBackendWrite("videoPlan.create", () => apiClient.createVideoPlan(payload));
+    const plan = server ? normalizeVideoPlan(server) : normalizeVideoPlan({
+      workspaceId: payload.workspace_id,
+      contentId: content.id,
+      opportunityId: content.sourceOpportunityId || "",
+      contentRevision: content.revision || 1,
+      contentHash: content.contentHash || simpleHash(JSON.stringify(this.contentSnapshot(content))),
+      contentSnapshot: this.contentSnapshot(content),
+      videoConcept: payload.video_concept,
+      targetPlatform: payload.target_platform,
+      targetDurationSeconds: payload.target_duration_seconds,
+      contentFormat: payload.content_format,
+      visualStyle: payload.visual_style,
+      aspectRatio: payload.aspect_ratio
+    });
+    upsertById(db.videoPlans, plan);
+    appState.selectedVideoPlanId = plan.id;
+    appState.selectedVideoContentId = content.id;
+    saveDb();
+    return plan;
+  },
+  async updatePlan(planId, patch) {
+    const current = VideoPlanStore.getById(planId);
+    if (!current) throw new Error("Video Plan 不存在。");
+    const next = normalizeVideoPlan({ ...current, ...patch, updatedAt: now() });
+    if (next.status !== current.status) {
+      const script = VideoScriptStore.getByPlanId(planId);
+      const storyboard = VideoStoryboardStore.getByPlanId(planId);
+      const shots = storyboard ? VideoShotStore.getByStoryboardId(storyboard.id) : [];
+      if (next.status === VIDEO_PLAN_STATUS.PLANNED && !script) {
+        throw new Error("进入 Planned 前需要先保存 Script。");
+      }
+      if (next.status === VIDEO_PLAN_STATUS.IN_PRODUCTION && (!storyboard || !shots.length)) {
+        throw new Error("进入 In Production 前需要先建立 Storyboard 和 Shot List。");
+      }
+      if (next.status === VIDEO_PLAN_STATUS.READY_FOR_REVIEW && (!shots.length || shots.some(shot => !VideoPromptStore.getByShotId(shot.id).length))) {
+        throw new Error("进入 Ready for Review 前，每个 Shot 至少需要一个 Generation Prompt。");
+      }
+    }
+    const payload = {
+      workspace_id: next.workspaceId,
+      video_concept: next.videoConcept,
+      target_platform: next.targetPlatform,
+      target_duration_seconds: next.targetDurationSeconds,
+      content_format: next.contentFormat,
+      visual_style: next.visualStyle,
+      aspect_ratio: next.aspectRatio,
+      status: next.status,
+      raw: next.raw
+    };
+    const server = await runBackendWrite("videoPlan.update", () => apiClient.updateVideoPlan(planId, payload));
+    const saved = server ? normalizeVideoPlan(server) : next;
+    upsertById(db.videoPlans, saved);
+    saveDb();
+    return this.decoratePlan(saved);
+  },
+  sourceContextSummary(context) {
+    const creator = context.creatorMemory || {};
+    return {
+      content: this.contentSnapshot(context.content || {}),
+      opportunity: context.opportunity ? { angle: context.opportunity.contentOpportunity, whyItMatters: context.opportunity.whyItMatters, reasoning: context.opportunity.reasoning } : null,
+      creatorMemory: { positioning: creator.accountPositioning, audience: creator.targetAudience, tone: creator.toneStyle, formats: creator.preferredFormats },
+      knowledge: (context.knowledge || []).map(item => ({ type: item.knowledgeType, title: item.title, summary: item.summary, confidence: item.confidence })),
+      learnings: (context.learnings || []).map(item => ({ statement: item.learningStatement, confidence: item.confidence, sampleSize: item.sampleSize, status: item.status }))
+    };
+  },
+  fallbackScript(plan, context) {
+    const content = context.content || ContentStore.getById(plan.contentId) || {};
+    const snapshot = plan.contentSnapshot || this.contentSnapshot(content);
+    return {
+      hook: snapshot.draftHook || `如果把“${snapshot.draftTitle || snapshot.title}”讲清楚，最关键的一步是什么？`,
+      narrationDialogue: snapshot.draftBody || snapshot.title || plan.videoConcept,
+      mainStoryFlow: `1. 用 5 秒提出核心问题\n2. 解释 ${plan.videoConcept}\n3. 给出一个具体例子或可执行步骤\n4. 总结边界与适用人群`,
+      endingCta: "如果你想继续看这类可执行的 AI 工作流，收藏并告诉我你最想测试哪一步。",
+      estimatedDurationSeconds: plan.targetDurationSeconds
+    };
+  },
+  async generateScript(planId) {
+    const plan = this.decoratePlan(VideoPlanStore.getById(planId));
+    if (!plan) throw new Error("Video Plan 不存在。");
+    const context = await this.context(plan);
+    const fallback = this.fallbackScript(plan, context);
+    const prompt = `基于以下已确认的 Content 与创作者上下文，为视频制作计划生成结构化脚本。不要修改或编造上游数据，只返回 JSON：{"hook":"","narrationDialogue":"","mainStoryFlow":"","endingCta":"","estimatedDurationSeconds":60}。目标平台 ${plan.targetPlatform}，时长 ${plan.targetDurationSeconds} 秒，形式 ${plan.contentFormat}，概念 ${plan.videoConcept}。上下文：${JSON.stringify(this.sourceContextSummary(context))}`;
+    let result = fallback;
+    try {
+      const text = await aiRouter.generateText(prompt, { task: "video.script", title: plan.videoConcept, format: "Video Script JSON", systemPrompt: "你是 AI 视频制作规划师，只输出结构化 JSON，不虚构来源、知识或表现数据。" });
+      result = safeParseJSON(text, fallback) || fallback;
+    } catch { result = fallback; }
+    return this.saveScript(planId, result, "generated");
+  },
+  async saveScript(planId, values, operation = "manual") {
+    const plan = VideoPlanStore.getById(planId);
+    if (!plan) throw new Error("Video Plan 不存在。");
+    const current = VideoScriptStore.getByPlanId(planId);
+    const payload = {
+      workspace_id: plan.workspaceId,
+      hook: values.hook || "",
+      narration_dialogue: values.narrationDialogue || values.narration_dialogue || "",
+      main_story_flow: values.mainStoryFlow || values.main_story_flow || "",
+      ending_cta: values.endingCta || values.ending_cta || "",
+      estimated_duration_seconds: Number(values.estimatedDurationSeconds ?? values.estimated_duration_seconds) || plan.targetDurationSeconds,
+      operation,
+      raw: values.raw || {}
+    };
+    const server = await runBackendWrite("videoScript.save", () => apiClient.saveVideoScript(planId, payload));
+    const saved = server ? normalizeVideoScript(server) : normalizeVideoScript({
+      ...(current || {}), id: current?.id || uid("video_script"), workspaceId: plan.workspaceId, planId,
+      hook: payload.hook, narrationDialogue: payload.narration_dialogue, mainStoryFlow: payload.main_story_flow,
+      endingCta: payload.ending_cta, estimatedDurationSeconds: payload.estimated_duration_seconds,
+      sourceContext: { contentId: plan.contentId, contentRevision: plan.contentRevision, contentHash: plan.contentHash },
+      revision: current ? current.revision + 1 : 1, updatedAt: now()
+    });
+    upsertById(db.videoScripts, saved);
+    saveDb();
+    return saved;
+  },
+  fallbackStoryboard(plan, script, meta = {}) {
+    const beats = [script.hook, script.mainStoryFlow, script.endingCta].filter(Boolean);
+    const duration = Math.max(3, Math.round(plan.targetDurationSeconds / Math.max(3, beats.length)));
+    return [
+      { estimatedDurationSeconds: Math.min(6, duration), sceneDescription: "用强视觉开场呈现核心问题", subjectCharacter: meta.recurringCharacterDescription, action: "看向镜头并提出 Hook", environment: meta.environment, cameraFraming: "中近景", cameraMovement: "轻微推进", lightingMood: "清晰、有对比", narrationDialogue: script.hook, transition: "快速切入", generationNotes: "开头一秒内建立主题" },
+      { estimatedDurationSeconds: duration, sceneDescription: "用可视化步骤解释主要信息流", subjectCharacter: meta.recurringCharacterDescription, action: "展示流程、界面或关键例子", environment: meta.environment, cameraFraming: "中景与细节特写", cameraMovement: "稳定横移", lightingMood: "明亮、理性", narrationDialogue: script.mainStoryFlow, transition: "匹配剪辑", generationNotes: "按信息点拆画面，避免纯口播" },
+      { estimatedDurationSeconds: Math.min(8, duration), sceneDescription: "回到人物完成总结与行动提示", subjectCharacter: meta.recurringCharacterDescription, action: "总结并给出 CTA", environment: meta.environment, cameraFraming: "中近景", cameraMovement: "固定镜头", lightingMood: "自然、可信", narrationDialogue: script.endingCta, transition: "淡出", generationNotes: "保留字幕安全区" }
+    ];
+  },
+  async saveStoryboard(planId, values) {
+    const plan = VideoPlanStore.getById(planId);
+    const script = VideoScriptStore.getByPlanId(planId);
+    if (!plan || !script) throw new Error("请先生成并审核 Script。");
+    const current = VideoStoryboardStore.getByPlanId(planId);
+    const payload = {
+      workspace_id: plan.workspaceId,
+      recurring_character_description: values.recurringCharacterDescription || "",
+      clothing: values.clothing || "",
+      environment: values.environment || "",
+      visual_style: values.visualStyle || plan.visualStyle || "",
+      reference_notes: values.referenceNotes || "",
+      operation: "manual",
+      raw: values.raw || {}
+    };
+    const server = await runBackendWrite("videoStoryboard.save", () => apiClient.saveVideoStoryboard(planId, payload));
+    const saved = server ? normalizeVideoStoryboard(server) : normalizeVideoStoryboard({
+      ...(current || {}), id: current?.id || uid("video_storyboard"), workspaceId: plan.workspaceId, planId, scriptId: script.id,
+      recurringCharacterDescription: payload.recurring_character_description, clothing: payload.clothing,
+      environment: payload.environment, visualStyle: payload.visual_style, referenceNotes: payload.reference_notes,
+      revision: current ? current.revision + 1 : 1, updatedAt: now()
+    });
+    upsertById(db.videoStoryboards, saved);
+    saveDb();
+    return saved;
+  },
+  async generateStoryboard(planId, meta = {}) {
+    const plan = VideoPlanStore.getById(planId);
+    const script = VideoScriptStore.getByPlanId(planId);
+    if (!plan || !script) throw new Error("请先生成并审核 Script。");
+    const existing = VideoStoryboardStore.getByPlanId(planId);
+    if (existing && VideoShotStore.getByStoryboardId(existing.id).length) throw new Error("Storyboard 已有镜头。请人工编辑，或清空镜头后再重新生成，避免静默覆盖。");
+    const consistency = {
+      recurringCharacterDescription: meta.recurringCharacterDescription || "一位稳定出镜的中文 AI 内容创作者",
+      clothing: meta.clothing || "简洁、无明显品牌标识的服装",
+      environment: meta.environment || "整洁的现代创作工作室",
+      visualStyle: meta.visualStyle || plan.visualStyle || "真实、自然、信息层次清晰",
+      referenceNotes: meta.referenceNotes || "所有镜头保持人物面部、服装、主色调和空间布局一致"
+    };
+    const fallbackShots = this.fallbackStoryboard(plan, script, consistency);
+    const prompt = `只根据以下 Script 与一致性约束拆成 3-8 个结构化 Shot，返回 JSON：{"shots":[{"estimatedDurationSeconds":5,"sceneDescription":"","subjectCharacter":"","action":"","environment":"","cameraFraming":"","cameraMovement":"","lightingMood":"","narrationDialogue":"","transition":"","generationNotes":""}]}。不得改写上游事实。Script：${JSON.stringify(script)}。一致性：${JSON.stringify(consistency)}。`;
+    let shots = fallbackShots;
+    try {
+      const text = await aiRouter.generateText(prompt, { task: "video.storyboard", title: plan.videoConcept, format: "Storyboard JSON", systemPrompt: "你是 AI 视频分镜师。只输出 JSON，每个镜头必须源自给定 Script，并延续一致性约束。" });
+      const parsed = safeParseJSON(text, null);
+      if (Array.isArray(parsed?.shots) && parsed.shots.length) shots = parsed.shots.slice(0, 100);
+    } catch { shots = fallbackShots; }
+    const payload = {
+      workspace_id: plan.workspaceId,
+      recurring_character_description: consistency.recurringCharacterDescription,
+      clothing: consistency.clothing,
+      environment: consistency.environment,
+      visual_style: consistency.visualStyle,
+      reference_notes: consistency.referenceNotes,
+      operation: "generated",
+      raw: {},
+      shots: shots.map((item, index) => ({
+        estimated_duration_seconds: Number(item.estimatedDurationSeconds ?? item.estimated_duration_seconds) || 5,
+        scene_description: item.sceneDescription || item.scene_description || "",
+        subject_character: item.subjectCharacter || item.subject_character || consistency.recurringCharacterDescription,
+        action: item.action || "",
+        environment: item.environment || consistency.environment,
+        camera_framing: item.cameraFraming || item.camera_framing || "",
+        camera_movement: item.cameraMovement || item.camera_movement || "",
+        lighting_mood: item.lightingMood || item.lighting_mood || "",
+        narration_dialogue: item.narrationDialogue || item.narration_dialogue || "",
+        transition: item.transition || "",
+        generation_notes: item.generationNotes || item.generation_notes || "",
+        shot_number: index + 1,
+        raw: {}
+      }))
+    };
+    const server = await runBackendWrite("videoStoryboard.generate", () => apiClient.generateVideoStoryboard(planId, payload));
+    if (server) return this.mergeWorkspace(server);
+    const storyboard = await this.saveStoryboard(planId, consistency);
+    payload.shots.forEach(item => upsertById(db.videoShots, normalizeVideoShot({ ...item, workspaceId: plan.workspaceId, storyboardId: storyboard.id })));
+    saveDb();
+    return this.workspace(planId);
+  },
+  shotPayload(shot) {
+    return {
+      workspace_id: shot.workspaceId || "default",
+      shot_number: shot.shotNumber,
+      estimated_duration_seconds: shot.estimatedDurationSeconds,
+      scene_description: shot.sceneDescription,
+      subject_character: shot.subjectCharacter,
+      action: shot.action,
+      environment: shot.environment,
+      camera_framing: shot.cameraFraming,
+      camera_movement: shot.cameraMovement,
+      lighting_mood: shot.lightingMood,
+      narration_dialogue: shot.narrationDialogue,
+      transition: shot.transition,
+      generation_notes: shot.generationNotes,
+      raw: shot.raw || {}
+    };
+  },
+  async addShot(storyboardId) {
+    const storyboard = VideoStoryboardStore.getById(storyboardId);
+    if (!storyboard) throw new Error("Storyboard 不存在。");
+    const number = VideoShotStore.getByStoryboardId(storyboardId).length + 1;
+    const local = normalizeVideoShot({ workspaceId: storyboard.workspaceId, storyboardId, shotNumber: number, sceneDescription: "新镜头", estimatedDurationSeconds: 5 });
+    const server = await runBackendWrite("videoShot.add", () => apiClient.addVideoShot(storyboardId, this.shotPayload(local)));
+    const saved = server ? normalizeVideoShot(server) : local;
+    upsertById(db.videoShots, saved);
+    saveDb();
+    return saved;
+  },
+  async updateShot(shotId, patch) {
+    const current = VideoShotStore.getById(shotId);
+    if (!current) throw new Error("Shot 不存在。");
+    const next = normalizeVideoShot({ ...current, ...patch, updatedAt: now() });
+    const server = await runBackendWrite("videoShot.update", () => apiClient.updateVideoShot(shotId, this.shotPayload(next)));
+    const saved = server ? normalizeVideoShot(server) : next;
+    upsertById(db.videoShots, saved);
+    saveDb();
+    return saved;
+  },
+  async removeShot(shotId) {
+    const shot = VideoShotStore.getById(shotId);
+    if (!shot) return;
+    await runBackendWrite("videoShot.remove", () => apiClient.removeVideoShot(shotId, shot.workspaceId));
+    db.videoShots = db.videoShots.filter(item => item.id !== shotId);
+    db.videoPrompts = db.videoPrompts.filter(item => item.shotId !== shotId);
+    db.videoShots.filter(item => item.storyboardId === shot.storyboardId).sort((a, b) => a.shotNumber - b.shotNumber).forEach((item, index) => {
+      item.shotNumber = index + 1;
+      item.updatedAt = now();
+    });
+    saveDb();
+  },
+  async reorderShot(storyboardId, shotId, direction) {
+    const shots = VideoShotStore.getByStoryboardId(storyboardId);
+    const index = shots.findIndex(item => item.id === shotId);
+    const targetIndex = index + direction;
+    if (index < 0 || targetIndex < 0 || targetIndex >= shots.length) return shots;
+    [shots[index], shots[targetIndex]] = [shots[targetIndex], shots[index]];
+    const server = await runBackendWrite("videoShot.reorder", () => apiClient.reorderVideoShots(storyboardId, shots.map(item => item.id), shots[0].workspaceId));
+    const saved = server ? server.map(normalizeVideoShot) : shots.map((item, order) => normalizeVideoShot({ ...item, shotNumber: order + 1, updatedAt: now() }));
+    saved.forEach(item => upsertById(db.videoShots, item));
+    saveDb();
+    return saved;
+  },
+  promptTargetHint(target) {
+    return ({ Generic: "platform-neutral cinematic prompt", Seedance: "clear subject motion, camera motion and temporal continuity", Kling: "physical motion, camera language and subject consistency", Veo: "cinematic scene, sound-aware action and temporal detail", Runway: "concise visual transformation with camera and motion controls" })[target] || "platform-neutral prompt";
+  },
+  fallbackPrompt(shot, storyboard, target) {
+    const consistency = [storyboard.recurringCharacterDescription, storyboard.clothing, storyboard.environment, storyboard.visualStyle].filter(Boolean).join("; ");
+    return {
+      genericVideoPrompt: `${this.promptTargetHint(target)}. Shot ${shot.shotNumber}, ${shot.estimatedDurationSeconds}s. ${shot.sceneDescription}. Subject: ${shot.subjectCharacter || storyboard.recurringCharacterDescription}. Action: ${shot.action}. Environment: ${shot.environment || storyboard.environment}. Camera: ${shot.cameraFraming}, ${shot.cameraMovement}. Lighting and mood: ${shot.lightingMood}. Transition: ${shot.transition}.`,
+      imageReferencePrompt: `${consistency}. Reference frame for: ${shot.sceneDescription}.`,
+      negativeInstructions: "avoid character drift, clothing changes, extra fingers, warped faces, unreadable text, logos, flicker, jump cuts and inconsistent lighting",
+      continuityNotes: `${storyboard.referenceNotes || "Keep identity and visual style consistent."} Previous/next shot must preserve: ${consistency}.`
+    };
+  },
+  async generatePrompt(shotId, target = "Generic") {
+    const shot = VideoShotStore.getById(shotId);
+    const storyboard = shot ? VideoStoryboardStore.getById(shot.storyboardId) : null;
+    if (!shot || !storyboard) throw new Error("Shot 或 Storyboard 不存在。");
+    const fallback = this.fallbackPrompt(shot, storyboard, target);
+    const prompt = `请把以下结构化 Shot 转为 ${target} 目标的生成提示词。不得改动 Shot 内容，只返回 JSON：{"genericVideoPrompt":"","imageReferencePrompt":"","negativeInstructions":"","continuityNotes":""}。Shot：${JSON.stringify(shot)}。跨镜头一致性：${JSON.stringify(storyboard)}。目标写法：${this.promptTargetHint(target)}。`;
+    let result = fallback;
+    try {
+      const text = await aiRouter.generateText(prompt, { task: "video.prompt", title: `Shot ${shot.shotNumber} · ${target}`, format: "Video Prompt JSON", systemPrompt: "你是 AI Video Prompt 适配器，只把结构化镜头信息转成目标模型写法，不自由发挥。" });
+      result = safeParseJSON(text, fallback) || fallback;
+    } catch { result = fallback; }
+    return this.savePrompt(shotId, target, result, "generated");
+  },
+  async savePrompt(shotId, target, values, operation = "manual") {
+    const shot = VideoShotStore.getById(shotId);
+    if (!shot) throw new Error("Shot 不存在。");
+    const current = VideoPromptStore.getForTarget(shotId, target);
+    const payload = {
+      workspace_id: shot.workspaceId,
+      prompt_target: target,
+      generic_video_prompt: values.genericVideoPrompt || values.generic_video_prompt || "",
+      image_reference_prompt: values.imageReferencePrompt || values.image_reference_prompt || "",
+      negative_instructions: values.negativeInstructions || values.negative_instructions || "",
+      continuity_notes: values.continuityNotes || values.continuity_notes || "",
+      operation,
+      raw: values.raw || {}
+    };
+    const server = await runBackendWrite("videoPrompt.save", () => apiClient.saveVideoPrompt(shotId, payload));
+    const sourceHash = simpleHash(JSON.stringify({ shot, storyboard: VideoStoryboardStore.getById(shot.storyboardId) }));
+    const saved = server ? normalizeVideoPrompt(server) : normalizeVideoPrompt({
+      ...(current || {}), id: current?.id || uid("video_prompt"), workspaceId: shot.workspaceId, shotId,
+      promptTarget: target, genericVideoPrompt: payload.generic_video_prompt, imageReferencePrompt: payload.image_reference_prompt,
+      negativeInstructions: payload.negative_instructions, continuityNotes: payload.continuity_notes,
+      sourceShotHash: sourceHash, revision: current ? current.revision + 1 : 1, updatedAt: now()
+    });
+    upsertById(db.videoPrompts, saved);
+    saveDb();
+    return saved;
   }
 };
 
@@ -5829,6 +6577,12 @@ window.parseFeed = parseFeed;
 window.stripHtml = stripHtml;
 window.GeneratedAssetStore = GeneratedAssetStore;
 window.VideoProjectStore = VideoProjectStore;
+window.VideoPlanStore = VideoPlanStore;
+window.VideoScriptStore = VideoScriptStore;
+window.VideoStoryboardStore = VideoStoryboardStore;
+window.VideoShotStore = VideoShotStore;
+window.VideoPromptStore = VideoPromptStore;
+window.VideoPlannerService = VideoPlannerService;
 window.PublishJobStore = PublishJobStore;
 window.PublishingService = PublishingService;
 window.AnalyticsStore = AnalyticsStore;
@@ -5871,7 +6625,7 @@ window.OpportunityScoring = OpportunityScoring;
 // =========================
 function createInitialData() {
   return {
-    schemaVersion: 9,
+    schemaVersion: 10,
     contentItems: createMockContents(),
     topics: createMockTopics(),
     topicClusters: [],
@@ -5880,6 +6634,11 @@ function createInitialData() {
     platformVersions: [],
     archivedGeneratedAssets: [],
     videoProjects: [],
+    videoPlans: [],
+    videoScripts: [],
+    videoStoryboards: [],
+    videoShots: [],
+    videoPrompts: [],
     publishJobs: [],
     analyticsRecords: [],
     experienceItems: [],
@@ -6858,6 +7617,7 @@ function renderWorkspace() {
       <button class="btn" data-studio-generate="${content.id}">生成草稿</button>
       <button class="btn ghost" data-studio-save="${content.id}">保存草稿</button>
       <button class="btn ghost" data-review="${content.id}">AI 审核</button>
+      <button class="btn ghost" data-open-video-planner="${content.id}">进入 Video Planner</button>
     </div>
     <div class="grid workspace-grid">
       <div class="card">
@@ -6997,22 +7757,207 @@ function renderAssetGroup(platform, assets, types) {
 }
 
 function renderVideoPipeline() {
-  ensureVideoProjectsForGeneratedVideo();
-  const projects = VideoProjectStore.getAll();
-  return `<div class="grid">${projects.map(renderVideoProject).join("") || empty("还没有进入视频制作阶段的内容。")}</div>`;
+  const contents = ContentStore.getAll();
+  if (!contents.length) return empty("还没有 Content，请先从 Research Develop Opportunity 或在 Content Studio 创建内容。");
+  const selectedContentId = appState.selectedVideoContentId || appState.selectedContentId || contents[0].id;
+  appState.selectedVideoContentId = selectedContentId;
+  const plan = VideoPlannerService.selectedPlan();
+  const workspace = plan ? VideoPlannerService.workspace(plan.id) : null;
+  return `<div class="card toolbar video-planner-toolbar">
+      <select id="videoContentSelect">${contents.map(item => `<option value="${item.id}" ${item.id === selectedContentId ? "selected" : ""}>${escapeHtml(item.title)} · rev ${item.revision || 1}</option>`).join("")}</select>
+      <button class="btn" data-create-video-plan="${selectedContentId}">${plan && plan.contentId === selectedContentId && plan.contentRevision === (ContentStore.getById(selectedContentId)?.revision || 1) ? "打开当前版本 Plan" : "创建当前版本 Plan"}</button>
+      <select id="videoPromptTarget">${VIDEO_PROMPT_TARGETS.map(item => `<option value="${item}" ${item === appState.videoPromptTarget ? "selected" : ""}>Prompt: ${item}</option>`).join("")}</select>
+      <span class="chip">Human-in-the-loop</span>
+      <span class="chip">不调用视频生成 API</span>
+      ${appState.videoPlannerBusy ? `<span class="chip">${escapeHtml(appState.videoPlannerBusy)}…</span>` : ""}
+    </div>
+    ${appState.videoPlannerError ? `<div class="card warning-card">${escapeHtml(appState.videoPlannerError)}</div>` : ""}
+    <div class="video-planner-layout">
+      <aside class="card video-plan-sidebar">
+        <h3>Production Plans</h3>
+        <div class="meta">每个 Plan 固定绑定一个 Content revision。上游变化只会提示，不会覆盖旧计划。</div>
+        <div class="mini-stack">${VideoPlanStore.getAll().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).map(renderVideoPlanCard).join("") || empty("当前还没有 Video Plan。")}</div>
+      </aside>
+      <section class="video-planner-main">
+        ${workspace?.plan ? renderVideoPlannerWorkspace(workspace) : renderVideoPlannerEmpty(selectedContentId)}
+      </section>
+    </div>`;
 }
 
-function renderVideoProject(project) {
-  const item = ContentStore.getById(project.contentId);
-  if (!item) return "";
-  const keys = [["scriptDone", "脚本"], ["storyboardDone", "分镜"], ["voiceoverDone", "配音"], ["subtitleDone", "字幕"], ["coverDone", "封面"], ["videoDone", "成片"], ["readyToPublish", "可发布"]];
-  return `<div class="card item-card">
-    <div class="item-head"><h3 class="item-title">${escapeHtml(item.title)}</h3>${statusPill(item.status)}</div>
-    <div class="meta">${item.targetPlatforms.join(" / ")} · 进度 ${project.progress}%</div>
-    <div class="progress"><i style="width:${project.progress}%"></i></div>
-    <div class="checks">${keys.map(([key, label]) => `<label><input type="checkbox" data-video-check="${project.id}:${key}" ${project[key] ? "checked" : ""}/> ${label}</label>`).join("")}</div>
-    <div class="toolbar"><button class="btn small" data-video-ready="${project.id}">标记视频就绪</button><button class="btn small ghost" data-open-workspace="${item.id}">进入工作区</button></div>
+function renderVideoPlanCard(plan) {
+  const content = ContentStore.getById(plan.contentId);
+  const decorated = VideoPlannerService.decoratePlan(plan);
+  return `<button class="topic-card ${plan.id === appState.selectedVideoPlanId ? "active" : ""}" data-select-video-plan="${plan.id}">
+    <div class="item-head"><strong>${escapeHtml(content?.title || plan.contentSnapshot?.title || "Content 已不可用")}</strong><span class="chip">rev ${plan.contentRevision}</span></div>
+    <div class="meta">${escapeHtml(plan.targetPlatform)} · ${plan.targetDurationSeconds}s · ${escapeHtml(VIDEO_PLAN_STATUS_LABELS[plan.status])}</div>
+    <div class="chips">${decorated.contentChanged ? `<span class="pill danger">上游已修改</span>` : `<span class="pill success">版本一致</span>`}</div>
+  </button>`;
+}
+
+function renderVideoPlannerEmpty(contentId) {
+  const content = ContentStore.getById(contentId);
+  return `<div class="card video-stage-card">
+    <div class="stage-kicker">STEP 1</div>
+    <h2>从 Content 创建 Video Production Plan</h2>
+    <p>${escapeHtml(content?.title || "请选择 Content")}</p>
+    <div class="meta">创建时会保存 Content rev ${content?.revision || 1} 的不可变快照。之后编辑 Content 不会静默改变这个计划。</div>
+    <div class="toolbar"><button class="btn" data-create-video-plan="${contentId}">Generate Video Plan</button><button class="btn ghost" data-open-workspace="${contentId}">返回 Content Studio</button></div>
   </div>`;
+}
+
+function renderVideoPlannerWorkspace({ plan, script, storyboard, shots }) {
+  const content = ContentStore.getById(plan.contentId);
+  const progress = [Boolean(plan.videoConcept), Boolean(script), Boolean(storyboard), Boolean(shots.length), Boolean(shots.length && shots.every(shot => VideoPromptStore.getForTarget(shot.id, appState.videoPromptTarget)))].filter(Boolean).length;
+  return `${plan.contentChanged ? `<div class="card version-warning"><strong>上游 Content 已修改</strong><p>此 Plan 仍绑定 Content rev ${plan.contentRevision}，历史 Script、Storyboard 与 Prompt 不会被覆盖。若要使用新内容，请创建当前 Content revision 的新 Plan。</p></div>` : ""}
+    <div class="card video-stage-card">
+      <div class="item-head"><div><div class="stage-kicker">STEP 1 · CONCEPT</div><h2>${escapeHtml(content?.title || plan.contentSnapshot?.title || "Video Plan")}</h2></div><span class="score">${progress}/5</span></div>
+      <div class="version-binding"><span>Content rev ${plan.contentRevision}</span><span>Hash ${escapeHtml((plan.contentHash || "local").slice(0, 12))}</span><span>Created ${new Date(plan.createdAt).toLocaleString("zh-CN")}</span></div>
+      <div class="form-grid video-plan-fields">
+        <div class="span-2"><label>Video Concept</label><textarea id="videoPlanConcept">${escapeHtml(plan.videoConcept)}</textarea></div>
+        <div><label>Target Platform</label><select id="videoPlanPlatform">${["小红书", "抖音", "B站", "公众号"].map(item => `<option ${item === plan.targetPlatform ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+        <div><label>Target Duration (seconds)</label><input id="videoPlanDuration" type="number" min="1" max="14400" value="${plan.targetDurationSeconds}" /></div>
+        <div><label>Content Format</label><input id="videoPlanFormat" value="${escapeHtml(plan.contentFormat)}" /></div>
+        <div><label>Aspect Ratio</label><select id="videoPlanAspect"><option ${plan.aspectRatio === "9:16" ? "selected" : ""}>9:16</option><option ${plan.aspectRatio === "16:9" ? "selected" : ""}>16:9</option><option ${plan.aspectRatio === "1:1" ? "selected" : ""}>1:1</option></select></div>
+        <div class="span-2"><label>Visual Style</label><textarea id="videoPlanVisualStyle">${escapeHtml(plan.visualStyle)}</textarea></div>
+        <div><label>Status</label><select id="videoPlanStatus">${Object.values(VIDEO_PLAN_STATUS).map(item => `<option value="${item}" ${item === plan.status ? "selected" : ""}>${VIDEO_PLAN_STATUS_LABELS[item]}</option>`).join("")}</select></div>
+      </div>
+      <div class="toolbar"><button class="btn" data-save-video-plan="${plan.id}">Save Plan</button><button class="btn ghost" data-open-workspace="${plan.contentId}">Open Content Studio</button></div>
+    </div>
+    ${renderVideoScriptStage(plan, script)}
+    ${renderVideoStoryboardStage(plan, script, storyboard, shots)}`;
+}
+
+function renderVideoScriptStage(plan, script) {
+  return `<div class="card video-stage-card ${script ? "stage-complete" : ""}">
+    <div class="stage-kicker">STEP 2 · SCRIPT</div>
+    <div class="item-head"><h3>Script</h3>${script ? `<span class="chip">revision ${script.revision}</span>` : `<span class="chip">等待生成</span>`}</div>
+    <div class="meta">先生成或人工填写，再审核内容。生成 Script 不会修改 Content、Opportunity、Knowledge 或 Learning。</div>
+    <div class="form-grid single">
+      <div><label>Hook</label><textarea id="videoScriptHook">${escapeHtml(script?.hook || "")}</textarea></div>
+      <div><label>Narration / Dialogue</label><textarea id="videoScriptNarration">${escapeHtml(script?.narrationDialogue || "")}</textarea></div>
+      <div><label>Main Story / Information Flow</label><textarea id="videoScriptFlow" class="studio-body compact">${escapeHtml(script?.mainStoryFlow || "")}</textarea></div>
+      <div><label>Ending / CTA</label><textarea id="videoScriptCta">${escapeHtml(script?.endingCta || "")}</textarea></div>
+      <div><label>Estimated Duration</label><input id="videoScriptDuration" type="number" min="1" max="14400" value="${script?.estimatedDurationSeconds || plan.targetDurationSeconds}" /></div>
+    </div>
+    <div class="toolbar"><button class="btn" data-generate-video-script="${plan.id}">${script ? "Regenerate Script" : "Generate Script"}</button><button class="btn ghost" data-save-video-script="${plan.id}">Save Manual Edits</button></div>
+    ${script ? `<div class="meta">Source context: Content rev ${script.sourceContext?.contentRevision || plan.contentRevision} · Knowledge ${(script.sourceContext?.knowledgeIds || []).length} · Learning ${(script.sourceContext?.learningIds || []).length}</div>` : ""}
+  </div>`;
+}
+
+function renderVideoStoryboardStage(plan, script, storyboard, shots) {
+  const target = appState.videoPromptTarget;
+  return `<div class="card video-stage-card ${storyboard ? "stage-complete" : ""}">
+    <div class="stage-kicker">STEP 3 · STORYBOARD & CONSISTENCY</div>
+    <div class="item-head"><h3>Storyboard</h3>${storyboard ? `<span class="chip">revision ${storyboard.revision} · ${shots.length} shots</span>` : `<span class="chip">先完成 Script</span>`}</div>
+    <div class="form-grid video-plan-fields">
+      <div class="span-2"><label>Recurring Character Description</label><textarea id="videoCharacter">${escapeHtml(storyboard?.recurringCharacterDescription || "")}</textarea></div>
+      <div><label>Clothing</label><input id="videoClothing" value="${escapeHtml(storyboard?.clothing || "")}" /></div>
+      <div><label>Environment</label><input id="videoEnvironment" value="${escapeHtml(storyboard?.environment || "")}" /></div>
+      <div><label>Visual Style</label><input id="videoStoryboardStyle" value="${escapeHtml(storyboard?.visualStyle || plan.visualStyle)}" /></div>
+      <div><label>Reference Notes</label><textarea id="videoReferenceNotes">${escapeHtml(storyboard?.referenceNotes || "")}</textarea></div>
+    </div>
+    <div class="toolbar"><button class="btn" data-generate-storyboard="${plan.id}" ${!script || shots.length ? "disabled" : ""}>Generate Storyboard</button><button class="btn ghost" data-save-storyboard="${plan.id}" ${!script ? "disabled" : ""}>Save Consistency</button>${shots.length ? `<span class="meta">已有镜头时不会整批重新生成，避免覆盖人工编辑。</span>` : ""}</div>
+    ${storyboard ? `<div class="divider"></div><div class="item-head"><div><div class="stage-kicker">STEP 4 · SHOT LIST</div><h3>Editable Shots</h3></div><button class="btn small" data-add-video-shot="${storyboard.id}">Add Shot</button></div>
+      <div class="shot-list">${shots.map((shot, index) => renderVideoShotEditor(shot, storyboard, target, index, shots.length)).join("") || empty("尚无 Shot。")}</div>` : empty("保存或生成 Storyboard 后即可编辑 Shot List。")}
+  </div>`;
+}
+
+function renderVideoShotEditor(shot, storyboard, target, index, count) {
+  const prompt = VideoPromptStore.getForTarget(shot.id, target);
+  const promptStale = Boolean(prompt && (new Date(shot.updatedAt) > new Date(prompt.updatedAt) || new Date(storyboard.updatedAt) > new Date(prompt.updatedAt)));
+  return `<article class="shot-editor" data-shot-card="${shot.id}">
+    <div class="item-head"><div><span class="shot-number">SHOT ${shot.shotNumber}</span><span class="meta">${shot.estimatedDurationSeconds}s</span></div><div class="toolbar compact"><button class="btn icon ghost" data-move-video-shot="${shot.id}:-1" ${index === 0 ? "disabled" : ""}>↑</button><button class="btn icon ghost" data-move-video-shot="${shot.id}:1" ${index === count - 1 ? "disabled" : ""}>↓</button><button class="btn small danger" data-remove-video-shot="${shot.id}">Remove</button></div></div>
+    <div class="shot-editor-grid">
+      <div class="span-2"><label>Scene Description</label><textarea id="shotScene_${shot.id}">${escapeHtml(shot.sceneDescription)}</textarea></div>
+      <div><label>Duration</label><input id="shotDuration_${shot.id}" type="number" min="1" max="3600" value="${shot.estimatedDurationSeconds}" /></div>
+      <div><label>Subject / Character</label><input id="shotSubject_${shot.id}" value="${escapeHtml(shot.subjectCharacter)}" /></div>
+      <div><label>Action</label><input id="shotAction_${shot.id}" value="${escapeHtml(shot.action)}" /></div>
+      <div><label>Environment</label><input id="shotEnvironment_${shot.id}" value="${escapeHtml(shot.environment)}" /></div>
+      <div><label>Camera Framing</label><input id="shotFraming_${shot.id}" value="${escapeHtml(shot.cameraFraming)}" /></div>
+      <div><label>Camera Movement</label><input id="shotMovement_${shot.id}" value="${escapeHtml(shot.cameraMovement)}" /></div>
+      <div><label>Lighting / Mood</label><input id="shotLighting_${shot.id}" value="${escapeHtml(shot.lightingMood)}" /></div>
+      <div><label>Transition</label><input id="shotTransition_${shot.id}" value="${escapeHtml(shot.transition)}" /></div>
+      <div class="span-2"><label>Narration / Dialogue</label><textarea id="shotNarration_${shot.id}">${escapeHtml(shot.narrationDialogue)}</textarea></div>
+      <div class="span-2"><label>Generation Notes</label><textarea id="shotNotes_${shot.id}">${escapeHtml(shot.generationNotes)}</textarea></div>
+    </div>
+    <div class="toolbar"><button class="btn small ghost" data-save-video-shot="${shot.id}">Save Shot</button></div>
+    <div class="shot-prompt-panel">
+      <div class="item-head"><div><div class="stage-kicker">STEP 5 · ${escapeHtml(target)} PROMPT</div><strong>Shot Generation Prompt</strong></div>${prompt ? `<span class="chip">revision ${prompt.revision}${promptStale ? " · Shot 已修改" : ""}</span>` : ""}</div>
+      <div class="form-grid single">
+        <div><label>Generic Video Prompt</label><textarea id="promptVideo_${shot.id}" class="prompt-textarea">${escapeHtml(prompt?.genericVideoPrompt || "")}</textarea></div>
+        <div><label>Image / Reference Prompt</label><textarea id="promptImage_${shot.id}">${escapeHtml(prompt?.imageReferencePrompt || "")}</textarea></div>
+        <div><label>Negative / Avoid</label><textarea id="promptNegative_${shot.id}">${escapeHtml(prompt?.negativeInstructions || "")}</textarea></div>
+        <div><label>Continuity Notes</label><textarea id="promptContinuity_${shot.id}">${escapeHtml(prompt?.continuityNotes || "")}</textarea></div>
+      </div>
+      <div class="toolbar"><button class="btn small" data-generate-video-prompt="${shot.id}">${prompt ? `Regenerate ${target}` : `Generate ${target}`}</button><button class="btn small ghost" data-save-video-prompt="${shot.id}">Save Manual Edits</button></div>
+    </div>
+  </article>`;
+}
+
+function collectVideoPlanForm() {
+  return {
+    videoConcept: document.getElementById("videoPlanConcept")?.value.trim() || "",
+    targetPlatform: document.getElementById("videoPlanPlatform")?.value || "抖音",
+    targetDurationSeconds: Number(document.getElementById("videoPlanDuration")?.value) || 60,
+    contentFormat: document.getElementById("videoPlanFormat")?.value.trim() || "口播",
+    aspectRatio: document.getElementById("videoPlanAspect")?.value || "9:16",
+    visualStyle: document.getElementById("videoPlanVisualStyle")?.value.trim() || "",
+    status: document.getElementById("videoPlanStatus")?.value || VIDEO_PLAN_STATUS.DRAFT
+  };
+}
+
+function collectVideoScriptForm() {
+  return {
+    hook: document.getElementById("videoScriptHook")?.value.trim() || "",
+    narrationDialogue: document.getElementById("videoScriptNarration")?.value.trim() || "",
+    mainStoryFlow: document.getElementById("videoScriptFlow")?.value.trim() || "",
+    endingCta: document.getElementById("videoScriptCta")?.value.trim() || "",
+    estimatedDurationSeconds: Number(document.getElementById("videoScriptDuration")?.value) || 60
+  };
+}
+
+function collectVideoStoryboardForm() {
+  return {
+    recurringCharacterDescription: document.getElementById("videoCharacter")?.value.trim() || "",
+    clothing: document.getElementById("videoClothing")?.value.trim() || "",
+    environment: document.getElementById("videoEnvironment")?.value.trim() || "",
+    visualStyle: document.getElementById("videoStoryboardStyle")?.value.trim() || "",
+    referenceNotes: document.getElementById("videoReferenceNotes")?.value.trim() || ""
+  };
+}
+
+function collectVideoShotForm(shotId) {
+  return {
+    estimatedDurationSeconds: Number(document.getElementById(`shotDuration_${shotId}`)?.value) || 5,
+    sceneDescription: document.getElementById(`shotScene_${shotId}`)?.value.trim() || "",
+    subjectCharacter: document.getElementById(`shotSubject_${shotId}`)?.value.trim() || "",
+    action: document.getElementById(`shotAction_${shotId}`)?.value.trim() || "",
+    environment: document.getElementById(`shotEnvironment_${shotId}`)?.value.trim() || "",
+    cameraFraming: document.getElementById(`shotFraming_${shotId}`)?.value.trim() || "",
+    cameraMovement: document.getElementById(`shotMovement_${shotId}`)?.value.trim() || "",
+    lightingMood: document.getElementById(`shotLighting_${shotId}`)?.value.trim() || "",
+    narrationDialogue: document.getElementById(`shotNarration_${shotId}`)?.value.trim() || "",
+    transition: document.getElementById(`shotTransition_${shotId}`)?.value.trim() || "",
+    generationNotes: document.getElementById(`shotNotes_${shotId}`)?.value.trim() || ""
+  };
+}
+
+function collectVideoPromptForm(shotId) {
+  return {
+    genericVideoPrompt: document.getElementById(`promptVideo_${shotId}`)?.value.trim() || "",
+    imageReferencePrompt: document.getElementById(`promptImage_${shotId}`)?.value.trim() || "",
+    negativeInstructions: document.getElementById(`promptNegative_${shotId}`)?.value.trim() || "",
+    continuityNotes: document.getElementById(`promptContinuity_${shotId}`)?.value.trim() || ""
+  };
+}
+
+async function runVideoPlannerAction(label, action) {
+  appState.videoPlannerBusy = label;
+  appState.videoPlannerError = "";
+  render();
+  try { return await action(); }
+  catch (error) { appState.videoPlannerError = error.message || String(error); return null; }
+  finally { appState.videoPlannerBusy = ""; render(); }
 }
 
 function renderPublishCenter() {
@@ -7470,7 +8415,7 @@ function renderSettings() {
   return `<div class="grid two">
     <div class="card"><h3>Storage Providers</h3><p>当前启用：<strong>${db.settings.provider}</strong></p><div class="mini-stack"><span class="chip">StorageProvider</span><span class="chip">LocalStorageProvider 已实现</span><span class="chip">SupabaseProvider placeholder</span></div></div>
     <div class="card"><h3>AI Capabilities</h3><p>原 Skills 管理已合并到这里。所有生成行为通过统一 aiRouter mock 方法。</p><div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>
-    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Experience ${db.experienceItems?.length || 0}</span></div></div>
+    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoPlan ${db.videoPlans?.length || 0}</span><span class="chip">Shot ${db.videoShots?.length || 0}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Experience ${db.experienceItems?.length || 0}</span></div></div>
     <div class="card"><h3>后台配置</h3><textarea id="settingsNotes">${escapeHtml(db.settings.adminNotes)}</textarea><div class="toolbar" style="margin-top:12px"><button class="btn" data-save-settings>保存设置</button></div></div>
   </div>`;
 }
@@ -7585,7 +8530,7 @@ function renderSettingsV2() {
     ${renderClusteringSettings(clusteringConfig)}
     <div class="card"><h3>Storage Providers</h3><p>当前启用：<strong>${db.settings.provider}</strong></p><div class="mini-stack"><span class="chip">StorageProvider</span><span class="chip">LocalStorageProvider 已实现</span><span class="chip">SupabaseProvider placeholder</span></div></div>
     <div class="card"><h3>AI Capabilities</h3><p>所有生成行为通过统一 aiRouter；真实调用仅预留给 openai / zai / deepseek / custom。</p><div class="mini-stack">${db.settings.aiCapabilities.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>
-    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">Topic ${db.topics.length}</span><span class="chip">TopicCluster ${db.topicClusters.length}</span><span class="chip">DailyBrief ${db.dailyBriefs?.length || 0}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoProject ${db.videoProjects.length}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Experience ${db.experienceItems?.length || 0}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
+    <div class="card"><h3>数据模型</h3><div class="mini-stack"><span class="chip">Content ${db.contentItems.length}</span><span class="chip">Topic ${db.topics.length}</span><span class="chip">TopicCluster ${db.topicClusters.length}</span><span class="chip">DailyBrief ${db.dailyBriefs?.length || 0}</span><span class="chip">GeneratedAsset ${db.generatedAssets.length}</span><span class="chip">VideoPlan ${db.videoPlans?.length || 0}</span><span class="chip">Shot ${db.videoShots?.length || 0}</span><span class="chip">PublishJob ${db.publishJobs.length}</span><span class="chip">AnalyticsRecord ${db.analyticsRecords.length}</span><span class="chip">Experience ${db.experienceItems?.length || 0}</span><span class="chip">Task ${db.tasks?.length || 0}</span></div></div>
     <div class="card"><h3>后台配置</h3><textarea id="settingsNotes">${escapeHtml(db.settings.adminNotes)}</textarea><div class="toolbar" style="margin-top:12px"><button class="btn" data-save-settings>保存设置</button></div></div>
   </div>`;
 }
@@ -7744,7 +8689,7 @@ function renderHealth() {
   target.innerHTML = `
     <span class="chip">Content ${db.contentItems?.length || 0}</span>
     <span class="chip">Asset ${db.generatedAssets?.length || 0}</span>
-    <span class="chip">Video ${db.videoProjects?.length || 0}</span>
+    <span class="chip">Video Plans ${db.videoPlans?.length || 0}</span>
     <span class="chip">Tasks ${db.tasks?.length || 0}</span>
     <span class="chip">Provider ${db.settings?.provider || "LocalStorageProvider"}</span>
     <span class="chip">AI Mode: ${aiConfig.provider}</span>
@@ -7851,6 +8796,76 @@ document.addEventListener("click", async event => {
   if (target.dataset.retryTask) { await TaskQueue.retry(target.dataset.retryTask); return render(); }
   if (target.dataset.agentChain) return createAgentTaskChain(target.dataset.agentChain);
   if (target.dataset.openWorkspace) { appState.selectedContentId = target.dataset.openWorkspace; return setPage("workspace"); }
+  if (target.dataset.openVideoPlanner) {
+    const content = ContentStore.getById(target.dataset.openVideoPlanner);
+    appState.selectedContentId = target.dataset.openVideoPlanner;
+    appState.selectedVideoContentId = target.dataset.openVideoPlanner;
+    appState.selectedVideoPlanId = VideoPlanStore.getForRevision(target.dataset.openVideoPlanner, content?.revision || 1)?.id || null;
+    appState.videoPlannerError = "";
+    return setPage("video");
+  }
+  if (target.dataset.createVideoPlan) {
+    const contentId = target.dataset.createVideoPlan;
+    return runVideoPlannerAction("创建 Video Plan", async () => {
+      const plan = await VideoPlannerService.create(contentId);
+      appState.selectedVideoPlanId = plan.id;
+      appState.selectedVideoContentId = contentId;
+    });
+  }
+  if (target.dataset.selectVideoPlan) {
+    const plan = VideoPlanStore.getById(target.dataset.selectVideoPlan);
+    if (plan) {
+      appState.selectedVideoPlanId = plan.id;
+      appState.selectedVideoContentId = plan.contentId;
+      appState.videoPlannerError = "";
+    }
+    return render();
+  }
+  if (target.dataset.saveVideoPlan) {
+    const values = collectVideoPlanForm();
+    return runVideoPlannerAction("保存 Concept", () => VideoPlannerService.updatePlan(target.dataset.saveVideoPlan, values));
+  }
+  if (target.dataset.generateVideoScript) {
+    return runVideoPlannerAction("生成 Script", () => VideoPlannerService.generateScript(target.dataset.generateVideoScript));
+  }
+  if (target.dataset.saveVideoScript) {
+    const values = collectVideoScriptForm();
+    return runVideoPlannerAction("保存 Script", () => VideoPlannerService.saveScript(target.dataset.saveVideoScript, values));
+  }
+  if (target.dataset.generateStoryboard) {
+    const values = collectVideoStoryboardForm();
+    return runVideoPlannerAction("生成 Storyboard", () => VideoPlannerService.generateStoryboard(target.dataset.generateStoryboard, values));
+  }
+  if (target.dataset.saveStoryboard) {
+    const values = collectVideoStoryboardForm();
+    return runVideoPlannerAction("保存一致性设置", () => VideoPlannerService.saveStoryboard(target.dataset.saveStoryboard, values));
+  }
+  if (target.dataset.addVideoShot) {
+    return runVideoPlannerAction("新增 Shot", () => VideoPlannerService.addShot(target.dataset.addVideoShot));
+  }
+  if (target.dataset.saveVideoShot) {
+    const shotId = target.dataset.saveVideoShot;
+    const values = collectVideoShotForm(shotId);
+    return runVideoPlannerAction("保存 Shot", () => VideoPlannerService.updateShot(shotId, values));
+  }
+  if (target.dataset.moveVideoShot) {
+    const [shotId, direction] = target.dataset.moveVideoShot.split(":");
+    const shot = VideoShotStore.getById(shotId);
+    return runVideoPlannerAction("调整 Shot 顺序", () => VideoPlannerService.reorderShot(shot.storyboardId, shotId, Number(direction)));
+  }
+  if (target.dataset.removeVideoShot) {
+    return runVideoPlannerAction("删除 Shot", () => VideoPlannerService.removeShot(target.dataset.removeVideoShot));
+  }
+  if (target.dataset.generateVideoPrompt) {
+    const targetName = appState.videoPromptTarget || "Generic";
+    return runVideoPlannerAction(`生成 ${targetName} Prompt`, () => VideoPlannerService.generatePrompt(target.dataset.generateVideoPrompt, targetName));
+  }
+  if (target.dataset.saveVideoPrompt) {
+    const shotId = target.dataset.saveVideoPrompt;
+    const targetName = appState.videoPromptTarget || "Generic";
+    const values = collectVideoPromptForm(shotId);
+    return runVideoPlannerAction(`保存 ${targetName} Prompt`, () => VideoPlannerService.savePrompt(shotId, targetName, values));
+  }
   if (target.dataset.openKnowledge) { appState.editKnowledgeId = target.dataset.openKnowledge; return setPage("knowledge"); }
   if (target.dataset.refreshGithub !== undefined) {
     const task = TaskQueue.add(TASK_TYPES.FETCH_GITHUB_TOPICS, {});
@@ -8613,6 +9628,18 @@ document.addEventListener("click", async event => {
 
 document.addEventListener("change", event => {
   const target = event.target;
+  if (target.id === "videoContentSelect") {
+    const content = ContentStore.getById(target.value);
+    appState.selectedVideoContentId = target.value;
+    appState.selectedContentId = target.value;
+    appState.selectedVideoPlanId = VideoPlanStore.getForRevision(target.value, content?.revision || 1)?.id || null;
+    appState.videoPlannerError = "";
+    return render();
+  }
+  if (target.id === "videoPromptTarget") {
+    appState.videoPromptTarget = VIDEO_PROMPT_TARGETS.includes(target.value) ? target.value : "Generic";
+    return render();
+  }
   if (target.dataset.videoCheck) {
     const [id, key] = target.dataset.videoCheck.split(":");
     const project = VideoProjectStore.getById(id);
