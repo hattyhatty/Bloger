@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, CheckConstraint, Column, JSON, DateTime, ForeignKey, Index, Integer, String, Table, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, JSON, DateTime, ForeignKey, Index, Integer, String, Table, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -545,6 +545,8 @@ class VideoShot(Base, TimestampMixin):
 
     storyboard: Mapped[VideoStoryboard] = relationship(back_populates="shots")
     prompts: Mapped[list["VideoGenerationPrompt"]] = relationship(back_populates="shot", cascade="all, delete-orphan")
+    reference_links: Mapped[list["VideoShotReferenceLink"]] = relationship(back_populates="shot", cascade="all, delete-orphan")
+    generation_results: Mapped[list["VideoGenerationResult"]] = relationship(back_populates="shot")
 
 
 class VideoGenerationPrompt(Base, TimestampMixin):
@@ -567,6 +569,81 @@ class VideoGenerationPrompt(Base, TimestampMixin):
     raw: Mapped[dict] = mapped_column(JsonType, default=dict)
 
     shot: Mapped[VideoShot] = relationship(back_populates="prompts")
+
+
+class VideoReferenceAsset(Base, TimestampMixin):
+    __tablename__ = "video_reference_assets"
+    __table_args__ = (
+        CheckConstraint(
+            "asset_type IN ('character', 'clothing', 'environment', 'style', 'other')",
+            name="ck_video_reference_asset_type",
+        ),
+        CheckConstraint("status IN ('active', 'archived')", name="ck_video_reference_asset_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    asset_type: Mapped[str] = mapped_column(String(32), index=True, default="other")
+    title: Mapped[str] = mapped_column(String(255), default="")
+    reference_url: Mapped[str] = mapped_column(Text, default="")
+    file_reference: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), index=True, default="active")
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    shot_links: Mapped[list["VideoShotReferenceLink"]] = relationship(back_populates="asset", cascade="all, delete-orphan")
+
+
+class VideoShotReferenceLink(Base, TimestampMixin):
+    __tablename__ = "video_shot_reference_links"
+    __table_args__ = (UniqueConstraint("shot_id", "asset_id", name="uq_video_shot_reference_link"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    shot_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_shots.id", ondelete="CASCADE"), index=True)
+    asset_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_reference_assets.id"), index=True)
+    plan_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_production_plans.id"), index=True)
+    plan_content_revision: Mapped[int] = mapped_column(Integer)
+
+    shot: Mapped[VideoShot] = relationship(back_populates="reference_links")
+    asset: Mapped[VideoReferenceAsset] = relationship(back_populates="shot_links")
+
+
+class VideoGenerationResult(Base, TimestampMixin):
+    __tablename__ = "video_generation_results"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('candidate', 'selected', 'rejected', 'archived')",
+            name="ck_video_generation_result_status",
+        ),
+        Index(
+            "uq_video_generation_result_selected_shot",
+            "shot_id",
+            unique=True,
+            postgresql_where=text("status = 'selected'"),
+            sqlite_where=text("status = 'selected'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True, default="default")
+    plan_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_production_plans.id"), index=True)
+    shot_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_shots.id"), index=True)
+    prompt_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_generation_prompts.id"), index=True)
+    plan_content_revision: Mapped[int] = mapped_column(Integer)
+    storyboard_revision: Mapped[int] = mapped_column(Integer)
+    prompt_revision: Mapped[int] = mapped_column(Integer)
+    shot_snapshot: Mapped[dict] = mapped_column(JsonType, default=dict)
+    prompt_snapshot: Mapped[dict] = mapped_column(JsonType, default=dict)
+    provider: Mapped[str] = mapped_column(String(64), index=True, default="External")
+    model: Mapped[str] = mapped_column(String(128), default="")
+    result_url: Mapped[str] = mapped_column(Text, default="")
+    file_reference: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), index=True, default="candidate")
+    raw: Mapped[dict] = mapped_column(JsonType, default=dict)
+
+    shot: Mapped[VideoShot] = relationship(back_populates="generation_results")
 
 
 class ActivityLog(Base):

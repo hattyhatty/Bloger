@@ -253,6 +253,8 @@ class CreatorIntelligenceOut(BaseModel):
 
 VideoPlanStatus = Literal["draft", "planned", "in_production", "ready_for_review"]
 VideoPromptTarget = Literal["Generic", "Seedance", "Kling", "Veo", "Runway"]
+VideoReferenceType = Literal["character", "clothing", "environment", "style", "other"]
+VideoResultStatus = Literal["candidate", "selected", "rejected", "archived"]
 
 
 class VideoPlanCreateIn(BaseModel):
@@ -448,12 +450,94 @@ class VideoPromptOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class VideoReferenceAssetIn(BaseModel):
+    id: str | None = None
+    workspace_id: str = "default"
+    asset_id: str | None = None
+    asset_type: VideoReferenceType = "other"
+    title: str = ""
+    reference_url: str = ""
+    file_reference: str = ""
+    note: str = ""
+    raw: JsonDict = Field(default_factory=dict)
+
+
+class VideoReferenceAssetOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    asset_type: VideoReferenceType = "other"
+    title: str = ""
+    reference_url: str = ""
+    file_reference: str = ""
+    note: str = ""
+    status: Literal["active", "archived"] = "active"
+    shot_ids: list[str] = Field(default_factory=list)
+    raw: JsonDict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VideoGenerationResultIn(BaseModel):
+    id: str | None = None
+    workspace_id: str = "default"
+    prompt_id: str
+    provider: str = "External"
+    model: str = ""
+    result_url: str = ""
+    file_reference: str = ""
+    note: str = ""
+    status: VideoResultStatus = "candidate"
+    raw: JsonDict = Field(default_factory=dict)
+
+
+class VideoGenerationResultUpdateIn(BaseModel):
+    workspace_id: str = "default"
+    provider: str | None = None
+    model: str | None = None
+    result_url: str | None = None
+    file_reference: str | None = None
+    note: str | None = None
+
+
+class VideoGenerationResultStatusIn(BaseModel):
+    workspace_id: str = "default"
+    status: VideoResultStatus
+
+
+class VideoGenerationResultOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    plan_id: str
+    shot_id: str
+    prompt_id: str
+    plan_content_revision: int
+    storyboard_revision: int
+    prompt_revision: int
+    shot_snapshot: JsonDict = Field(default_factory=dict)
+    prompt_snapshot: JsonDict = Field(default_factory=dict)
+    provider: str = "External"
+    model: str = ""
+    result_url: str = ""
+    file_reference: str = ""
+    note: str = ""
+    status: VideoResultStatus = "candidate"
+    raw: JsonDict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class VideoPlannerWorkspaceOut(BaseModel):
     plan: VideoPlanOut
     script: VideoScriptOut | None = None
     storyboard: VideoStoryboardOut | None = None
     shots: list[VideoShotOut] = Field(default_factory=list)
     prompts: list[VideoPromptOut] = Field(default_factory=list)
+    reference_assets: list[VideoReferenceAssetOut] = Field(default_factory=list)
+    generated_results: list[VideoGenerationResultOut] = Field(default_factory=list)
 
 
 class VideoPlanContextOut(BaseModel):

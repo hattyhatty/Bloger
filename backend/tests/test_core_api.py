@@ -958,3 +958,110 @@ def test_video_planner_workspace_isolation_and_invalid_references(client):
     assert client.put(f"/api/video-plans/{plan['id']}/script", json={"workspace_id": "default", "hook": "cross workspace"}).status_code == 409
     assert client.post("/api/video-plans", json={"workspace_id": "default", "content_id": "content_video_other"}).status_code == 409
     assert client.post("/api/video-plans", json={"content_id": "missing_content"}).status_code == 409
+
+
+def test_shot_reference_reuse_results_selection_and_history(client):
+    _, plan = create_video_plan_fixture(client, "assets")
+    assert client.put(f"/api/video-plans/{plan['id']}/script", json={
+        "hook": "先固定角色，再生成镜头",
+        "narration_dialogue": "参考素材让镜头更一致。",
+        "main_story_flow": "角色参考 → 生成 → 选择结果",
+        "ending_cta": "保留最终选择",
+    }).status_code == 200
+    workspace = client.post(f"/api/video-plans/{plan['id']}/storyboard/generate", json={
+        "recurring_character_description": "同一位中文创作者",
+        "clothing": "黑色衬衫",
+        "environment": "工作室",
+        "visual_style": "真实自然",
+        "shots": [
+            {"scene_description": "镜头一", "narration_dialogue": "第一句"},
+            {"scene_description": "镜头二", "narration_dialogue": "第二句"},
+        ],
+    }).json()
+    first_shot, second_shot = workspace["shots"]
+    first_prompt = client.put(f"/api/video-shots/{first_shot['id']}/prompt", json={
+        "prompt_target": "Kling",
+        "generic_video_prompt": "A consistent Chinese creator in a studio",
+        "operation": "generated",
+    }).json()
+    second_prompt = client.put(f"/api/video-shots/{second_shot['id']}/prompt", json={
+        "prompt_target": "Kling",
+        "generic_video_prompt": "The same creator continues speaking",
+        "operation": "generated",
+    }).json()
+
+    reference_response = client.post(f"/api/video-shots/{first_shot['id']}/references", json={
+        "asset_type": "character",
+        "title": "角色正面参考",
+        "reference_url": "https://example.com/creator-reference.png",
+        "note": "保持面部和发型一致",
+    })
+    assert reference_response.status_code == 200, reference_response.text
+    reference = reference_response.json()
+    reused = client.post(f"/api/video-shots/{second_shot['id']}/references", json={"asset_id": reference["id"]})
+    assert reused.status_code == 200, reused.text
+    assert set(reused.json()["shot_ids"]) == {first_shot["id"], second_shot["id"]}
+    assert len(client.get("/api/video-reference-assets").json()) == 1
+
+    result_one_response = client.post(f"/api/video-shots/{first_shot['id']}/results", json={
+        "id": "video_result_assets_one",
+        "prompt_id": first_prompt["id"],
+        "provider": "Kling",
+        "model": "manual-test",
+        "result_url": "https://example.com/result-one.mp4",
+        "note": "动作自然",
+    })
+    assert result_one_response.status_code == 200, result_one_response.text
+    result_one = result_one_response.json()
+    result_two = client.post(f"/api/video-shots/{first_shot['id']}/results", json={
+        "id": "video_result_assets_two",
+        "prompt_id": first_prompt["id"],
+        "provider": "Seedance",
+        "result_url": "https://example.com/result-two.mp4",
+        "note": "镜头更稳定",
+    }).json()
+    assert len(client.get(f"/api/video-shots/{first_shot['id']}/results").json()) == 2
+    assert result_one["plan_content_revision"] == plan["content_revision"]
+    assert result_one["prompt_snapshot"]["revision"] == first_prompt["revision"]
+
+    selected_one = client.patch(f"/api/video-results/{result_one['id']}/status", json={"status": "selected"})
+    assert selected_one.status_code == 200
+    selected_two = client.patch(f"/api/video-results/{result_two['id']}/status", json={"status": "selected"})
+    assert selected_two.status_code == 200
+    statuses = {item["id"]: item["status"] for item in client.get(f"/api/video-shots/{first_shot['id']}/results").json()}
+    assert statuses[result_one["id"]] == "candidate"
+    assert statuses[result_two["id"]] == "selected"
+    assert client.patch(f"/api/video-results/{result_two['id']}/status", json={"status": "rejected"}).json()["status"] == "rejected"
+    assert client.patch(f"/api/video-results/{result_one['id']}/status", json={"status": "archived"}).json()["status"] == "archived"
+
+    # Prompt regeneration cannot rewrite the immutable prompt and Shot snapshots stored on old Results.
+    regenerated = client.put(f"/api/video-shots/{first_shot['id']}/prompt", json={
+        "prompt_target": "Kling",
+        "generic_video_prompt": "A changed prompt after external generation",
+        "operation": "generated",
+    }).json()
+    assert regenerated["revision"] == first_prompt["revision"] + 1
+    historical = {item["id"]: item for item in client.get(f"/api/video-shots/{first_shot['id']}/results").json()}[result_one["id"]]
+    assert historical["prompt_revision"] == first_prompt["revision"]
+    assert historical["prompt_snapshot"]["genericVideoPrompt"] == "A consistent Chinese creator in a studio"
+
+    assert client.delete(f"/api/video-shots/{first_shot['id']}").status_code == 409
+    assert client.post(f"/api/video-shots/{second_shot['id']}/results", json={
+        "prompt_id": first_prompt["id"],
+        "result_url": "https://example.com/wrong-shot.mp4",
+    }).status_code == 409
+    assert client.post(f"/api/video-shots/{second_shot['id']}/references", json={
+        "workspace_id": "other",
+        "asset_id": reference["id"],
+    }).status_code == 409
+    assert client.post(f"/api/video-shots/{second_shot['id']}/results", json={
+        "workspace_id": "other",
+        "prompt_id": second_prompt["id"],
+        "result_url": "https://example.com/cross-workspace.mp4",
+    }).status_code == 409
+
+    restored = client.get(f"/api/video-plans/{plan['id']}/workspace").json()
+    assert len(restored["reference_assets"]) == 1
+    assert len(restored["generated_results"]) == 2
+    actions = {item["action"] for item in client.get("/api/activity-logs", params={"limit": 500}).json()}
+    assert {"video_reference_added", "video_result_added", "video_result_selected", "video_result_rejected", "video_result_archived"} <= actions

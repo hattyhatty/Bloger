@@ -16,9 +16,12 @@ from .models import (
     CreatorLearning,
     KnowledgeEntry,
     VideoGenerationPrompt,
+    VideoGenerationResult,
     VideoProductionPlan,
+    VideoReferenceAsset,
     VideoScript,
     VideoShot,
+    VideoShotReferenceLink,
     VideoStoryboard,
 )
 from .workflow import DEFAULT_WORKSPACE_ID, WorkflowConflict, ensure_owned, stable_hash
@@ -26,6 +29,8 @@ from .workflow import DEFAULT_WORKSPACE_ID, WorkflowConflict, ensure_owned, stab
 
 PLAN_STATUSES = {"draft", "planned", "in_production", "ready_for_review"}
 PROMPT_TARGETS = {"Generic", "Seedance", "Kling", "Veo", "Runway"}
+REFERENCE_TYPES = {"character", "clothing", "environment", "style", "other"}
+RESULT_STATUSES = {"candidate", "selected", "rejected", "archived"}
 
 
 def content_snapshot(content: Content) -> dict[str, Any]:
@@ -345,6 +350,8 @@ def update_shot(db: Session, shot_id: str, values: dict[str, Any]) -> VideoShot:
 def remove_shot(db: Session, shot_id: str, workspace_id: str) -> None:
     item = db.scalar(select(VideoShot).where(VideoShot.id == shot_id).with_for_update())
     ensure_owned(item, workspace_id, "VideoShot")
+    if db.scalar(select(VideoGenerationResult.id).where(VideoGenerationResult.shot_id == item.id).limit(1)):
+        raise WorkflowConflict("Shot has generation results and is protected as production history")
     storyboard_id = item.storyboard_id
     removed_number = item.shot_number
     db.delete(item)
@@ -448,6 +455,231 @@ def save_shot_prompt(db: Session, shot_id: str, values: dict[str, Any]) -> Video
     return item
 
 
+def _shot_plan(db: Session, shot: VideoShot) -> tuple[VideoStoryboard, VideoProductionPlan]:
+    storyboard = db.get(VideoStoryboard, shot.storyboard_id)
+    ensure_owned(storyboard, shot.workspace_id, "VideoStoryboard")
+    plan = db.get(VideoProductionPlan, storyboard.plan_id)
+    ensure_owned(plan, shot.workspace_id, "VideoProductionPlan")
+    return storyboard, plan
+
+
+def _decorate_reference_asset(asset: VideoReferenceAsset) -> VideoReferenceAsset:
+    asset.shot_ids = [link.shot_id for link in asset.shot_links]
+    return asset
+
+
+def list_reference_assets(db: Session, workspace_id: str, shot_id: str | None = None) -> list[VideoReferenceAsset]:
+    query = select(VideoReferenceAsset).where(VideoReferenceAsset.workspace_id == workspace_id).options(
+        selectinload(VideoReferenceAsset.shot_links)
+    ).order_by(VideoReferenceAsset.updated_at.desc())
+    assets = list(db.scalars(query).unique().all())
+    if shot_id:
+        assets = [asset for asset in assets if shot_id in {link.shot_id for link in asset.shot_links}]
+    return [_decorate_reference_asset(asset) for asset in assets]
+
+
+def add_shot_reference(db: Session, shot_id: str, values: dict[str, Any]) -> VideoReferenceAsset:
+    workspace_id = values.get("workspace_id") or DEFAULT_WORKSPACE_ID
+    shot = db.get(VideoShot, shot_id)
+    ensure_owned(shot, workspace_id, "VideoShot")
+    _, plan = _shot_plan(db, shot)
+    asset_id = values.get("asset_id") or values.get("id")
+    asset = db.get(VideoReferenceAsset, asset_id) if asset_id else None
+    if asset:
+        ensure_owned(asset, workspace_id, "VideoReferenceAsset")
+        if asset.status == "archived":
+            raise WorkflowConflict("Archived Reference Asset cannot be linked")
+    else:
+        asset_type = values.get("asset_type") or "other"
+        if asset_type not in REFERENCE_TYPES:
+            raise WorkflowConflict("Unsupported Reference Asset type")
+        if not (values.get("reference_url") or values.get("file_reference")):
+            raise WorkflowConflict("Reference Asset needs a URL or file reference")
+        asset_id = asset_id or f"video_ref_{stable_hash({'workspace': workspace_id, 'type': asset_type, 'url': values.get('reference_url'), 'file': values.get('file_reference')})[:28]}"
+        asset = VideoReferenceAsset(
+            id=asset_id,
+            workspace_id=workspace_id,
+            asset_type=asset_type,
+            title=values.get("title") or "Reference Asset",
+            reference_url=values.get("reference_url") or "",
+            file_reference=values.get("file_reference") or "",
+            note=values.get("note") or "",
+            status="active",
+            raw=values.get("raw") or {},
+        )
+        db.add(asset)
+        db.flush()
+    existing = db.scalar(select(VideoShotReferenceLink).where(
+        VideoShotReferenceLink.shot_id == shot.id,
+        VideoShotReferenceLink.asset_id == asset.id,
+    ))
+    if existing is None:
+        link = VideoShotReferenceLink(
+            id=f"video_ref_link_{stable_hash({'shot': shot.id, 'asset': asset.id})[:28]}",
+            workspace_id=workspace_id,
+            shot_id=shot.id,
+            asset_id=asset.id,
+            plan_id=plan.id,
+            plan_content_revision=plan.content_revision,
+        )
+        db.add(link)
+        log_activity(db, "video_reference_added", "VideoReferenceAsset", asset.id, {
+            "shotId": shot.id,
+            "planId": plan.id,
+            "contentRevision": plan.content_revision,
+            "assetType": asset.asset_type,
+        }, workspace_id=workspace_id)
+        db.commit()
+    else:
+        db.rollback()
+    asset = db.scalar(select(VideoReferenceAsset).where(VideoReferenceAsset.id == asset.id).options(
+        selectinload(VideoReferenceAsset.shot_links)
+    ))
+    return _decorate_reference_asset(asset)
+
+
+def shot_snapshot(shot: VideoShot) -> dict[str, Any]:
+    return {
+        "id": shot.id,
+        "shotNumber": shot.shot_number,
+        "estimatedDurationSeconds": shot.estimated_duration_seconds,
+        "sceneDescription": shot.scene_description,
+        "subjectCharacter": shot.subject_character,
+        "action": shot.action,
+        "environment": shot.environment,
+        "cameraFraming": shot.camera_framing,
+        "cameraMovement": shot.camera_movement,
+        "lightingMood": shot.lighting_mood,
+        "narrationDialogue": shot.narration_dialogue,
+        "transition": shot.transition,
+        "generationNotes": shot.generation_notes,
+    }
+
+
+def prompt_snapshot(prompt: VideoGenerationPrompt) -> dict[str, Any]:
+    return {
+        "id": prompt.id,
+        "target": prompt.prompt_target,
+        "revision": prompt.revision,
+        "genericVideoPrompt": prompt.generic_video_prompt,
+        "imageReferencePrompt": prompt.image_reference_prompt,
+        "negativeInstructions": prompt.negative_instructions,
+        "continuityNotes": prompt.continuity_notes,
+        "sourceShotHash": prompt.source_shot_hash,
+    }
+
+
+def list_generation_results(db: Session, workspace_id: str, shot_id: str | None = None) -> list[VideoGenerationResult]:
+    query = select(VideoGenerationResult).where(VideoGenerationResult.workspace_id == workspace_id)
+    if shot_id:
+        query = query.where(VideoGenerationResult.shot_id == shot_id)
+    return list(db.scalars(query.order_by(VideoGenerationResult.created_at.desc())).all())
+
+
+def add_generation_result(db: Session, shot_id: str, values: dict[str, Any]) -> VideoGenerationResult:
+    workspace_id = values.get("workspace_id") or DEFAULT_WORKSPACE_ID
+    shot = db.scalar(select(VideoShot).where(VideoShot.id == shot_id).with_for_update())
+    ensure_owned(shot, workspace_id, "VideoShot")
+    storyboard, plan = _shot_plan(db, shot)
+    prompt = db.get(VideoGenerationPrompt, values.get("prompt_id"))
+    ensure_owned(prompt, workspace_id, "VideoGenerationPrompt")
+    if prompt.shot_id != shot.id:
+        raise WorkflowConflict("Generation Result Prompt must belong to the same Shot")
+    if not (values.get("result_url") or values.get("file_reference")):
+        raise WorkflowConflict("Generation Result needs a URL or file reference")
+    status = values.get("status") or "candidate"
+    if status not in RESULT_STATUSES:
+        raise WorkflowConflict("Unsupported Generation Result status")
+    result_id = values.get("id") or f"video_result_{stable_hash({'shot': shot.id, 'prompt': prompt.id, 'url': values.get('result_url'), 'file': values.get('file_reference'), 'provider': values.get('provider')})[:28]}"
+    existing = db.get(VideoGenerationResult, result_id)
+    if existing:
+        ensure_owned(existing, workspace_id, "VideoGenerationResult")
+        if existing.shot_id != shot.id:
+            raise WorkflowConflict("Generation Result id belongs to another Shot")
+        return existing
+    if status == "selected":
+        for item in db.scalars(select(VideoGenerationResult).where(
+            VideoGenerationResult.shot_id == shot.id,
+            VideoGenerationResult.status == "selected",
+        ).with_for_update()).all():
+            item.status = "candidate"
+        db.flush()
+    item = VideoGenerationResult(
+        id=result_id,
+        workspace_id=workspace_id,
+        plan_id=plan.id,
+        shot_id=shot.id,
+        prompt_id=prompt.id,
+        plan_content_revision=plan.content_revision,
+        storyboard_revision=storyboard.revision,
+        prompt_revision=prompt.revision,
+        shot_snapshot=shot_snapshot(shot),
+        prompt_snapshot=prompt_snapshot(prompt),
+        provider=values.get("provider") or "External",
+        model=values.get("model") or "",
+        result_url=values.get("result_url") or "",
+        file_reference=values.get("file_reference") or "",
+        note=values.get("note") or "",
+        status=status,
+        raw=values.get("raw") or {},
+    )
+    db.add(item)
+    log_activity(db, "video_result_added", "VideoGenerationResult", item.id, {
+        "shotId": shot.id,
+        "promptId": prompt.id,
+        "planId": plan.id,
+        "contentRevision": plan.content_revision,
+        "status": status,
+    }, workspace_id=workspace_id)
+    if status == "selected":
+        log_activity(db, "video_result_selected", "VideoGenerationResult", item.id, {"shotId": shot.id}, workspace_id=workspace_id)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+def update_generation_result(db: Session, result_id: str, values: dict[str, Any]) -> VideoGenerationResult:
+    workspace_id = values.get("workspace_id") or DEFAULT_WORKSPACE_ID
+    item = db.scalar(select(VideoGenerationResult).where(VideoGenerationResult.id == result_id).with_for_update())
+    ensure_owned(item, workspace_id, "VideoGenerationResult")
+    for field in ("provider", "model", "result_url", "file_reference", "note"):
+        if values.get(field) is not None:
+            setattr(item, field, values[field])
+    if not (item.result_url or item.file_reference):
+        raise WorkflowConflict("Generation Result needs a URL or file reference")
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+def set_generation_result_status(db: Session, result_id: str, workspace_id: str, status: str) -> VideoGenerationResult:
+    if status not in RESULT_STATUSES:
+        raise WorkflowConflict("Unsupported Generation Result status")
+    item = db.scalar(select(VideoGenerationResult).where(VideoGenerationResult.id == result_id).with_for_update())
+    ensure_owned(item, workspace_id, "VideoGenerationResult")
+    db.scalar(select(VideoShot).where(VideoShot.id == item.shot_id).with_for_update())
+    if status == "selected":
+        others = list(db.scalars(select(VideoGenerationResult).where(
+            VideoGenerationResult.shot_id == item.shot_id,
+            VideoGenerationResult.id != item.id,
+            VideoGenerationResult.status == "selected",
+        ).with_for_update()).all())
+        for other in others:
+            other.status = "candidate"
+        db.flush()
+    if item.status != status:
+        item.status = status
+        action = {
+            "selected": "video_result_selected",
+            "rejected": "video_result_rejected",
+            "archived": "video_result_archived",
+        }.get(status, "video_result_candidate")
+        log_activity(db, action, "VideoGenerationResult", item.id, {"shotId": item.shot_id, "status": status}, workspace_id=workspace_id)
+        db.commit()
+        db.refresh(item)
+    return item
+
+
 def get_plan_workspace(db: Session, plan_id: str, workspace_id: str) -> dict[str, Any]:
     plan = db.scalar(select(VideoProductionPlan).where(VideoProductionPlan.id == plan_id).options(
         selectinload(VideoProductionPlan.content),
@@ -458,4 +690,21 @@ def get_plan_workspace(db: Session, plan_id: str, workspace_id: str) -> dict[str
     storyboard = plan.storyboard
     shots = list(storyboard.shots) if storyboard else []
     prompts = [prompt for shot in shots for prompt in shot.prompts]
-    return {"plan": plan, "script": plan.script, "storyboard": storyboard, "shots": shots, "prompts": prompts}
+    shot_ids = [shot.id for shot in shots]
+    links = list(db.scalars(select(VideoShotReferenceLink).where(VideoShotReferenceLink.shot_id.in_(shot_ids))).all()) if shot_ids else []
+    asset_ids = list(dict.fromkeys(link.asset_id for link in links))
+    assets = list(db.scalars(select(VideoReferenceAsset).where(VideoReferenceAsset.id.in_(asset_ids)).options(
+        selectinload(VideoReferenceAsset.shot_links)
+    )).unique().all()) if asset_ids else []
+    results = list(db.scalars(select(VideoGenerationResult).where(VideoGenerationResult.shot_id.in_(shot_ids)).order_by(
+        VideoGenerationResult.created_at.desc()
+    )).all()) if shot_ids else []
+    return {
+        "plan": plan,
+        "script": plan.script,
+        "storyboard": storyboard,
+        "shots": shots,
+        "prompts": prompts,
+        "reference_assets": [_decorate_reference_asset(asset) for asset in assets],
+        "generated_results": results,
+    }

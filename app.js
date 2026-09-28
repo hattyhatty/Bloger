@@ -127,6 +127,10 @@ const STRATEGY_SUGGESTION_STATUS_LABELS = Object.freeze({ pending: "Pending", ac
 const VIDEO_PLAN_STATUS = Object.freeze({ DRAFT: "draft", PLANNED: "planned", IN_PRODUCTION: "in_production", READY_FOR_REVIEW: "ready_for_review" });
 const VIDEO_PLAN_STATUS_LABELS = Object.freeze({ draft: "Draft", planned: "Planned", in_production: "In Production", ready_for_review: "Ready for Review" });
 const VIDEO_PROMPT_TARGETS = Object.freeze(["Generic", "Seedance", "Kling", "Veo", "Runway"]);
+const VIDEO_REFERENCE_TYPES = Object.freeze(["character", "clothing", "environment", "style", "other"]);
+const VIDEO_REFERENCE_TYPE_LABELS = Object.freeze({ character: "Character", clothing: "Clothing", environment: "Environment", style: "Style", other: "Other" });
+const VIDEO_RESULT_STATUS = Object.freeze({ CANDIDATE: "candidate", SELECTED: "selected", REJECTED: "rejected", ARCHIVED: "archived" });
+const VIDEO_RESULT_STATUS_LABELS = Object.freeze({ candidate: "Candidate", selected: "Selected", rejected: "Rejected", archived: "Archived" });
 const LEGACY_LONG_FORM_PLATFORM = ["公", "众", "号"].join("");
 const TASK_STATUS = Object.freeze({ PENDING: "PENDING", RUNNING: "RUNNING", SUCCESS: "SUCCESS", FAILED: "FAILED" });
 const TASK_TYPES = Object.freeze({
@@ -1312,6 +1316,49 @@ function normalizeVideoPrompt(item = {}) {
   };
 }
 
+function normalizeVideoReferenceAsset(item = {}) {
+  const type = item.assetType || item.asset_type || "other";
+  return {
+    id: item.id || uid("video_ref"),
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    assetType: VIDEO_REFERENCE_TYPES.includes(type) ? type : "other",
+    title: item.title || "Reference Asset",
+    referenceUrl: item.referenceUrl || item.reference_url || "",
+    fileReference: item.fileReference || item.file_reference || "",
+    note: item.note || "",
+    status: item.status === "archived" ? "archived" : "active",
+    shotIds: Array.isArray(item.shotIds) ? item.shotIds : Array.isArray(item.shot_ids) ? item.shot_ids : [],
+    raw: item.raw || {},
+    createdAt: item.createdAt || item.created_at || now(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
+  };
+}
+
+function normalizeVideoGenerationResult(item = {}) {
+  const status = item.status || VIDEO_RESULT_STATUS.CANDIDATE;
+  return {
+    id: item.id || uid("video_result"),
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    planId: item.planId || item.plan_id || "",
+    shotId: item.shotId || item.shot_id || "",
+    promptId: item.promptId || item.prompt_id || "",
+    planContentRevision: Math.max(1, Number(item.planContentRevision ?? item.plan_content_revision) || 1),
+    storyboardRevision: Math.max(1, Number(item.storyboardRevision ?? item.storyboard_revision) || 1),
+    promptRevision: Math.max(1, Number(item.promptRevision ?? item.prompt_revision) || 1),
+    shotSnapshot: item.shotSnapshot || item.shot_snapshot || {},
+    promptSnapshot: item.promptSnapshot || item.prompt_snapshot || {},
+    provider: item.provider || "External",
+    model: item.model || "",
+    resultUrl: item.resultUrl || item.result_url || "",
+    fileReference: item.fileReference || item.file_reference || "",
+    note: item.note || "",
+    status: Object.values(VIDEO_RESULT_STATUS).includes(status) ? status : VIDEO_RESULT_STATUS.CANDIDATE,
+    raw: item.raw || {},
+    createdAt: item.createdAt || item.created_at || now(),
+    updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
+  };
+}
+
 function platformFromLegacy(platform) {
   if (isTargetPlatform(platform)) return platform;
   if (platform === LEGACY_LONG_FORM_PLATFORM) return "B站";
@@ -1471,15 +1518,24 @@ class ApiClient {
     return this.request(`/api/video-storyboards/${encodeURIComponent(storyboardId)}/shots/reorder`, { method: "POST", body: JSON.stringify({ workspace_id: workspaceId, shot_ids: shotIds }) });
   }
   saveVideoPrompt(shotId, payload) { return this.request(`/api/video-shots/${encodeURIComponent(shotId)}/prompt`, { method: "PUT", body: JSON.stringify(payload) }); }
+  addVideoShotReference(shotId, payload) { return this.request(`/api/video-shots/${encodeURIComponent(shotId)}/references`, { method: "POST", body: JSON.stringify(payload) }); }
+  addVideoGenerationResult(shotId, payload) { return this.request(`/api/video-shots/${encodeURIComponent(shotId)}/results`, { method: "POST", body: JSON.stringify(payload) }); }
+  updateVideoGenerationResult(resultId, payload) { return this.request(`/api/video-results/${encodeURIComponent(resultId)}`, { method: "PUT", body: JSON.stringify(payload) }); }
+  setVideoGenerationResultStatus(resultId, status, workspaceId = "default") {
+    return this.request(`/api/video-results/${encodeURIComponent(resultId)}/status`, { method: "PATCH", body: JSON.stringify({ workspace_id: workspaceId, status }) });
+  }
   async getVideoPlannerData(workspaceId = "default") {
     const plans = await this.getVideoPlans(workspaceId);
     const workspaces = await Promise.all(plans.map(plan => this.getVideoPlanWorkspace(plan.id, workspaceId)));
+    const referenceAssets = [...new Map(workspaces.flatMap(item => item.reference_assets || []).map(item => [item.id, item])).values()];
     return {
       plans,
       scripts: workspaces.map(item => item.script).filter(Boolean),
       storyboards: workspaces.map(item => item.storyboard).filter(Boolean),
       shots: workspaces.flatMap(item => item.shots || []),
-      prompts: workspaces.flatMap(item => item.prompts || [])
+      prompts: workspaces.flatMap(item => item.prompts || []),
+      referenceAssets,
+      generationResults: workspaces.flatMap(item => item.generated_results || [])
     };
   }
   corePayload(data = db) {
@@ -1539,7 +1595,7 @@ class ApiClient {
           content_format: plan.contentFormat,
           visual_style: plan.visualStyle,
           aspect_ratio: plan.aspectRatio,
-          status: plan.status,
+          status: "draft",
           raw: plan.raw
         });
         const script = (data.videoScripts || []).map(normalizeVideoScript).find(item => item.planId === plan.id);
@@ -1597,7 +1653,38 @@ class ApiClient {
               raw: prompt.raw
             });
           }
+          const localShotIds = new Set(localShots.map(item => item.id));
+          for (const asset of (data.videoReferenceAssets || []).map(normalizeVideoReferenceAsset)) {
+            for (const shotId of asset.shotIds.filter(id => localShotIds.has(id))) {
+              await this.addVideoShotReference(shotId, {
+                id: asset.id,
+                workspace_id: asset.workspaceId,
+                asset_type: asset.assetType,
+                title: asset.title,
+                reference_url: asset.referenceUrl,
+                file_reference: asset.fileReference,
+                note: asset.note,
+                raw: asset.raw
+              });
+            }
+          }
+          for (const result of (data.videoGenerationResults || []).map(normalizeVideoGenerationResult).filter(item => localShotIds.has(item.shotId))) {
+            const savedResult = await this.addVideoGenerationResult(result.shotId, {
+              id: result.id,
+              workspace_id: result.workspaceId,
+              prompt_id: result.promptId,
+              provider: result.provider,
+              model: result.model,
+              result_url: result.resultUrl,
+              file_reference: result.fileReference,
+              note: result.note,
+              status: result.status,
+              raw: result.raw
+            });
+            if (savedResult.status !== result.status) await this.setVideoGenerationResultStatus(savedResult.id, result.status, result.workspaceId);
+          }
         }
+        if (plan.status !== "draft") await this.setVideoPlanStatus(serverPlan.id, plan.status, plan.workspaceId);
         summary[existed ? "updated" : "added"] += 1;
       } catch { summary.failed += 1; }
     }
@@ -1895,6 +1982,8 @@ function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
   const videoStoryboards = (snapshot.videoPlanner?.storyboards || []).map(normalizeVideoStoryboard);
   const videoShots = (snapshot.videoPlanner?.shots || []).map(normalizeVideoShot);
   const videoPrompts = (snapshot.videoPlanner?.prompts || []).map(normalizeVideoPrompt);
+  const videoReferenceAssets = (snapshot.videoPlanner?.referenceAssets || []).map(normalizeVideoReferenceAsset);
+  const videoGenerationResults = (snapshot.videoPlanner?.generationResults || []).map(normalizeVideoGenerationResult);
   if (authoritative) {
     db.topics = topics;
     db.contentItems = contents;
@@ -1911,6 +2000,8 @@ function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
     db.videoStoryboards = videoStoryboards;
     db.videoShots = videoShots;
     db.videoPrompts = videoPrompts;
+    db.videoReferenceAssets = videoReferenceAssets;
+    db.videoGenerationResults = videoGenerationResults;
   } else {
     topics.forEach(item => upsertById(db.topics, item));
     contents.forEach(item => upsertById(db.contentItems, item));
@@ -1927,6 +2018,8 @@ function mergeBackendCoreData(snapshot = {}, { authoritative = true } = {}) {
     videoStoryboards.forEach(item => upsertById(db.videoStoryboards, item));
     videoShots.forEach(item => upsertById(db.videoShots, item));
     videoPrompts.forEach(item => upsertById(db.videoPrompts, item));
+    videoReferenceAssets.forEach(item => upsertById(db.videoReferenceAssets, item));
+    videoGenerationResults.forEach(item => upsertById(db.videoGenerationResults, item));
   }
   if (snapshot.creatorMemory) db.settings.creatorMemory = normalizeCreatorMemory(snapshot.creatorMemory);
   if (snapshot.creatorIntelligence?.summary) db.settings.creatorIntelligenceSummary = snapshot.creatorIntelligence.summary;
@@ -1962,7 +2055,7 @@ async function bootstrapBackendCoreData() {
 function migrateDatabase(raw) {
   const source = raw && raw.contentItems ? raw : createInitialData();
   const newDb = {
-    schemaVersion: 10,
+    schemaVersion: 11,
     contentItems: [],
     topics: [],
     topicClusters: [],
@@ -1976,6 +2069,8 @@ function migrateDatabase(raw) {
     videoStoryboards: [],
     videoShots: [],
     videoPrompts: [],
+    videoReferenceAssets: [],
+    videoGenerationResults: [],
     publishJobs: [],
     analyticsRecords: [],
     experienceItems: [],
@@ -2018,6 +2113,8 @@ function migrateDatabase(raw) {
   const existingVideoStoryboards = Array.isArray(source.videoStoryboards) ? source.videoStoryboards : [];
   const existingVideoShots = Array.isArray(source.videoShots) ? source.videoShots : [];
   const existingVideoPrompts = Array.isArray(source.videoPrompts) ? source.videoPrompts : [];
+  const existingVideoReferenceAssets = Array.isArray(source.videoReferenceAssets) ? source.videoReferenceAssets : [];
+  const existingVideoGenerationResults = Array.isArray(source.videoGenerationResults) ? source.videoGenerationResults : [];
   const existingJobs = Array.isArray(source.publishJobs) ? source.publishJobs : [];
   const existingAnalytics = Array.isArray(source.analyticsRecords) ? source.analyticsRecords : [];
   const existingExperiences = Array.isArray(source.experienceItems) ? source.experienceItems : [];
@@ -2072,6 +2169,8 @@ function migrateDatabase(raw) {
   newDb.videoStoryboards = existingVideoStoryboards.map(normalizeVideoStoryboard);
   newDb.videoShots = existingVideoShots.map(normalizeVideoShot);
   newDb.videoPrompts = existingVideoPrompts.map(normalizeVideoPrompt);
+  newDb.videoReferenceAssets = existingVideoReferenceAssets.map(normalizeVideoReferenceAsset);
+  newDb.videoGenerationResults = existingVideoGenerationResults.map(normalizeVideoGenerationResult);
   existingJobs.forEach(item => newDb.publishJobs.push(normalizePublishJob(item)));
   existingAnalytics.forEach(item => newDb.analyticsRecords.push(normalizeAnalyticsRecord(item)));
   existingExperiences.forEach(item => newDb.experienceItems.push(normalizeExperience(item)));
@@ -2193,6 +2292,8 @@ const ContentStore = {
     db.videoStoryboards = (db.videoStoryboards || []).filter(item => !videoPlanIds.has(item.planId));
     db.videoShots = (db.videoShots || []).filter(item => !storyboardIds.has(item.storyboardId));
     db.videoPrompts = (db.videoPrompts || []).filter(item => !shotIds.has(item.shotId));
+    db.videoReferenceAssets = (db.videoReferenceAssets || []).map(item => normalizeVideoReferenceAsset({ ...item, shotIds: (item.shotIds || []).filter(shotId => !shotIds.has(shotId)) }));
+    db.videoGenerationResults = (db.videoGenerationResults || []).filter(item => !shotIds.has(item.shotId));
     if (appState.selectedContentId === id) appState.selectedContentId = db.contentItems[0]?.id || null;
     saveDb();
   },
@@ -3941,6 +4042,15 @@ const VideoPromptStore = {
   getByShotId(shotId) { return this.getAll().filter(item => item.shotId === shotId); },
   getForTarget(shotId, target) { return this.getByShotId(shotId).find(item => item.promptTarget === target) || null; }
 };
+const VideoReferenceAssetStore = {
+  ...createCrudStore("videoReferenceAssets", normalizeVideoReferenceAsset),
+  getByShotId(shotId) { return this.getAll().filter(item => item.shotIds.includes(shotId) && item.status !== "archived"); }
+};
+const VideoGenerationResultStore = {
+  ...createCrudStore("videoGenerationResults", normalizeVideoGenerationResult),
+  getByShotId(shotId) { return this.getAll().filter(item => item.shotId === shotId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)); },
+  getSelected(shotId) { return this.getByShotId(shotId).find(item => item.status === VIDEO_RESULT_STATUS.SELECTED) || null; }
+};
 
 const VideoPlannerService = {
   contentSnapshot(content) {
@@ -3991,7 +4101,9 @@ const VideoPlannerService = {
     const storyboard = VideoStoryboardStore.getByPlanId(planId);
     const shots = storyboard ? VideoShotStore.getByStoryboardId(storyboard.id) : [];
     const prompts = shots.flatMap(shot => VideoPromptStore.getByShotId(shot.id));
-    return { plan, script, storyboard, shots, prompts };
+    const referenceAssets = db.videoReferenceAssets.filter(asset => asset.shotIds.some(id => shots.some(shot => shot.id === id)));
+    const generatedResults = db.videoGenerationResults.filter(result => shots.some(shot => shot.id === result.shotId));
+    return { plan, script, storyboard, shots, prompts, referenceAssets, generatedResults };
   },
   mergeWorkspace(workspace = {}) {
     if (workspace.plan) upsertById(db.videoPlans, normalizeVideoPlan(workspace.plan));
@@ -3999,6 +4111,8 @@ const VideoPlannerService = {
     if (workspace.storyboard) upsertById(db.videoStoryboards, normalizeVideoStoryboard(workspace.storyboard));
     (workspace.shots || []).forEach(item => upsertById(db.videoShots, normalizeVideoShot(item)));
     (workspace.prompts || []).forEach(item => upsertById(db.videoPrompts, normalizeVideoPrompt(item)));
+    (workspace.reference_assets || workspace.referenceAssets || []).forEach(item => upsertById(db.videoReferenceAssets, normalizeVideoReferenceAsset(item)));
+    (workspace.generated_results || workspace.generatedResults || []).forEach(item => upsertById(db.videoGenerationResults, normalizeVideoGenerationResult(item)));
     saveDb();
     return workspace.plan ? this.workspace(workspace.plan.id) : null;
   },
@@ -4286,9 +4400,11 @@ const VideoPlannerService = {
   async removeShot(shotId) {
     const shot = VideoShotStore.getById(shotId);
     if (!shot) return;
+    if (VideoGenerationResultStore.getByShotId(shotId).length) throw new Error("该 Shot 已有 Generation Result，作为制作历史不能删除。可保留 Shot 并 Archive Result。");
     await runBackendWrite("videoShot.remove", () => apiClient.removeVideoShot(shotId, shot.workspaceId));
     db.videoShots = db.videoShots.filter(item => item.id !== shotId);
     db.videoPrompts = db.videoPrompts.filter(item => item.shotId !== shotId);
+    db.videoReferenceAssets = db.videoReferenceAssets.map(item => normalizeVideoReferenceAsset({ ...item, shotIds: item.shotIds.filter(id => id !== shotId) }));
     db.videoShots.filter(item => item.storyboardId === shot.storyboardId).sort((a, b) => a.shotNumber - b.shotNumber).forEach((item, index) => {
       item.shotNumber = index + 1;
       item.updatedAt = now();
@@ -4355,6 +4471,114 @@ const VideoPlannerService = {
       sourceShotHash: sourceHash, revision: current ? current.revision + 1 : 1, updatedAt: now()
     });
     upsertById(db.videoPrompts, saved);
+    saveDb();
+    return saved;
+  },
+  async addReference(shotId, values = {}) {
+    const shot = VideoShotStore.getById(shotId);
+    if (!shot) throw new Error("Shot 不存在。");
+    const existing = values.assetId ? VideoReferenceAssetStore.getById(values.assetId) : null;
+    if (!existing && !(values.referenceUrl || values.fileReference)) throw new Error("请填写 Reference URL 或 File Reference。");
+    const payload = existing ? {
+      workspace_id: shot.workspaceId,
+      asset_id: existing.id
+    } : {
+      id: values.id || uid("video_ref"),
+      workspace_id: shot.workspaceId,
+      asset_type: VIDEO_REFERENCE_TYPES.includes(values.assetType) ? values.assetType : "other",
+      title: values.title || "Reference Asset",
+      reference_url: values.referenceUrl || "",
+      file_reference: values.fileReference || "",
+      note: values.note || "",
+      raw: values.raw || {}
+    };
+    const server = await runBackendWrite("videoReference.add", () => apiClient.addVideoShotReference(shotId, payload));
+    const saved = server ? normalizeVideoReferenceAsset(server) : normalizeVideoReferenceAsset(existing ? {
+      ...existing,
+      shotIds: [...new Set([...existing.shotIds, shotId])],
+      updatedAt: now()
+    } : {
+      id: payload.id,
+      workspaceId: shot.workspaceId,
+      assetType: payload.asset_type,
+      title: payload.title,
+      referenceUrl: payload.reference_url,
+      fileReference: payload.file_reference,
+      note: payload.note,
+      shotIds: [shotId],
+      raw: payload.raw
+    });
+    upsertById(db.videoReferenceAssets, saved);
+    saveDb();
+    return saved;
+  },
+  resultSnapshots(shot, prompt) {
+    const storyboard = VideoStoryboardStore.getById(shot.storyboardId);
+    const plan = storyboard ? VideoPlanStore.getById(storyboard.planId) : null;
+    return {
+      plan,
+      storyboard,
+      shotSnapshot: {
+        id: shot.id, shotNumber: shot.shotNumber, estimatedDurationSeconds: shot.estimatedDurationSeconds,
+        sceneDescription: shot.sceneDescription, subjectCharacter: shot.subjectCharacter, action: shot.action,
+        environment: shot.environment, cameraFraming: shot.cameraFraming, cameraMovement: shot.cameraMovement,
+        lightingMood: shot.lightingMood, narrationDialogue: shot.narrationDialogue, transition: shot.transition,
+        generationNotes: shot.generationNotes
+      },
+      promptSnapshot: {
+        id: prompt.id, target: prompt.promptTarget, revision: prompt.revision,
+        genericVideoPrompt: prompt.genericVideoPrompt, imageReferencePrompt: prompt.imageReferencePrompt,
+        negativeInstructions: prompt.negativeInstructions, continuityNotes: prompt.continuityNotes,
+        sourceShotHash: prompt.sourceShotHash
+      }
+    };
+  },
+  async addResult(shotId, values = {}) {
+    const shot = VideoShotStore.getById(shotId);
+    const prompt = VideoPromptStore.getById(values.promptId);
+    if (!shot || !prompt || prompt.shotId !== shotId) throw new Error("Result 必须关联当前 Shot 的 Prompt。");
+    if (!(values.resultUrl || values.fileReference)) throw new Error("请填写 Result URL 或 File Reference。");
+    const snapshots = this.resultSnapshots(shot, prompt);
+    if (!snapshots.plan || !snapshots.storyboard) throw new Error("无法找到 Result 对应的 Video Plan。");
+    const payload = {
+      id: values.id || uid("video_result"),
+      workspace_id: shot.workspaceId,
+      prompt_id: prompt.id,
+      provider: values.provider || prompt.promptTarget || "External",
+      model: values.model || "",
+      result_url: values.resultUrl || "",
+      file_reference: values.fileReference || "",
+      note: values.note || "",
+      status: Object.values(VIDEO_RESULT_STATUS).includes(values.status) ? values.status : VIDEO_RESULT_STATUS.CANDIDATE,
+      raw: values.raw || {}
+    };
+    const server = await runBackendWrite("videoResult.add", () => apiClient.addVideoGenerationResult(shotId, payload));
+    if (payload.status === VIDEO_RESULT_STATUS.SELECTED) {
+      db.videoGenerationResults = db.videoGenerationResults.map(item => item.shotId === shotId && item.status === VIDEO_RESULT_STATUS.SELECTED
+        ? normalizeVideoGenerationResult({ ...item, status: VIDEO_RESULT_STATUS.CANDIDATE, updatedAt: now() }) : item);
+    }
+    const saved = server ? normalizeVideoGenerationResult(server) : normalizeVideoGenerationResult({
+      id: payload.id, workspaceId: shot.workspaceId, planId: snapshots.plan.id, shotId, promptId: prompt.id,
+      planContentRevision: snapshots.plan.contentRevision, storyboardRevision: snapshots.storyboard.revision,
+      promptRevision: prompt.revision, shotSnapshot: snapshots.shotSnapshot, promptSnapshot: snapshots.promptSnapshot,
+      provider: payload.provider, model: payload.model, resultUrl: payload.result_url,
+      fileReference: payload.file_reference, note: payload.note, status: payload.status, raw: payload.raw
+    });
+    upsertById(db.videoGenerationResults, saved);
+    saveDb();
+    return saved;
+  },
+  async setResultStatus(resultId, status) {
+    const current = VideoGenerationResultStore.getById(resultId);
+    if (!current) throw new Error("Generation Result 不存在。");
+    if (!Object.values(VIDEO_RESULT_STATUS).includes(status)) throw new Error("不支持的 Result 状态。");
+    const server = await runBackendWrite("videoResult.status", () => apiClient.setVideoGenerationResultStatus(resultId, status, current.workspaceId));
+    if (status === VIDEO_RESULT_STATUS.SELECTED) {
+      db.videoGenerationResults = db.videoGenerationResults.map(item => item.shotId === current.shotId && item.id !== resultId && item.status === VIDEO_RESULT_STATUS.SELECTED
+        ? normalizeVideoGenerationResult({ ...item, status: VIDEO_RESULT_STATUS.CANDIDATE, updatedAt: now() }) : item);
+    }
+    const saved = server ? normalizeVideoGenerationResult(server) : normalizeVideoGenerationResult({ ...current, status, updatedAt: now() });
+    upsertById(db.videoGenerationResults, saved);
     saveDb();
     return saved;
   }
@@ -6582,6 +6806,8 @@ window.VideoScriptStore = VideoScriptStore;
 window.VideoStoryboardStore = VideoStoryboardStore;
 window.VideoShotStore = VideoShotStore;
 window.VideoPromptStore = VideoPromptStore;
+window.VideoReferenceAssetStore = VideoReferenceAssetStore;
+window.VideoGenerationResultStore = VideoGenerationResultStore;
 window.VideoPlannerService = VideoPlannerService;
 window.PublishJobStore = PublishJobStore;
 window.PublishingService = PublishingService;
@@ -6625,7 +6851,7 @@ window.OpportunityScoring = OpportunityScoring;
 // =========================
 function createInitialData() {
   return {
-    schemaVersion: 10,
+    schemaVersion: 11,
     contentItems: createMockContents(),
     topics: createMockTopics(),
     topicClusters: [],
@@ -6639,6 +6865,8 @@ function createInitialData() {
     videoStoryboards: [],
     videoShots: [],
     videoPrompts: [],
+    videoReferenceAssets: [],
+    videoGenerationResults: [],
     publishJobs: [],
     analyticsRecords: [],
     experienceItems: [],
@@ -7889,9 +8117,61 @@ function renderVideoShotEditor(shot, storyboard, target, index, count) {
         <div><label>Negative / Avoid</label><textarea id="promptNegative_${shot.id}">${escapeHtml(prompt?.negativeInstructions || "")}</textarea></div>
         <div><label>Continuity Notes</label><textarea id="promptContinuity_${shot.id}">${escapeHtml(prompt?.continuityNotes || "")}</textarea></div>
       </div>
-      <div class="toolbar"><button class="btn small" data-generate-video-prompt="${shot.id}">${prompt ? `Regenerate ${target}` : `Generate ${target}`}</button><button class="btn small ghost" data-save-video-prompt="${shot.id}">Save Manual Edits</button></div>
+      <div class="toolbar"><button class="btn small" data-generate-video-prompt="${shot.id}">${prompt ? `Regenerate ${target}` : `Generate ${target}`}</button><button class="btn small ghost" data-save-video-prompt="${shot.id}">Save Manual Edits</button><button class="btn small ghost" data-copy-video-prompt="${shot.id}" ${!prompt ? "disabled" : ""}>Copy Prompt</button></div>
     </div>
+    ${renderShotAssetTracking(shot)}
   </article>`;
+}
+
+function renderShotAssetTracking(shot) {
+  const references = VideoReferenceAssetStore.getByShotId(shot.id);
+  const reusable = VideoReferenceAssetStore.getAll().filter(item => item.status === "active" && !item.shotIds.includes(shot.id));
+  const prompts = VideoPromptStore.getByShotId(shot.id);
+  const results = VideoGenerationResultStore.getByShotId(shot.id);
+  return `<div class="shot-assets-panel">
+    <div class="stage-kicker">STEP 6 · ASSETS & RESULTS</div>
+    <div class="shot-assets-grid">
+      <section>
+        <div class="item-head"><strong>References</strong><span class="chip">${references.length}</span></div>
+        <div class="mini-stack">${references.map(item => `<div class="asset-result-card"><div class="item-head"><b>${escapeHtml(item.title)}</b><span class="pill">${escapeHtml(VIDEO_REFERENCE_TYPE_LABELS[item.assetType])}</span></div><div class="meta">${escapeHtml(item.referenceUrl || item.fileReference)}${item.note ? `<br>${escapeHtml(item.note)}` : ""}</div><div class="meta">复用于 ${item.shotIds.length} 个 Shot</div></div>`).join("") || `<div class="meta">尚未添加 Reference。</div>`}</div>
+        <div class="form-grid video-asset-form">
+          <div><label>Type</label><select id="refType_${shot.id}">${VIDEO_REFERENCE_TYPES.map(item => `<option value="${item}">${VIDEO_REFERENCE_TYPE_LABELS[item]}</option>`).join("")}</select></div>
+          <div><label>Title</label><input id="refTitle_${shot.id}" placeholder="角色正面参考" /></div>
+          <div class="span-2"><label>Reference URL</label><input id="refUrl_${shot.id}" type="url" placeholder="https://..." /></div>
+          <div class="span-2"><label>File Reference</label><input id="refFile_${shot.id}" placeholder="外部文件路径或素材编号" /></div>
+          <div class="span-2"><label>Note</label><input id="refNote_${shot.id}" placeholder="需要保持一致的细节" /></div>
+        </div>
+        <div class="toolbar"><button class="btn small ghost" data-add-shot-reference="${shot.id}">Add Reference</button></div>
+        ${reusable.length ? `<div class="reuse-reference"><select id="reuseRef_${shot.id}">${reusable.map(item => `<option value="${item.id}">${escapeHtml(item.title)} · ${VIDEO_REFERENCE_TYPE_LABELS[item.assetType]}</option>`).join("")}</select><button class="btn small ghost" data-reuse-shot-reference="${shot.id}">Reuse Reference</button></div>` : ""}
+      </section>
+      <section>
+        <div class="item-head"><strong>Generated Results</strong><span class="chip">${results.length}</span></div>
+        <div class="mini-stack">${results.map(renderVideoGenerationResult).join("") || `<div class="meta">复制 Prompt 到外部平台生成，再回来添加 Result。</div>`}</div>
+        <div class="form-grid video-asset-form">
+          <div><label>Prompt Reference</label><select id="resultPrompt_${shot.id}" ${!prompts.length ? "disabled" : ""}>${prompts.map(item => `<option value="${item.id}">${escapeHtml(item.promptTarget)} · rev ${item.revision}</option>`).join("") || `<option>请先生成 Prompt</option>`}</select></div>
+          <div><label>Provider</label><select id="resultProvider_${shot.id}">${["Seedance", "Kling", "Veo", "Runway", "External"].map(item => `<option ${item === appState.videoPromptTarget ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+          <div><label>Model（可选）</label><input id="resultModel_${shot.id}" placeholder="模型或版本" /></div>
+          <div><label>Result URL</label><input id="resultUrl_${shot.id}" type="url" placeholder="https://..." /></div>
+          <div class="span-2"><label>File Reference</label><input id="resultFile_${shot.id}" placeholder="外部文件路径或素材编号" /></div>
+          <div class="span-2"><label>Note</label><input id="resultNote_${shot.id}" placeholder="动作、稳定性、可用片段等" /></div>
+        </div>
+        <div class="toolbar"><button class="btn small" data-add-video-result="${shot.id}" ${!prompts.length ? "disabled" : ""}>Add Result</button></div>
+      </section>
+    </div>
+  </div>`;
+}
+
+function renderVideoGenerationResult(item) {
+  return `<div class="asset-result-card ${item.status === VIDEO_RESULT_STATUS.SELECTED ? "selected-result" : ""}">
+    <div class="item-head"><b>${escapeHtml(item.provider)}${item.model ? ` · ${escapeHtml(item.model)}` : ""}</b><span class="pill ${item.status === VIDEO_RESULT_STATUS.SELECTED ? "success" : item.status === VIDEO_RESULT_STATUS.REJECTED ? "danger" : ""}">${VIDEO_RESULT_STATUS_LABELS[item.status]}</span></div>
+    <div class="meta">${item.resultUrl ? `<a href="${escapeHtml(item.resultUrl)}" target="_blank" rel="noreferrer">打开 Result</a>` : escapeHtml(item.fileReference)}${item.note ? `<br>${escapeHtml(item.note)}` : ""}</div>
+    <div class="meta">Plan rev ${item.planContentRevision} · Storyboard rev ${item.storyboardRevision} · Prompt rev ${item.promptRevision}</div>
+    <div class="toolbar compact">
+      <button class="btn small ghost" data-set-video-result-status="${item.id}:selected" ${item.status === VIDEO_RESULT_STATUS.SELECTED ? "disabled" : ""}>Select</button>
+      <button class="btn small ghost" data-set-video-result-status="${item.id}:rejected" ${item.status === VIDEO_RESULT_STATUS.REJECTED ? "disabled" : ""}>Reject</button>
+      <button class="btn small ghost" data-set-video-result-status="${item.id}:archived" ${item.status === VIDEO_RESULT_STATUS.ARCHIVED ? "disabled" : ""}>Archive</button>
+    </div>
+  </div>`;
 }
 
 function collectVideoPlanForm() {
@@ -7948,6 +8228,28 @@ function collectVideoPromptForm(shotId) {
     imageReferencePrompt: document.getElementById(`promptImage_${shotId}`)?.value.trim() || "",
     negativeInstructions: document.getElementById(`promptNegative_${shotId}`)?.value.trim() || "",
     continuityNotes: document.getElementById(`promptContinuity_${shotId}`)?.value.trim() || ""
+  };
+}
+
+function collectVideoReferenceForm(shotId) {
+  return {
+    assetType: document.getElementById(`refType_${shotId}`)?.value || "other",
+    title: document.getElementById(`refTitle_${shotId}`)?.value.trim() || "Reference Asset",
+    referenceUrl: document.getElementById(`refUrl_${shotId}`)?.value.trim() || "",
+    fileReference: document.getElementById(`refFile_${shotId}`)?.value.trim() || "",
+    note: document.getElementById(`refNote_${shotId}`)?.value.trim() || ""
+  };
+}
+
+function collectVideoResultForm(shotId) {
+  return {
+    promptId: document.getElementById(`resultPrompt_${shotId}`)?.value || "",
+    provider: document.getElementById(`resultProvider_${shotId}`)?.value || "External",
+    model: document.getElementById(`resultModel_${shotId}`)?.value.trim() || "",
+    resultUrl: document.getElementById(`resultUrl_${shotId}`)?.value.trim() || "",
+    fileReference: document.getElementById(`resultFile_${shotId}`)?.value.trim() || "",
+    note: document.getElementById(`resultNote_${shotId}`)?.value.trim() || "",
+    status: VIDEO_RESULT_STATUS.CANDIDATE
   };
 }
 
@@ -8865,6 +9167,28 @@ document.addEventListener("click", async event => {
     const targetName = appState.videoPromptTarget || "Generic";
     const values = collectVideoPromptForm(shotId);
     return runVideoPlannerAction(`保存 ${targetName} Prompt`, () => VideoPlannerService.savePrompt(shotId, targetName, values));
+  }
+  if (target.dataset.copyVideoPrompt) {
+    const prompt = VideoPromptStore.getForTarget(target.dataset.copyVideoPrompt, appState.videoPromptTarget || "Generic");
+    if (prompt) await navigator.clipboard.writeText([prompt.genericVideoPrompt, prompt.imageReferencePrompt, prompt.negativeInstructions, prompt.continuityNotes].filter(Boolean).join("\n\n"));
+    return;
+  }
+  if (target.dataset.addShotReference) {
+    const shotId = target.dataset.addShotReference;
+    return runVideoPlannerAction("添加 Reference", () => VideoPlannerService.addReference(shotId, collectVideoReferenceForm(shotId)));
+  }
+  if (target.dataset.reuseShotReference) {
+    const shotId = target.dataset.reuseShotReference;
+    const assetId = document.getElementById(`reuseRef_${shotId}`)?.value || "";
+    return runVideoPlannerAction("复用 Reference", () => VideoPlannerService.addReference(shotId, { assetId }));
+  }
+  if (target.dataset.addVideoResult) {
+    const shotId = target.dataset.addVideoResult;
+    return runVideoPlannerAction("添加 Generation Result", () => VideoPlannerService.addResult(shotId, collectVideoResultForm(shotId)));
+  }
+  if (target.dataset.setVideoResultStatus) {
+    const [resultId, status] = target.dataset.setVideoResultStatus.split(":");
+    return runVideoPlannerAction(`更新 Result：${VIDEO_RESULT_STATUS_LABELS[status] || status}`, () => VideoPlannerService.setResultStatus(resultId, status));
   }
   if (target.dataset.openKnowledge) { appState.editKnowledgeId = target.dataset.openKnowledge; return setPage("knowledge"); }
   if (target.dataset.refreshGithub !== undefined) {

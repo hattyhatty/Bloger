@@ -425,6 +425,13 @@ label { display: block; margin-bottom: 7px; color: #735461; font-size: 13px; fon
 .shot-editor { min-width: 0; display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff8fb; }
 .shot-number { display: inline-flex; padding: 6px 9px; margin-right: 8px; border-radius: 10px; background: #34242b; color: #fff; font-size: 11px; font-weight: 900; letter-spacing: .05em; }
 .shot-prompt-panel { display: grid; gap: 12px; padding: 14px; border: 1px solid #e7d8ff; border-radius: 16px; background: #fbf9ff; }
+.shot-assets-panel { display: grid; gap: 12px; padding: 14px; border: 1px solid #dce9e3; border-radius: 16px; background: #f8fffb; }
+.shot-assets-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.shot-assets-grid > section { min-width: 0; display: grid; gap: 10px; }
+.video-asset-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.asset-result-card { min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: 13px; background: #fff; overflow-wrap: anywhere; }
+.asset-result-card.selected-result { border-color: #7ac79d; box-shadow: 0 0 0 2px rgba(47,155,104,.09); }
+.reuse-reference { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .prompt-textarea { min-height: 150px; }
 .studio-body.compact { min-height: 180px; }
 .toolbar.compact > * { flex: 0 0 auto; }
@@ -501,4 +508,5 @@ td { font-size: 14px; }
   .opportunity-score-grid { grid-template-columns: 1fr; }
   .video-plan-fields, .shot-editor-grid { grid-template-columns: 1fr; }
   .shot-editor .span-2, .video-plan-fields .span-2 { grid-column: auto; }
+  .shot-assets-grid, .video-asset-form, .reuse-reference { grid-template-columns: 1fr; }
 }

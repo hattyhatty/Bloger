@@ -1,4 +1,4 @@
-# AI Content OS Backend — Phase 8A
+# AI Content OS Backend — Phase 8B
 
 FastAPI + PostgreSQL backend for the AI Content OS core workflow and Knowledge Brain, with server-side workflow validation, immutable published-version history, and idempotent business operations.
 
@@ -15,6 +15,7 @@ The database persists:
 - ContentOpportunity and its relevant Knowledge / Creator Learning links
 - CreatorLearning / CreatorLearningEvidence / StrategySuggestion
 - VideoProductionPlan / VideoScript / VideoStoryboard / VideoShot / VideoGenerationPrompt
+- VideoReferenceAsset / VideoShotReferenceLink / VideoGenerationResult
 
 Real platform APIs, auth, multi-user SaaS, schedulers, vector databases, and cloud deployment remain intentionally out of scope.
 
@@ -74,6 +75,11 @@ Open:
 - `POST /api/video-storyboards/{storyboard_id}/shots/reorder`
 - `PUT/DELETE /api/video-shots/{shot_id}`
 - `PUT /api/video-shots/{shot_id}/prompt`
+- `GET /api/video-reference-assets`
+- `POST /api/video-shots/{shot_id}/references`
+- `GET/POST /api/video-shots/{shot_id}/results`
+- `PUT /api/video-results/{result_id}`
+- `PATCH /api/video-results/{result_id}/status`
 - `GET /api/activity-logs`
 - `GET/POST/PUT /api/platform-versions`
 - `GET/POST/PUT /api/approvals`
@@ -141,7 +147,7 @@ The service layer in `app/workflow.py` enforces the business chain independently
 - Strategy Suggestions require Accept / Reject / Ignore; Creator Memory changes only after an explicit Accept
 - Learning entries mirrored to Knowledge Brain always retain type `Learning`, evidence IDs, metrics, and confidence; they are never promoted to `Fact`
 
-## Video Production Planner integrity
+## Video Production Planner and result integrity
 
 - every Video Plan binds an immutable Content revision, hash, and snapshot; later Content edits only mark the Plan as changed
 - Script, Storyboard, ordered Shots, and per-target Prompts are independent relational records rather than a Content JSON blob
@@ -149,7 +155,11 @@ The service layer in `app/workflow.py` enforces the business chain independently
 - Shot order is unique inside one Storyboard and reorder requests must include every Shot exactly once
 - each Shot has at most one Prompt per target (`Generic`, `Seedance`, `Kling`, `Veo`, `Runway`); regeneration updates only that target
 - Prompt source hashes preserve traceability to structured Shot and consistency inputs
-- no video/image generation provider is called in Phase 8A
+- Reference Assets are reusable across Shots through workspace-scoped link records
+- each Generation Result stores immutable Shot and Prompt snapshots plus Plan, Storyboard, Prompt, and Content revisions
+- a partial unique index and transactional status service guarantee at most one Selected Result per Shot
+- Shots with Generation Results cannot be deleted, preserving production history
+- no video/image generation provider is called in Phase 8B
 
 ## Security
 

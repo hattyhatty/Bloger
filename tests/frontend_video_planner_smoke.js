@@ -109,6 +109,42 @@ vm.runInThisContext(source, { filename: "app.js" });
   }
   assert.equal((await window.VideoPlannerService.updatePlan(plan.id, { status: "ready_for_review" })).status, "ready_for_review");
 
+  const reference = await window.VideoPlannerService.addReference(added.id, {
+    assetType: "character",
+    title: "固定角色参考",
+    referenceUrl: "https://example.com/creator.png",
+    note: "保持面部和服装一致",
+  });
+  const reusedReference = await window.VideoPlannerService.addReference(workspace.shots[0].id, { assetId: reference.id });
+  assert.deepEqual(new Set(reusedReference.shotIds), new Set([added.id, workspace.shots[0].id]));
+
+  const resultOne = await window.VideoPlannerService.addResult(added.id, {
+    promptId: regenerated.id,
+    provider: "Generic",
+    resultUrl: "https://example.com/result-one.mp4",
+    note: "动作自然",
+  });
+  const resultTwo = await window.VideoPlannerService.addResult(added.id, {
+    promptId: kling.id,
+    provider: "Kling",
+    resultUrl: "https://example.com/result-two.mp4",
+    note: "镜头稳定",
+  });
+  assert.equal(window.VideoGenerationResultStore.getByShotId(added.id).length, 2);
+  await window.VideoPlannerService.setResultStatus(resultOne.id, "selected");
+  await window.VideoPlannerService.setResultStatus(resultTwo.id, "selected");
+  assert.equal(window.VideoGenerationResultStore.getSelected(added.id).id, resultTwo.id);
+  assert.equal(window.VideoGenerationResultStore.getById(resultOne.id).status, "candidate");
+  await window.VideoPlannerService.setResultStatus(resultTwo.id, "rejected");
+  await window.VideoPlannerService.setResultStatus(resultOne.id, "archived");
+  assert.equal(window.VideoGenerationResultStore.getById(resultTwo.id).status, "rejected");
+  assert.equal(window.VideoGenerationResultStore.getById(resultOne.id).status, "archived");
+
+  const historicalPromptRevision = resultOne.promptRevision;
+  await window.VideoPlannerService.generatePrompt(added.id, "Generic");
+  assert.equal(window.VideoGenerationResultStore.getById(resultOne.id).promptRevision, historicalPromptRevision);
+  assert.equal(window.VideoGenerationResultStore.getById(resultOne.id).promptSnapshot.genericVideoPrompt, regenerated.genericVideoPrompt);
+
   const originalPlanSnapshot = plan.contentSnapshot.title;
   window.ContentStore.update(content.id, { draftTitle: `${content.title}（新版）` });
   const changedContent = window.ContentStore.getById(content.id);
@@ -119,10 +155,22 @@ vm.runInThisContext(source, { filename: "app.js" });
   assert.notEqual(nextPlan.id, plan.id);
   assert.equal(nextPlan.contentRevision, changedContent.revision);
 
-  await window.VideoPlannerService.removeShot(added.id);
+  await assert.rejects(() => window.VideoPlannerService.removeShot(added.id), /历史/);
+  await window.VideoPlannerService.removeShot(workspace.shots[2].id);
   const remaining = window.VideoShotStore.getByStoryboardId(workspace.storyboard.id);
   assert.deepEqual(remaining.map(item => item.shotNumber), [1, 2, 3]);
-  assert.equal(window.VideoPromptStore.getByShotId(added.id).length, 0);
+  assert.equal(window.VideoPromptStore.getByShotId(workspace.shots[2].id).length, 0);
+
+  vm.runInThisContext(`appState.page = "video"; appState.selectedVideoPlanId = "${plan.id}"; render();`);
+  const rendered = elements.get("app").innerHTML;
+  assert.match(rendered, /References/);
+  assert.match(rendered, /Generated Results/);
+  assert.match(rendered, /Add Result/);
+  assert.match(rendered, /Select/);
+  assert.match(rendered, /Reject/);
+  assert.match(rendered, /Archive/);
+  const css = fs.readFileSync(path.join(__dirname, "..", "app.css"), "utf8");
+  assert.match(css, /@media \(max-width: 820px\)[\s\S]*\.shot-assets-grid, \.video-asset-form, \.reuse-reference \{ grid-template-columns: 1fr; \}/);
 
   console.log(`frontend video planner smoke passed: ${plan.id} -> ${remaining.length} shots`);
 })().catch(error => {

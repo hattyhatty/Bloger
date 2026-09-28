@@ -78,8 +78,14 @@ from .schemas import (
     VideoPlannerWorkspaceOut,
     VideoPlanStatusIn,
     VideoPlanUpdateIn,
+    VideoGenerationResultIn,
+    VideoGenerationResultOut,
+    VideoGenerationResultStatusIn,
+    VideoGenerationResultUpdateIn,
     VideoPromptIn,
     VideoPromptOut,
+    VideoReferenceAssetIn,
+    VideoReferenceAssetOut,
     VideoScriptIn,
     VideoScriptOut,
     VideoShotIn,
@@ -125,23 +131,29 @@ from .workflow import (
     validate_knowledge_links,
 )
 from .video_planner import (
+    add_generation_result,
+    add_shot_reference,
     add_shot,
     create_video_plan,
     get_plan_workspace,
+    list_generation_results,
+    list_reference_assets,
     remove_shot,
     reorder_shots,
     save_shot_prompt,
     save_storyboard,
     save_video_script,
     set_video_plan_status,
+    set_generation_result_status,
     update_shot,
+    update_generation_result,
     update_video_plan,
     video_plan_context,
 )
 
 
 settings = get_settings()
-app = FastAPI(title="AI Content OS Backend", version="0.8.0")
+app = FastAPI(title="AI Content OS Backend", version="0.8.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins or ["*"],
@@ -160,7 +172,7 @@ async def workflow_conflict_handler(_: Request, error: WorkflowConflict):
 
 @app.get("/api/health")
 def api_health() -> dict[str, str]:
-    return {"status": "ok", "service": "ai-content-os-backend", "phase": "8A", "sourceOfTruth": "postgresql"}
+    return {"status": "ok", "service": "ai-content-os-backend", "phase": "8B", "sourceOfTruth": "postgresql"}
 
 
 @app.get("/health")
@@ -592,6 +604,44 @@ def reorder_video_storyboard_shots(
 @app.put("/api/video-shots/{shot_id}/prompt", response_model=VideoPromptOut)
 def put_video_shot_prompt(shot_id: str, payload: VideoPromptIn, db: Session = Depends(get_db)):
     return save_shot_prompt(db, shot_id, payload.model_dump())
+
+
+@app.get("/api/video-reference-assets", response_model=list[VideoReferenceAssetOut])
+def get_video_reference_assets(
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    shot_id: str = "",
+    db: Session = Depends(get_db),
+):
+    return list_reference_assets(db, workspace_id, shot_id or None)
+
+
+@app.post("/api/video-shots/{shot_id}/references", response_model=VideoReferenceAssetOut)
+def post_video_shot_reference(shot_id: str, payload: VideoReferenceAssetIn, db: Session = Depends(get_db)):
+    return add_shot_reference(db, shot_id, payload.model_dump())
+
+
+@app.get("/api/video-shots/{shot_id}/results", response_model=list[VideoGenerationResultOut])
+def get_video_shot_results(
+    shot_id: str,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    db: Session = Depends(get_db),
+):
+    return list_generation_results(db, workspace_id, shot_id)
+
+
+@app.post("/api/video-shots/{shot_id}/results", response_model=VideoGenerationResultOut)
+def post_video_shot_result(shot_id: str, payload: VideoGenerationResultIn, db: Session = Depends(get_db)):
+    return add_generation_result(db, shot_id, payload.model_dump())
+
+
+@app.put("/api/video-results/{result_id}", response_model=VideoGenerationResultOut)
+def put_video_result(result_id: str, payload: VideoGenerationResultUpdateIn, db: Session = Depends(get_db)):
+    return update_generation_result(db, result_id, payload.model_dump())
+
+
+@app.patch("/api/video-results/{result_id}/status", response_model=VideoGenerationResultOut)
+def patch_video_result_status(result_id: str, payload: VideoGenerationResultStatusIn, db: Session = Depends(get_db)):
+    return set_generation_result_status(db, result_id, payload.workspace_id, payload.status)
 
 
 @app.get("/api/activity-logs", response_model=list[ActivityLogOut])
