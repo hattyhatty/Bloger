@@ -169,8 +169,11 @@ vm.runInThisContext(source, { filename: "app.js" });
   assert.match(rendered, /Select/);
   assert.match(rendered, /Reject/);
   assert.match(rendered, /Archive/);
+  assert.match(rendered, /REAL PROVIDER EXECUTION/);
+  assert.match(rendered, /Generation Request/);
+  assert.match(rendered, /Manual \+ Durable Provider/);
   const css = fs.readFileSync(path.join(__dirname, "..", "app.css"), "utf8");
-  assert.match(css, /@media \(max-width: 820px\)[\s\S]*\.shot-assets-grid, \.video-asset-form, \.reuse-reference \{ grid-template-columns: 1fr; \}/);
+  assert.match(css, /@media \(max-width: 820px\)[\s\S]*\.shot-assets-grid, \.video-asset-form, \.video-execution-form, \.reuse-reference \{ grid-template-columns: 1fr; \}/);
 
   console.log(`frontend video planner smoke passed: ${plan.id} -> ${remaining.length} shots`);
 })().catch(error => {

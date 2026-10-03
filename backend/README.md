@@ -1,4 +1,4 @@
-# AI Content OS Backend — Phase 8B
+# AI Content OS Backend — Phase 8C
 
 FastAPI + PostgreSQL backend for the AI Content OS core workflow and Knowledge Brain, with server-side workflow validation, immutable published-version history, and idempotent business operations.
 
@@ -17,7 +17,8 @@ The database persists:
 - VideoProductionPlan / VideoScript / VideoStoryboard / VideoShot / VideoGenerationPrompt
 - VideoReferenceAsset / VideoShotReferenceLink / VideoGenerationResult
 
-Real platform APIs, auth, multi-user SaaS, schedulers, vector databases, and cloud deployment remain intentionally out of scope.
+Runway Dev is the first real video generation adapter. Real publishing APIs,
+multi-user SaaS, schedulers, vector databases, and cloud deployment remain out of scope.
 
 ## Local setup
 
@@ -30,6 +31,8 @@ py -m venv .venv
 py -m pip install -r requirements.txt
 alembic upgrade head
 uvicorn app.main:app --reload --port 8000
+# separate terminal; the API process never executes durable jobs
+python -m app.worker
 ```
 
 Open:
@@ -80,6 +83,13 @@ Open:
 - `GET/POST /api/video-shots/{shot_id}/results`
 - `PUT /api/video-results/{result_id}`
 - `PATCH /api/video-results/{result_id}/status`
+- `GET /api/video-providers`
+- `POST /api/video-providers/runway/test` (read-only, non-billable probe)
+- `POST/GET /api/execution/generation-requests`
+- `POST /api/execution/generation-requests/{id}/enqueue`
+- `GET /api/execution/generation-requests/{id}/execution-state`
+- `POST /api/execution/generation-requests/{id}/cancel`
+- `POST /api/execution/generation-requests/{id}/reconcile`
 - `GET /api/activity-logs`
 - `GET/POST/PUT /api/platform-versions`
 - `GET/POST/PUT /api/approvals`
@@ -159,7 +169,33 @@ The service layer in `app/workflow.py` enforces the business chain independently
 - each Generation Result stores immutable Shot and Prompt snapshots plus Plan, Storyboard, Prompt, and Content revisions
 - a partial unique index and transactional status service guarantee at most one Selected Result per Shot
 - Shots with Generation Results cannot be deleted, preserving production history
-- no video/image generation provider is called in Phase 8B
+- Manual Result remains available alongside durable provider execution
+
+## Runway Dev adapter (Phase 8C)
+
+Set `RUNWAYML_API_SECRET` in `backend/.env` or the backend process environment.
+The key is never returned by an API, persisted in a GenerationRequest/Job/Receipt,
+or sent to the browser. `GET /api/video-providers` returns only `configured`.
+
+The adapter currently supports Runway Gen-4.5 text-to-video and first-frame
+image-to-video through `/v1/image_to_video`, 2–10 second output, the documented
+720p aspect ratios, asynchronous task polling, cancellation and task-ID
+reconciliation. A reference must already be a public HTTPS URL; local files are
+rejected because this phase intentionally has no upload/object-storage pipeline.
+Negative prompts and webhooks are not advertised because this vertical slice
+does not implement unsupported or unnecessary capabilities.
+
+Submission uses the immutable GenerationRequest snapshot. A Provider task ID is
+saved before a poll job is scheduled. Polling performs one GET per worker job;
+unfinished tasks schedule another durable job at least five seconds later.
+Successful output creates exactly one candidate VideoGenerationResult. Runway
+delivery URLs are temporary, so durable media storage remains technical debt.
+
+Error handling preserves the execution certainty boundary: validation and missing
+credentials fail before dispatch without inventing an Attempt; a definitive HTTP rejection fails the call; a
+submit timeout or ambiguous 5xx becomes `unknown`; polling transport errors retry
+only the Poll Job; and 429 honors `Retry-After` via `ExecutionJob.available_at`.
+No cost is estimated when Runway does not return billing data.
 
 ## Execution core (Phase 8B.5A)
 
@@ -203,7 +239,7 @@ Receipt lifecycle:
 GenerationRequest transitions:
 
 - `created` → `queued` / `submitting` / `cancelled`
-- `queued` → `submitting` / `cancelled`
+- `queued` → `submitting` / pre-dispatch `failed` / `cancelled`
 - `submitting` → `submitted` / `succeeded` / `failed` / `unknown`
 - `submitted` → `polling` / `succeeded` / `failed` / `unknown` / provider-confirmed `cancelled`
 - `polling` → `succeeded` / `failed` / `unknown` / provider-confirmed `cancelled`
@@ -282,7 +318,8 @@ Claim and lease algorithm:
   receive exactly one active poll Job. Poll and reconciliation lookups are safe
   to reschedule because they do not create a new generation.
 
-Retry policy uses `min(300, 2 ** attempt_count)` seconds. Only pre-dispatch or
+Retry policy uses `min(300, 2 ** attempt_count)` seconds, overridden by a
+provider `Retry-After` value up to the same cap. Only pre-dispatch or
 otherwise side-effect-free technical errors retry automatically. Exhausted jobs
 become `dead`; definitive provider rejection becomes `failed`; timeout after
 dispatch becomes provider `unknown`. Manual retry rejects succeeded, cancelled or
@@ -319,12 +356,13 @@ Worker credentials remain backend-only. ActivityLog records enqueue, claim,
 retry, success/failure/dead, recovery, dispatch, polling schedule and unknown
 outcomes; heartbeat writes only to the Job row.
 
-Known 8C boundaries: no real provider credential loader or adapter, provider rate
-limit policy, webhook ingestion, provider-specific reconciliation semantics,
-distributed metrics/alerts or operator dashboard. This is a database queue, not
-a distributed scheduler or autoscaler. Attempt immutability is service-enforced,
-not protected against privileged direct SQL changes. Existing single-Creator
-Workspace ownership and no-auth development API remain unchanged.
+Known 8C boundaries: Runway output URLs are temporary and no S3/R2 ingest exists;
+there is no webhook ingestion, distributed metrics/alerts or operator dashboard.
+Reconciliation requires a known Runway task ID, otherwise the request correctly
+remains `unknown` for manual handling. This is a database queue, not a distributed
+scheduler or autoscaler. Attempt immutability is service-enforced, not protected
+against privileged direct SQL changes. Existing single-Creator Workspace
+ownership and no-auth development API remain unchanged.
 
 ## Security requirements
 

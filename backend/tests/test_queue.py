@@ -2,9 +2,11 @@
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from datetime import datetime, timezone
 import os
 
 import pytest
+import httpx
 from sqlalchemy import select
 
 from test_core_api import client
@@ -13,7 +15,9 @@ from app import execution
 from app.database import get_db
 from app.main import app
 from app.models import ExecutionJob, GenerationRequest
-from app.providers import FakeVideoProvider
+from app.providers import FakeVideoProvider, ProviderRateLimited
+from app.config import Settings
+from app.runway_provider import RunwayVideoProvider
 from app.queue import claim_next_job, heartbeat, recover_expired_leases
 from app.worker import process_job
 from app.workflow import WorkflowConflict, utcnow
@@ -56,6 +60,85 @@ def state(client, request):
     response = client.get(f"/api/execution/generation-requests/{request['id']}/execution-state")
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_submit_429_respects_retry_after_without_duplicate_receipt(client, monkeypatch):
+    class LimitedProvider(FakeVideoProvider):
+        def submit(self, request, *, on_dispatch, technical_attempt=1):
+            on_dispatch()
+            raise ProviderRateLimited("rate limited", retry_after=23,
+                dispatched=True, safe_to_resubmit=True)
+
+    _, _, request = create_request(client, "queue_runway_429")
+    enqueue(client, request)
+    monkeypatch.setattr("app.worker.get_video_provider", lambda _: LimitedProvider())
+    before = utcnow()
+    claim_process("rate-limit-worker")
+    current = state(client, request)
+    assert current["request"]["status"] == "queued"
+    assert current["receipt"]["status"] == "pending"
+    assert current["attempts"][0]["status"] == "failed"
+    assert current["jobs"][0]["status"] == "queued"
+    available = datetime.fromisoformat(current["jobs"][0]["available_at"].replace("Z", "+00:00"))
+    if available.tzinfo is None:
+        available = available.replace(tzinfo=timezone.utc)
+    assert available >= before + timedelta(seconds=22)
+
+
+def test_runway_adapter_full_worker_path_creates_candidate(client, monkeypatch):
+    _, _, shot, prompt = setup_prompt(client, "queue_runway_contract")
+    created = client.post("/api/execution/generation-requests", json={
+        "prompt_id": prompt["id"], "provider": "Runway", "model": "gen4.5",
+        "generation_config": {"duration": 5, "ratio": "1280:720", "poll_interval_seconds": 5},
+    })
+    assert created.status_code == 200, created.text
+    request = created.json()
+    calls = {"get": 0}
+
+    def handler(http_request):
+        if http_request.method == "POST":
+            return httpx.Response(200, json={"id": "runway-contract-job"})
+        calls["get"] += 1
+        return httpx.Response(200, json={"status": "SUCCEEDED",
+            "output": ["https://cdn.example.com/runway-contract.mp4"]})
+
+    adapter = RunwayVideoProvider(
+        Settings(database_url="sqlite://", runwayml_api_secret="contract-secret"),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    monkeypatch.setattr("app.worker.get_video_provider", lambda _: adapter)
+    enqueue(client, request)
+    claim_process("runway-submit")
+    submitted = state(client, request)
+    assert submitted["request"]["provider_job_id"] == "runway-contract-job"
+    assert submitted["request"]["status"] == "submitted"
+    claim_process("runway-poll", now=utcnow() + timedelta(seconds=6))
+    completed = state(client, request)
+    assert completed["request"]["status"] == "succeeded"
+    assert completed["receipt"]["status"] == "completed"
+    assert completed["receipt"]["cost"] is None
+    results = client.get(f"/api/video-shots/{shot['id']}/results").json()
+    assert len(results) == 1 and results[0]["status"] == "candidate"
+    assert results[0]["provider"] == "Runway"
+    assert results[0]["generation_request_id"] == request["id"]
+
+
+def test_runway_missing_credential_fails_before_attempt(client, monkeypatch):
+    _, _, _, prompt = setup_prompt(client, "queue_runway_missing_key")
+    created = client.post("/api/execution/generation-requests", json={
+        "prompt_id": prompt["id"], "provider": "Runway", "model": "gen4.5",
+        "generation_config": {"duration": 5, "ratio": "1280:720"},
+    }).json()
+    adapter = RunwayVideoProvider(Settings(database_url="sqlite://", runwayml_api_secret=""),
+        httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(500))))
+    monkeypatch.setattr("app.worker.get_video_provider", lambda _: adapter)
+    enqueue(client, created)
+    claim_process("runway-no-key")
+    current = state(client, created)
+    assert current["request"]["status"] == "failed"
+    assert current["receipt"]["status"] == "failed"
+    assert current["attempts"] == []
+    assert current["jobs"][0]["status"] == "failed"
 
 
 def test_transactional_enqueue_duplicate_and_cancel(client, monkeypatch):

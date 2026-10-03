@@ -14,15 +14,16 @@ from sqlalchemy.orm import Session
 from .activity import log_activity
 from .models import (Content, Topic, KnowledgeEntry, VideoProductionPlan, VideoShot,
                      VideoStoryboard, VideoGenerationPrompt, ExternalCallReceipt,
-                     ExternalCallAttempt, GenerationRequest)
+                     ExternalCallAttempt, GenerationRequest, VideoReferenceAsset,
+                     VideoShotReferenceLink)
 from .prompt_registry import PromptRegistry
 from .workflow import WorkflowConflict, ensure_owned, stable_hash, utcnow
 
 SUBJECTS = {cls.__name__: cls for cls in (Content, Topic, KnowledgeEntry, VideoProductionPlan, VideoShot, VideoGenerationPrompt)}
 TRANSITIONS = {
     "created": {"queued", "submitting", "cancelled"},
-    "queued": {"submitting", "cancelled"},
-    "submitting": {"submitted", "succeeded", "failed", "unknown"},
+    "queued": {"submitting", "failed", "cancelled"},
+    "submitting": {"queued", "submitted", "succeeded", "failed", "unknown"},
     "submitted": {"polling", "succeeded", "failed", "unknown", "cancelled"},
     "polling": {"succeeded", "failed", "unknown", "cancelled"},
     "failed": {"queued", "cancelled"},
@@ -218,6 +219,39 @@ def mark_unknown(db, receipt_id, workspace_id, **values):
     return _mark(db, receipt_id, workspace_id, "unknown", **values)
 
 
+def mark_attempt_not_accepted(db, receipt_id, workspace_id, attempt_id, error, *, commit=True):
+    """Close an attempt after a definitive provider rejection without failing its receipt."""
+    item = _owned(db, ExternalCallReceipt, receipt_id, workspace_id)
+    attempt = db.get(ExternalCallAttempt, attempt_id)
+    if not attempt or attempt.receipt_id != item.id or attempt.status != "running":
+        raise WorkflowConflict("Active attempt ID required")
+    now = utcnow()
+    attempt.status = "failed"
+    attempt.finished_at = now
+    started = attempt.started_at.replace(tzinfo=timezone.utc) if attempt.started_at.tzinfo is None else attempt.started_at
+    attempt.latency_ms = max(0, int((now - started).total_seconds() * 1000))
+    attempt.error = str(error)
+    item.status = "pending"
+    item.response_payload = {"error": str(error)}
+    _log(db, "external_attempt_not_accepted", item, {"attemptId": attempt.id})
+    db.commit() if commit else db.flush()
+    return attempt
+
+
+def mark_pre_dispatch_failed(db, receipt_id, workspace_id, error, *, commit=True):
+    """Record a definitive local/provider configuration rejection with no dispatched Attempt."""
+    item = _owned(db, ExternalCallReceipt, receipt_id, workspace_id)
+    running = db.scalar(select(ExternalCallAttempt).where(
+        ExternalCallAttempt.receipt_id == item.id, ExternalCallAttempt.status == "running"))
+    if running or item.status not in {"pending", "failed"}:
+        raise WorkflowConflict("Pre-dispatch failure requires a pending receipt without an active attempt")
+    item.status = "failed"
+    item.response_payload = {"error": str(error)}
+    _log(db, "external_receipt_failed", item, {"preDispatch": True})
+    db.commit() if commit else db.flush()
+    return item
+
+
 def create_generation_request(db: Session, values: dict) -> GenerationRequest:
     from .video_planner import shot_snapshot, prompt_snapshot
     workspace = values.get("workspace_id", "default")
@@ -232,13 +266,28 @@ def create_generation_request(db: Session, values: dict) -> GenerationRequest:
     ensure_owned(storyboard, workspace, "VideoStoryboard")
     plan = db.get(VideoProductionPlan, storyboard.plan_id)
     ensure_owned(plan, workspace, "VideoProductionPlan")
+    links = db.scalars(select(VideoShotReferenceLink).where(
+        VideoShotReferenceLink.shot_id == shot.id,
+        VideoShotReferenceLink.workspace_id == workspace,
+    )).all()
+    references = []
+    for link in links:
+        asset = db.get(VideoReferenceAsset, link.asset_id)
+        ensure_owned(asset, workspace, "VideoReferenceAsset")
+        references.append({"id": asset.id, "asset_type": asset.asset_type, "title": asset.title,
+            "reference_url": asset.reference_url, "file_reference": asset.file_reference,
+            "status": asset.status, "plan_content_revision": link.plan_content_revision})
     snapshot = {"plan_id": plan.id, "content_revision": plan.content_revision,
         "content_hash": plan.content_hash, "content_snapshot": plan.content_snapshot,
+        "video_plan": {"target_platform": plan.target_platform,
+            "target_duration_seconds": plan.target_duration_seconds,
+            "content_format": plan.content_format, "visual_style": plan.visual_style,
+            "aspect_ratio": plan.aspect_ratio},
         "storyboard_revision": storyboard.revision, "shot": shot_snapshot(shot),
         "prompt": prompt_snapshot(prompt), "consistency": {
             "character": storyboard.recurring_character_description, "clothing": storyboard.clothing,
             "environment": storyboard.environment, "visual_style": storyboard.visual_style,
-            "reference_notes": storyboard.reference_notes}}
+            "reference_notes": storyboard.reference_notes}, "reference_assets": references}
     receipt = _receipt(db, {"workspace_id": workspace, "service": "video", "purpose": "video.generate",
         "subject_type": "VideoGenerationPrompt", "subject_id": prompt.id,
         "input_revision": str(plan.content_revision), "input_hash": stable_hash(snapshot),
@@ -259,7 +308,8 @@ def create_generation_request(db: Session, values: dict) -> GenerationRequest:
 
 
 def transition_generation_request(db, request_id, workspace_id, status, *, provider_job_id="", error="",
-                                  provider_cancelled: bool = False, commit: bool = True):
+                                  provider_cancelled: bool = False, provider_not_accepted: bool = False,
+                                  commit: bool = True):
     item = _owned(db, GenerationRequest, request_id, workspace_id)
     receipt = _owned(db, ExternalCallReceipt, item.receipt_id, workspace_id)
     if status == item.status:
@@ -270,6 +320,8 @@ def transition_generation_request(db, request_id, workspace_id, status, *, provi
         running = db.scalar(select(ExternalCallAttempt).where(ExternalCallAttempt.receipt_id == receipt.id, ExternalCallAttempt.status == "running"))
         if not provider_cancelled and (running or receipt.status not in {"pending", "failed"}):
             raise WorkflowConflict("A dispatched or uncertain call cannot be cancelled as an unsent request")
+    if item.status == "submitting" and status == "queued" and not provider_not_accepted:
+        raise WorkflowConflict("Only a definitive provider rejection may return submitting to queued")
     required = {"submitted": {"received", "completed"}, "polling": {"received", "completed"},
         "succeeded": {"completed"}, "failed": {"failed"}, "unknown": {"unknown"}, "queued": {"pending", "failed"}}
     if status in required and receipt.status not in required[status]:

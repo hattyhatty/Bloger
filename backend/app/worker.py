@@ -120,7 +120,7 @@ def _submit(db, job, request, receipt, provider):
     if outcome.status == "succeeded":
         execution.mark_completed(db, receipt.id, request.workspace_id, attempt_id=attempt_id,
             provider_request_id=outcome.provider_job_id, response_payload=outcome.response,
-            usage=outcome.usage, commit=False)
+            usage=outcome.usage, cost=outcome.cost, currency=outcome.currency, commit=False)
         execution.transition_generation_request(db, request.id, request.workspace_id, "succeeded",
             provider_job_id=outcome.provider_job_id, commit=False)
         _result(db, request, outcome)
@@ -129,10 +129,10 @@ def _submit(db, job, request, receipt, provider):
     elif outcome.status == "submitted":
         execution.mark_received(db, receipt.id, request.workspace_id, attempt_id=attempt_id,
             provider_request_id=outcome.provider_job_id, response_payload=outcome.response,
-            usage=outcome.usage, commit=False)
+            usage=outcome.usage, cost=outcome.cost, currency=outcome.currency, commit=False)
         execution.transition_generation_request(db, request.id, request.workspace_id, "submitted",
             provider_job_id=outcome.provider_job_id, commit=False)
-        delay = max(0, int((request.generation_config or {}).get("poll_interval_seconds", 5)))
+        delay = provider.poll_interval_seconds(request)
         job.payload = {**(job.payload or {}), "next_poll_sequence": 1}
         enqueue_poll(db, request, 1, available_at=utcnow() + timedelta(seconds=delay), delay_seconds=delay)
         succeed_job(db, job.id, job.lease_owner, commit=False)
@@ -158,7 +158,7 @@ def _poll(db, job, request, receipt, provider):
     outcome = provider.poll(request, poll_sequence=sequence)
     job, request, receipt = _load(db, job.id, job.lease_owner)
     if outcome.status == "pending":
-        delay = max(0, int((request.generation_config or {}).get("poll_interval_seconds", 5)))
+        delay = provider.poll_interval_seconds(request)
         enqueue_poll(db, request, sequence + 1, available_at=utcnow() + timedelta(seconds=delay), delay_seconds=delay)
         request.last_polled_at = utcnow()
         succeed_job(db, job.id, job.lease_owner, commit=False)
@@ -166,7 +166,7 @@ def _poll(db, job, request, receipt, provider):
     elif outcome.status == "succeeded":
         execution.mark_completed(db, receipt.id, request.workspace_id,
             provider_request_id=outcome.provider_job_id, response_payload=outcome.response,
-            usage=outcome.usage, commit=False)
+            usage=outcome.usage, cost=outcome.cost, currency=outcome.currency, commit=False)
         execution.transition_generation_request(db, request.id, request.workspace_id, "succeeded",
             provider_job_id=outcome.provider_job_id, commit=False)
         _result(db, request, outcome)
@@ -178,6 +178,11 @@ def _poll(db, job, request, receipt, provider):
         execution.transition_generation_request(db, request.id, request.workspace_id, "failed",
             error=outcome.error, commit=False)
         fail_job(db, job.id, job.lease_owner, outcome.error, commit=False)
+        db.commit()
+    elif outcome.status == "cancelled":
+        execution.transition_generation_request(db, request.id, request.workspace_id, "cancelled",
+            provider_cancelled=True, commit=False)
+        succeed_job(db, job.id, job.lease_owner, commit=False)
         db.commit()
     else:
         _provider_unknown(db, job, request, receipt, outcome.error or "Unknown polling outcome")
@@ -203,6 +208,9 @@ def _cancel(db, job, request, receipt, provider):
     elif outcome.status == "unsupported":
         fail_job(db, job.id, job.lease_owner, outcome.error, commit=False)
         db.commit()
+    elif outcome.status == "failed":
+        fail_job(db, job.id, job.lease_owner, outcome.error, commit=False)
+        db.commit()
     else:
         _provider_unknown(db, job, request, receipt, outcome.error or "Unknown cancellation outcome")
 
@@ -214,7 +222,8 @@ def _reconcile(db, job, request, receipt, provider):
     if outcome.status == "succeeded":
         execution.mark_completed(db, receipt.id, request.workspace_id,
             provider_request_id=outcome.provider_job_id, response_payload=outcome.response,
-            usage=outcome.usage, reconciliation=evidence, commit=False)
+            usage=outcome.usage, cost=outcome.cost, currency=outcome.currency,
+            reconciliation=evidence, commit=False)
         execution.transition_generation_request(db, request.id, request.workspace_id, "succeeded",
             provider_job_id=outcome.provider_job_id, commit=False)
         _result(db, request, outcome)
@@ -227,6 +236,21 @@ def _reconcile(db, job, request, receipt, provider):
         execution.transition_generation_request(db, request.id, request.workspace_id, "failed",
             error=outcome.error, commit=False)
         fail_job(db, job.id, job.lease_owner, outcome.error, commit=False)
+        db.commit()
+    elif outcome.status == "pending":
+        execution.mark_received(db, receipt.id, request.workspace_id,
+            provider_request_id=outcome.provider_job_id, response_payload=outcome.response,
+            reconciliation=evidence, commit=False)
+        execution.transition_generation_request(db, request.id, request.workspace_id, "submitted",
+            provider_job_id=outcome.provider_job_id, commit=False)
+        prior_sequences = [int((item.payload or {}).get("poll_sequence", 0)) for item in db.scalars(
+            select(ExecutionJob).where(ExecutionJob.generation_request_id == request.id,
+                                      ExecutionJob.job_type == POLL)).all()]
+        sequence = max(prior_sequences, default=0) + 1
+        delay = provider.poll_interval_seconds(request)
+        enqueue_poll(db, request, sequence, available_at=utcnow() + timedelta(seconds=delay),
+            delay_seconds=delay)
+        succeed_job(db, job.id, job.lease_owner, commit=False)
         db.commit()
     else:
         fail_job(db, job.id, job.lease_owner,
@@ -257,12 +281,25 @@ def process_job(db, job_id: str, worker_id: str):
         db.rollback()
         job, request, receipt = _load(db, job_id, worker_id)
         attempt_id = (job.payload or {}).get("attempt_id")
-        if exc.dispatched or (job.payload or {}).get("dispatch_started"):
+        if job.job_type == SUBMIT and exc.safe_to_resubmit and attempt_id:
+            execution.mark_attempt_not_accepted(db, receipt.id, request.workspace_id,
+                attempt_id, exc, commit=False)
+            execution.transition_generation_request(db, request.id, request.workspace_id, "queued",
+                error=str(exc), provider_not_accepted=True, commit=False)
+            retry_job(db, job.id, worker_id, exc, delay_seconds=exc.retry_after, commit=False)
+            db.commit()
+        elif job.job_type in {POLL, RECONCILE, CANCEL} and exc.retryable:
+            retry_job(db, job.id, worker_id, exc, delay_seconds=exc.retry_after)
+        elif exc.dispatched or (job.payload or {}).get("dispatch_started"):
             _provider_unknown(db, job, request, receipt, exc, attempt_id)
         elif exc.retryable:
-            retry_job(db, job.id, worker_id, exc)
+            retry_job(db, job.id, worker_id, exc, delay_seconds=exc.retry_after)
         else:
-            fail_job(db, job.id, worker_id, exc)
+            execution.mark_pre_dispatch_failed(db, receipt.id, request.workspace_id, exc, commit=False)
+            execution.transition_generation_request(db, request.id, request.workspace_id, "failed",
+                error=str(exc), commit=False)
+            fail_job(db, job.id, worker_id, exc, commit=False)
+            db.commit()
     except Exception as exc:
         db.rollback()
         job, request, receipt = _load(db, job_id, worker_id)

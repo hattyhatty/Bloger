@@ -191,7 +191,7 @@ def fail_job(db, job_id, worker_id, error, *, dead=False, commit=True):
     return job
 
 
-def retry_job(db, job_id, worker_id, error, *, now=None, commit=True):
+def retry_job(db, job_id, worker_id, error, *, now=None, delay_seconds=None, commit=True):
     job = _leased_job(db, job_id, worker_id)
     job.last_error = str(error)
     job.lease_owner = ""
@@ -202,9 +202,11 @@ def retry_job(db, job_id, worker_id, error, *, now=None, commit=True):
         job.completed_at = _now(now)
         _log(db, "job_dead", job, {"error": str(error), "attempt": job.attempt_count})
     else:
-        delay = min(300, 2 ** job.attempt_count)
+        delay = min(300, max(0, int(delay_seconds))) if delay_seconds is not None else min(300, 2 ** job.attempt_count)
         job.status = "queued"
         job.available_at = _now(now) + timedelta(seconds=delay)
+        job.payload = {key: value for key, value in (job.payload or {}).items()
+            if key not in {"dispatch_started", "attempt_id"}}
         _log(db, "job_retried", job, {"error": str(error), "delaySeconds": delay, "attempt": job.attempt_count})
     db.commit() if commit else db.flush()
     return job

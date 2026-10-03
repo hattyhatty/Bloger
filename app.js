@@ -290,6 +290,9 @@ const appState = {
   videoPromptTarget: "Generic",
   videoPlannerBusy: "",
   videoPlannerError: "",
+  videoProviderCatalog: [],
+  videoProviderMessage: "",
+  videoExecutionStates: {},
   isGeneratingBrief: false,
   briefError: "",
   studioDrafts: {},
@@ -1523,6 +1526,37 @@ class ApiClient {
   updateVideoGenerationResult(resultId, payload) { return this.request(`/api/video-results/${encodeURIComponent(resultId)}`, { method: "PUT", body: JSON.stringify(payload) }); }
   setVideoGenerationResultStatus(resultId, status, workspaceId = "default") {
     return this.request(`/api/video-results/${encodeURIComponent(resultId)}/status`, { method: "PATCH", body: JSON.stringify({ workspace_id: workspaceId, status }) });
+  }
+  getVideoProviders() { return this.request("/api/video-providers"); }
+  testRunwayConnection() { return this.request("/api/video-providers/runway/test", { method: "POST" }); }
+  createGenerationRequest(payload) {
+    return this.request("/api/execution/generation-requests", { method: "POST", body: JSON.stringify(payload) });
+  }
+  enqueueGenerationRequest(id, workspaceId = "default") {
+    return this.request(`/api/execution/generation-requests/${encodeURIComponent(id)}/enqueue`, {
+      method: "POST", body: JSON.stringify({ workspace_id: workspaceId, max_attempts: 3 })
+    });
+  }
+  getShotGenerationRequests(shotId, workspaceId = "default") {
+    return this.request(`/api/execution/generation-requests?workspace_id=${encodeURIComponent(workspaceId)}&shot_id=${encodeURIComponent(shotId)}`);
+  }
+  getGenerationExecutionState(id, workspaceId = "default") {
+    return this.request(`/api/execution/generation-requests/${encodeURIComponent(id)}/execution-state?workspace_id=${encodeURIComponent(workspaceId)}`);
+  }
+  cancelGenerationRequest(id, workspaceId = "default") {
+    return this.request(`/api/execution/generation-requests/${encodeURIComponent(id)}/cancel`, {
+      method: "POST", body: JSON.stringify({ workspace_id: workspaceId })
+    });
+  }
+  reconcileGenerationRequest(id, workspaceId = "default") {
+    return this.request(`/api/execution/generation-requests/${encodeURIComponent(id)}/reconcile`, {
+      method: "POST", body: JSON.stringify({ workspace_id: workspaceId })
+    });
+  }
+  retryExecutionJob(id, workspaceId = "default") {
+    return this.request(`/api/execution/jobs/${encodeURIComponent(id)}/retry`, {
+      method: "POST", body: JSON.stringify({ workspace_id: workspaceId })
+    });
   }
   async getVideoPlannerData(workspaceId = "default") {
     const plans = await this.getVideoPlans(workspaceId);
@@ -7024,6 +7058,10 @@ function setPage(page) {
   document.getElementById("pageSubtitle").textContent = item[4];
   document.body.classList.remove("nav-open");
   render();
+  if (["video", "settings"].includes(page) && normalizeBackendApiConfig(db.settings?.backendApiConfig).enabled) {
+    loadVideoProviderCatalog().catch(() => {});
+    if (page === "video") refreshVisibleVideoExecutions().catch(() => {});
+  }
 }
 
 function renderNav() {
@@ -7996,7 +8034,7 @@ function renderVideoPipeline() {
       <button class="btn" data-create-video-plan="${selectedContentId}">${plan && plan.contentId === selectedContentId && plan.contentRevision === (ContentStore.getById(selectedContentId)?.revision || 1) ? "打开当前版本 Plan" : "创建当前版本 Plan"}</button>
       <select id="videoPromptTarget">${VIDEO_PROMPT_TARGETS.map(item => `<option value="${item}" ${item === appState.videoPromptTarget ? "selected" : ""}>Prompt: ${item}</option>`).join("")}</select>
       <span class="chip">Human-in-the-loop</span>
-      <span class="chip">不调用视频生成 API</span>
+      <span class="chip">Manual + Durable Provider</span>
       ${appState.videoPlannerBusy ? `<span class="chip">${escapeHtml(appState.videoPlannerBusy)}…</span>` : ""}
     </div>
     ${appState.videoPlannerError ? `<div class="card warning-card">${escapeHtml(appState.videoPlannerError)}</div>` : ""}
@@ -8119,8 +8157,50 @@ function renderVideoShotEditor(shot, storyboard, target, index, count) {
       </div>
       <div class="toolbar"><button class="btn small" data-generate-video-prompt="${shot.id}">${prompt ? `Regenerate ${target}` : `Generate ${target}`}</button><button class="btn small ghost" data-save-video-prompt="${shot.id}">Save Manual Edits</button><button class="btn small ghost" data-copy-video-prompt="${shot.id}" ${!prompt ? "disabled" : ""}>Copy Prompt</button></div>
     </div>
+    ${renderShotProviderExecution(shot, prompt)}
     ${renderShotAssetTracking(shot)}
   </article>`;
+}
+
+function videoProviderById(id) {
+  return (appState.videoProviderCatalog || []).find(item => String(item.id).toLowerCase() === String(id).toLowerCase());
+}
+
+function latestExecutionJob(state, statuses = []) {
+  return [...(state?.jobs || [])].reverse().find(item => !statuses.length || statuses.includes(item.status));
+}
+
+function renderShotProviderExecution(shot, prompt) {
+  const state = appState.videoExecutionStates?.[shot.id];
+  const request = state?.request;
+  const provider = request?.provider || "Fake";
+  const runway = videoProviderById("Runway");
+  const references = VideoReferenceAssetStore.getByShotId(shot.id).filter(item => item.status === "active" && /^https:\/\//i.test(item.referenceUrl || ""));
+  const result = request ? VideoGenerationResultStore.getByShotId(shot.id).find(item => item.generationRequestId === request.id) : null;
+  const failedJob = latestExecutionJob(state, ["failed", "dead"]);
+  const status = request?.status || "not started";
+  const statusLabel = { submitted: "generating", polling: "generating" }[status] || status;
+  return `<div class="shot-execution-panel">
+    <div class="item-head"><div><div class="stage-kicker">STEP 6 · REAL PROVIDER EXECUTION</div><strong>Generation Request</strong></div><span class="pill ${status === "succeeded" ? "success" : status === "failed" || status === "unknown" ? "danger" : ""}">${escapeHtml(statusLabel)}</span></div>
+    <div class="meta">真实调用只由独立后端 Worker 执行。Runway 输出 URL 是临时交付地址；本阶段不提供永久对象存储。</div>
+    <div class="form-grid video-execution-form">
+      <div><label>Provider</label><select id="execProvider_${shot.id}"><option value="Fake" ${provider === "Fake" ? "selected" : ""}>Fake · offline</option><option value="Runway" ${provider === "Runway" ? "selected" : ""}>Runway · ${runway?.configured ? "configured" : "not configured"}</option></select></div>
+      <div><label>Model</label><input id="execModel_${shot.id}" value="${escapeHtml(request?.model || (provider === "Runway" ? runway?.default_model || "gen4.5" : "fake-v1"))}" /></div>
+      <div><label>Duration</label><input id="execDuration_${shot.id}" type="number" min="2" max="10" value="${Math.min(10, Math.max(2, Number(shot.estimatedDurationSeconds) || 5))}" /></div>
+      <div><label>Aspect Ratio</label><select id="execRatio_${shot.id}"><option value="1280:720">1280:720</option><option value="720:1280">720:1280</option>${references.length ? `<option value="960:960">960:960 · image only</option>` : ""}</select></div>
+      <div class="span-2"><label>Reference（可选，必须是公网 HTTPS）</label><select id="execReference_${shot.id}"><option value="">Text to Video</option>${references.map(item => `<option value="${item.id}">${escapeHtml(item.title)}</option>`).join("")}</select></div>
+    </div>
+    ${request ? `<div class="meta">Request ${escapeHtml(request.id.slice(0, 20))} · Provider Job ${escapeHtml(request.provider_job_id || "—")} · Receipt ${escapeHtml(state.receipt?.status || "—")}</div>` : ""}
+    ${request?.error ? `<div class="meta danger-text">${escapeHtml(request.error)}</div>` : ""}
+    <div class="toolbar compact">
+      <button class="btn small" data-generate-shot-provider="${shot.id}" ${!prompt ? "disabled" : ""}>Generate</button>
+      <button class="btn small ghost" data-refresh-shot-execution="${shot.id}">Refresh</button>
+      ${request && ["created", "queued", "submitted", "polling"].includes(status) ? `<button class="btn small ghost" data-cancel-generation="${request.id}:${shot.id}">Cancel</button>` : ""}
+      ${status === "unknown" ? `<button class="btn small ghost" data-reconcile-generation="${request.id}:${shot.id}">Reconcile</button>` : ""}
+      ${failedJob ? `<button class="btn small ghost" data-retry-generation-job="${failedJob.id}:${shot.id}">Retry</button>` : ""}
+      ${result?.resultUrl ? `<a class="btn small ghost" href="${escapeHtml(result.resultUrl)}" target="_blank" rel="noreferrer">Preview Result</a>` : ""}
+    </div>
+  </div>`;
 }
 
 function renderShotAssetTracking(shot) {
@@ -8129,7 +8209,7 @@ function renderShotAssetTracking(shot) {
   const prompts = VideoPromptStore.getByShotId(shot.id);
   const results = VideoGenerationResultStore.getByShotId(shot.id);
   return `<div class="shot-assets-panel">
-    <div class="stage-kicker">STEP 6 · ASSETS & RESULTS</div>
+    <div class="stage-kicker">STEP 7 · ASSETS & RESULTS</div>
     <div class="shot-assets-grid">
       <section>
         <div class="item-head"><strong>References</strong><span class="chip">${references.length}</span></div>
@@ -8260,6 +8340,67 @@ async function runVideoPlannerAction(label, action) {
   try { return await action(); }
   catch (error) { appState.videoPlannerError = error.message || String(error); return null; }
   finally { appState.videoPlannerBusy = ""; render(); }
+}
+
+async function loadVideoProviderCatalog() {
+  const result = await backendApiProvider.getVideoProviders();
+  appState.videoProviderCatalog = result.providers || [];
+  render();
+  return appState.videoProviderCatalog;
+}
+
+async function refreshVideoExecutionState(shotId) {
+  const requests = await backendApiProvider.getShotGenerationRequests(shotId);
+  const latest = [...requests].sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))[0];
+  if (!latest) {
+    delete appState.videoExecutionStates[shotId];
+    return null;
+  }
+  const state = await backendApiProvider.getGenerationExecutionState(latest.id);
+  appState.videoExecutionStates[shotId] = state;
+  if (state.request?.status === "succeeded" && state.request?.plan_id) {
+    const workspace = await backendApiProvider.getVideoPlanWorkspace(state.request.plan_id);
+    VideoPlannerService.mergeWorkspace(workspace);
+  }
+  return state;
+}
+
+async function refreshVisibleVideoExecutions() {
+  const workspace = VideoPlannerService.workspace(appState.selectedVideoPlanId);
+  await Promise.all((workspace?.shots || []).map(shot => refreshVideoExecutionState(shot.id)));
+  render();
+}
+
+function renderVideoProviderSettings() {
+  const runway = videoProviderById("Runway");
+  const fake = videoProviderById("Fake");
+  return `<div class="card">
+    <h3>Video Provider</h3>
+    <p>真实视频凭证只从 FastAPI 后端环境变量读取，浏览器和业务数据不会保存或回显密钥。</p>
+    ${kv("Fake", fake ? "Ready" : "等待后端连接")}
+    ${kv("Runway", runway ? (runway.configured ? "Configured" : "Not Configured") : "等待后端连接")}
+    ${kv("Default Model", runway?.default_model || "gen4.5")}
+    ${kv("Capability", "Text / Image to Video · 2–10s · 720p · Poll / Cancel / Reconcile")}
+    ${kv("Credential", "Backend: RUNWAYML_API_SECRET")}
+    <div class="toolbar"><button class="btn ghost" data-test-runway-connection>Test Connection</button></div>
+    <div class="meta">${escapeHtml(appState.videoProviderMessage || "测试只执行只读任务查询，不会创建或计费视频。")}</div>
+  </div>`;
+}
+
+function collectShotExecutionConfig(shotId) {
+  const provider = document.getElementById(`execProvider_${shotId}`)?.value || "Fake";
+  const referenceId = document.getElementById(`execReference_${shotId}`)?.value || "";
+  return {
+    provider,
+    model: document.getElementById(`execModel_${shotId}`)?.value.trim() || (provider === "Runway" ? "gen4.5" : "fake-v1"),
+    generation_config: {
+      duration: Number(document.getElementById(`execDuration_${shotId}`)?.value) || 5,
+      ratio: document.getElementById(`execRatio_${shotId}`)?.value || "1280:720",
+      poll_interval_seconds: provider === "Runway" ? 5 : 0,
+      ...(referenceId ? { reference_asset_id: referenceId } : {}),
+      ...(provider === "Fake" ? { fake_mode: "async_success", ready_after_polls: 1 } : {})
+    }
+  };
 }
 
 function renderPublishCenter() {
@@ -8734,6 +8875,7 @@ function renderSettingsV2() {
   const clusteringConfig = normalizeClusteringConfig(db.settings?.clusteringConfig);
   const keyState = rawConfig.apiKey ? "已配置" : "未配置";
   return `<div class="grid two">
+    ${renderVideoProviderSettings()}
     <div class="card">
       <h3>AI API 设置</h3>
       <div class="form-grid">
@@ -9181,6 +9323,61 @@ document.addEventListener("click", async event => {
     const shotId = target.dataset.reuseShotReference;
     const assetId = document.getElementById(`reuseRef_${shotId}`)?.value || "";
     return runVideoPlannerAction("复用 Reference", () => VideoPlannerService.addReference(shotId, { assetId }));
+  }
+  if (target.dataset.generateShotProvider) {
+    const shotId = target.dataset.generateShotProvider;
+    return runVideoPlannerAction("创建 Generation Request", async () => {
+      if (!normalizeBackendApiConfig(db.settings?.backendApiConfig).enabled) throw new Error("请先在 Settings 启用 Backend API");
+      const prompt = VideoPromptStore.getForTarget(shotId, appState.videoPromptTarget || "Generic");
+      if (!prompt) throw new Error("请先保存当前 Shot 的 Generation Prompt");
+      const config = collectShotExecutionConfig(shotId);
+      if (config.provider === "Runway" && !videoProviderById("Runway")?.configured) {
+        throw new Error("Runway 未配置：请在后端设置 RUNWAYML_API_SECRET");
+      }
+      const request = await backendApiProvider.createGenerationRequest({
+        workspace_id: "default", prompt_id: prompt.id, provider: config.provider,
+        model: config.model, generation_config: config.generation_config,
+        prompt_key: "video.generate"
+      });
+      if (["created", "failed"].includes(request.status)) await backendApiProvider.enqueueGenerationRequest(request.id);
+      await refreshVideoExecutionState(shotId);
+    });
+  }
+  if (target.dataset.refreshShotExecution) {
+    return runVideoPlannerAction("刷新执行状态", () => refreshVideoExecutionState(target.dataset.refreshShotExecution));
+  }
+  if (target.dataset.cancelGeneration) {
+    const [requestId, shotId] = target.dataset.cancelGeneration.split(":");
+    return runVideoPlannerAction("取消生成", async () => {
+      await backendApiProvider.cancelGenerationRequest(requestId);
+      await refreshVideoExecutionState(shotId);
+    });
+  }
+  if (target.dataset.reconcileGeneration) {
+    const [requestId, shotId] = target.dataset.reconcileGeneration.split(":");
+    return runVideoPlannerAction("对账 Provider", async () => {
+      await backendApiProvider.reconcileGenerationRequest(requestId);
+      await refreshVideoExecutionState(shotId);
+    });
+  }
+  if (target.dataset.retryGenerationJob) {
+    const [jobId, shotId] = target.dataset.retryGenerationJob.split(":");
+    return runVideoPlannerAction("重试执行任务", async () => {
+      await backendApiProvider.retryExecutionJob(jobId);
+      await refreshVideoExecutionState(shotId);
+    });
+  }
+  if (target.dataset.testRunwayConnection !== undefined) {
+    appState.videoProviderMessage = "正在执行只读连接测试…";
+    render();
+    try {
+      const result = await backendApiProvider.testRunwayConnection();
+      appState.videoProviderMessage = result.message || (result.ok ? "连接正常" : "连接失败");
+      await loadVideoProviderCatalog();
+    } catch (error) {
+      appState.videoProviderMessage = error.message || String(error);
+    }
+    return render();
   }
   if (target.dataset.addVideoResult) {
     const shotId = target.dataset.addVideoResult;
@@ -9963,6 +10160,11 @@ document.addEventListener("change", event => {
   if (target.id === "videoPromptTarget") {
     appState.videoPromptTarget = VIDEO_PROMPT_TARGETS.includes(target.value) ? target.value : "Generic";
     return render();
+  }
+  if (target.id?.startsWith("execProvider_")) {
+    const shotId = target.id.slice("execProvider_".length);
+    const model = document.getElementById(`execModel_${shotId}`);
+    if (model) model.value = target.value === "Runway" ? (videoProviderById("Runway")?.default_model || "gen4.5") : "fake-v1";
   }
   if (target.dataset.videoCheck) {
     const [id, key] = target.dataset.videoCheck.split(":");
