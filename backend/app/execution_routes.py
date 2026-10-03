@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from . import execution
 from .database import get_db
 from .models import ExternalCallReceipt, ExternalCallAttempt, GenerationRequest
+from . import queue
 from .workflow import ensure_owned
 
 router = APIRouter(prefix="/api/execution", tags=["execution"])
@@ -58,6 +59,11 @@ class TransitionIn(WorkspaceIn):
     status: Literal["created", "queued", "submitting", "submitted", "polling", "succeeded", "failed", "unknown", "cancelled"]
     provider_job_id: str = Field(default="", max_length=255)
     error: str = ""
+
+
+class EnqueueIn(WorkspaceIn):
+    priority: int = Field(default=0, ge=-100, le=100)
+    max_attempts: int = Field(default=3, ge=1, le=20)
 
 
 def document(item):
@@ -118,4 +124,49 @@ def generation_detail(request_id: str, workspace_id: str = "default", db: Sessio
 @router.patch("/generation-requests/{request_id}/status")
 def transition(request_id: str, payload: TransitionIn, db: Session = Depends(get_db)):
     values = payload.model_dump()
+    if payload.status == "queued":
+        queue.enqueue_generation_request(db, request_id, payload.workspace_id)
+        item = db.get(GenerationRequest, request_id)
+        ensure_owned(item, payload.workspace_id, "GenerationRequest")
+        return document(item)
     return document(execution.transition_generation_request(db, request_id, **values))
+
+
+@router.post("/generation-requests/{request_id}/enqueue")
+def enqueue_request(request_id: str, payload: EnqueueIn, db: Session = Depends(get_db)):
+    return document(queue.enqueue_generation_request(db, request_id, payload.workspace_id,
+        priority=payload.priority, max_attempts=payload.max_attempts))
+
+
+@router.get("/generation-requests/{request_id}/execution-state")
+def execution_state(request_id: str, workspace_id: str = "default", db: Session = Depends(get_db)):
+    request = db.get(GenerationRequest, request_id)
+    ensure_owned(request, workspace_id, "GenerationRequest")
+    receipt = db.get(ExternalCallReceipt, request.receipt_id)
+    ensure_owned(receipt, workspace_id, "ExternalCallReceipt")
+    attempts = db.scalars(select(ExternalCallAttempt).where(
+        ExternalCallAttempt.receipt_id == receipt.id).order_by(ExternalCallAttempt.attempt_number)).all()
+    jobs = queue.list_jobs(db, workspace_id, request_id)
+    return {"request": document(request), "receipt": document(receipt),
+        "attempts": [document(item) for item in attempts], "jobs": [document(item) for item in jobs]}
+
+
+@router.get("/jobs")
+def jobs(workspace_id: str = "default", request_id: str | None = None, db: Session = Depends(get_db)):
+    return [document(item) for item in queue.list_jobs(db, workspace_id, request_id)]
+
+
+@router.post("/jobs/{job_id}/retry")
+def retry_job(job_id: str, payload: WorkspaceIn, db: Session = Depends(get_db)):
+    return document(queue.manual_retry(db, job_id, payload.workspace_id))
+
+
+@router.post("/generation-requests/{request_id}/cancel")
+def cancel_request(request_id: str, payload: WorkspaceIn, db: Session = Depends(get_db)):
+    result = queue.cancel_request(db, request_id, payload.workspace_id)
+    return {"request": document(result["request"]), "job": document(result["job"]) if result["job"] else None}
+
+
+@router.post("/generation-requests/{request_id}/reconcile")
+def reconcile_request(request_id: str, payload: WorkspaceIn, db: Session = Depends(get_db)):
+    return document(queue.enqueue_reconcile(db, request_id, payload.workspace_id))

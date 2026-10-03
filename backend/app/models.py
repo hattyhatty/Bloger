@@ -721,6 +721,41 @@ class GenerationRequest(Base, TimestampMixin):
     error: Mapped[str] = mapped_column(Text, default="")
 
 
+class ExecutionJob(Base, TimestampMixin):
+    __tablename__ = "execution_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued','running','succeeded','failed','dead','cancelled')",
+            name="ck_execution_job_status",
+        ),
+        CheckConstraint("attempt_count >= 0 AND max_attempts > 0", name="ck_execution_job_attempts"),
+        UniqueConstraint("idempotency_key", name="uq_execution_job_idempotency_key"),
+        Index("ix_execution_job_claim", "status", "available_at", "priority"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True)
+    job_type: Mapped[str] = mapped_column(String(64), index=True)
+    subject_type: Mapped[str] = mapped_column(String(64))
+    subject_id: Mapped[str] = mapped_column(String(128))
+    generation_request_id: Mapped[str | None] = mapped_column(
+        String(128), ForeignKey("generation_requests.id"), index=True, nullable=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    payload: Mapped[dict] = mapped_column(JsonType, default=dict)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="queued")
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    lease_owner: Mapped[str] = mapped_column(String(128), default="")
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ActivityLog(Base):
     __tablename__ = "activity_logs"
 

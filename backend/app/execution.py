@@ -23,8 +23,8 @@ TRANSITIONS = {
     "created": {"queued", "submitting", "cancelled"},
     "queued": {"submitting", "cancelled"},
     "submitting": {"submitted", "succeeded", "failed", "unknown"},
-    "submitted": {"polling", "succeeded", "failed", "unknown"},
-    "polling": {"succeeded", "failed", "unknown"},
+    "submitted": {"polling", "succeeded", "failed", "unknown", "cancelled"},
+    "polling": {"succeeded", "failed", "unknown", "cancelled"},
     "failed": {"queued", "cancelled"},
     "unknown": {"submitted", "succeeded", "failed"},
     "succeeded": set(), "cancelled": set(),
@@ -108,7 +108,7 @@ def create_or_get_receipt(db: Session, values: dict) -> ExternalCallReceipt:
     return item
 
 
-def start_attempt(db: Session, receipt_id: str, workspace_id: str) -> ExternalCallAttempt:
+def start_attempt(db: Session, receipt_id: str, workspace_id: str, *, commit: bool = True) -> ExternalCallAttempt:
     linked = db.scalar(select(GenerationRequest).where(GenerationRequest.receipt_id == receipt_id))
     if linked:
         linked = _owned(db, GenerationRequest, linked.id, workspace_id)
@@ -133,12 +133,15 @@ def start_attempt(db: Session, receipt_id: str, workspace_id: str) -> ExternalCa
     db.add(attempt)
     db.flush()
     _log(db, "external_attempt_started", item, {"attemptId": attempt.id, "number": number})
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return attempt
 
 
 def _mark(db, receipt_id, workspace_id, target, *, attempt_id=None, provider_request_id="",
-          response_payload=None, usage=None, cost=None, currency="", error="", reconciliation=""):
+          response_payload=None, usage=None, cost=None, currency="", error="", reconciliation="", commit=True):
     item = _owned(db, ExternalCallReceipt, receipt_id, workspace_id)
     if item.status == target:
         # Duplicate acknowledgements are harmless, but must belong to this receipt.
@@ -192,7 +195,10 @@ def _mark(db, receipt_id, workspace_id, target, *, attempt_id=None, provider_req
         item.received_at = item.received_at or utcnow()
         item.completed_at = utcnow()
     _log(db, "external_receipt_" + target, item, {"attemptId": attempt_id, "reconciliation": reconciliation})
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return item
 
 
@@ -252,7 +258,8 @@ def create_generation_request(db: Session, values: dict) -> GenerationRequest:
     return item
 
 
-def transition_generation_request(db, request_id, workspace_id, status, *, provider_job_id="", error=""):
+def transition_generation_request(db, request_id, workspace_id, status, *, provider_job_id="", error="",
+                                  provider_cancelled: bool = False, commit: bool = True):
     item = _owned(db, GenerationRequest, request_id, workspace_id)
     receipt = _owned(db, ExternalCallReceipt, item.receipt_id, workspace_id)
     if status == item.status:
@@ -261,7 +268,7 @@ def transition_generation_request(db, request_id, workspace_id, status, *, provi
         raise WorkflowConflict(f"Invalid GenerationRequest transition: {item.status} -> {status}")
     if status == "cancelled":
         running = db.scalar(select(ExternalCallAttempt).where(ExternalCallAttempt.receipt_id == receipt.id, ExternalCallAttempt.status == "running"))
-        if running or receipt.status not in {"pending", "failed"}:
+        if not provider_cancelled and (running or receipt.status not in {"pending", "failed"}):
             raise WorkflowConflict("A dispatched or uncertain call cannot be cancelled as an unsent request")
     required = {"submitted": {"received", "completed"}, "polling": {"received", "completed"},
         "succeeded": {"completed"}, "failed": {"failed"}, "unknown": {"unknown"}, "queued": {"pending", "failed"}}
@@ -293,5 +300,8 @@ def transition_generation_request(db, request_id, workspace_id, status, *, provi
     if status in {"queued", "submitting"}:
         item.completed_at = None
     _log(db, "generation_request_state_changed", item, {"from": previous, "to": status, "previousJobId": previous_job_id, "jobId": item.provider_job_id})
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return item

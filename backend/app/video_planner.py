@@ -579,7 +579,7 @@ def list_generation_results(db: Session, workspace_id: str, shot_id: str | None 
     return list(db.scalars(query.order_by(VideoGenerationResult.created_at.desc())).all())
 
 
-def add_generation_result(db: Session, shot_id: str, values: dict[str, Any]) -> VideoGenerationResult:
+def add_generation_result(db: Session, shot_id: str, values: dict[str, Any], *, commit: bool = True) -> VideoGenerationResult:
     workspace_id = values.get("workspace_id") or DEFAULT_WORKSPACE_ID
     shot = db.scalar(select(VideoShot).where(VideoShot.id == shot_id).with_for_update())
     ensure_owned(shot, workspace_id, "VideoShot")
@@ -650,8 +650,11 @@ def add_generation_result(db: Session, shot_id: str, values: dict[str, Any]) -> 
     }, workspace_id=workspace_id)
     if status == "selected":
         log_activity(db, "video_result_selected", "VideoGenerationResult", item.id, {"shotId": shot.id}, workspace_id=workspace_id)
-    db.commit()
-    db.refresh(item)
+    if commit:
+        db.commit()
+        db.refresh(item)
+    else:
+        db.flush()
     return item
 
 

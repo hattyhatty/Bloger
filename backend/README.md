@@ -163,8 +163,8 @@ The service layer in `app/workflow.py` enforces the business chain independently
 
 ## Execution core (Phase 8B.5A)
 
-The execution layer does not call a provider. No worker, queue consumer, scheduler,
-background polling, UI redesign or video generation is included.
+The 8B.5A execution core separates business requests, logical calls, dispatch
+attempts and production results. Provider transport remains behind an adapter.
 
 - `ExternalCallReceipt`: one logical call, globally unique deterministic key,
   generic workspace-owned subject, template snapshot, input/config hashes,
@@ -205,8 +205,8 @@ GenerationRequest transitions:
 - `created` → `queued` / `submitting` / `cancelled`
 - `queued` → `submitting` / `cancelled`
 - `submitting` → `submitted` / `succeeded` / `failed` / `unknown`
-- `submitted` → `polling` / `succeeded` / `failed` / `unknown`
-- `polling` → `succeeded` / `failed` / `unknown`
+- `submitted` → `polling` / `succeeded` / `failed` / `unknown` / provider-confirmed `cancelled`
+- `polling` → `succeeded` / `failed` / `unknown` / provider-confirmed `cancelled`
 - `failed` → `queued` / `cancelled`
 - `unknown` → `submitted` / `succeeded` / `failed`, only after Receipt reconciliation
 - `succeeded` / `cancelled` are terminal
@@ -217,7 +217,8 @@ Provider job IDs cannot change within an attempt. A confirmed failed request
 requeued for retry resets its current job metadata; the previous ID remains in
 ActivityLog and the finished Attempt's provider request record.
 Start Attempt is disallowed for cancelled or already submitted requests.
-The `queued` state is bookkeeping only, not an implemented durable queue.
+Moving into `queued` through the API now delegates to the transactional durable
+queue service described below.
 
 API routes (all mutations delegate to `app/execution.py`):
 
@@ -248,11 +249,82 @@ runs the regression suite with isolated schemas, and removes only its own test
 database. It does not clear the application's database. Set `TEST_DATABASE_URL`
 to opt into PostgreSQL pytest fixtures; default tests use SQLite.
 
-Known boundaries for 8B.5B: no transport timeout classification, lease/heartbeat,
-worker crash recovery automation, outbox/queue delivery, polling history or
-provider-side reconciliation adapter yet. Attempt completion is service-enforced,
-not protected against a privileged direct SQL update. Existing single-Creator
-Workspace ownership is retained; authentication remains out of scope.
+## Durable execution worker (Phase 8B.5B)
+
+`ExecutionJob` is separate from `GenerationRequest`. PostgreSQL stores every job,
+schedule, attempt count, lease, heartbeat, error and completion state. Supported
+job types are `generation.submit`, `generation.poll`, `generation.cancel` and
+`generation.reconcile`; queue states are `queued`, `running`, `succeeded`,
+`failed`, `dead` and `cancelled`. Provider uncertainty remains exclusively on the
+Receipt and GenerationRequest.
+
+Enqueue strategy and idempotency:
+
+- `GenerationRequest → queued` and the submit Job insert share one transaction.
+- stable keys are `generation.submit:{request}`, `generation.poll:{request}:{sequence}`,
+  `generation.cancel:{request}` and `generation.reconcile:{request}`.
+- a database unique constraint plus a locked GenerationRequest makes repeated and
+  concurrent enqueue safe; Job IDs are derived from those keys, not random IDs.
+- each pending provider poll is one future `ExecutionJob.available_at`; workers do
+  not wait in a provider polling loop.
+
+Claim and lease algorithm:
+
+- workers claim in a short transaction using `FOR UPDATE SKIP LOCKED`, ordered by
+  priority then availability, and atomically set owner, expiry and attempt count.
+- a separate heartbeat connection renews long adapter calls every lease/3; only
+  the active, unexpired owner can renew or finalize a Job.
+- worker startup runs idempotent expired-lease recovery before claiming work.
+- pre-dispatch crashes requeue with backoff. A running ExternalCallAttempt proves
+  the uncertainty boundary was crossed, so recovery marks Receipt and Request
+  `unknown` and never redispatches automatically.
+- accepted submissions recovered after a crash are completed as submit Jobs and
+  receive exactly one active poll Job. Poll and reconciliation lookups are safe
+  to reschedule because they do not create a new generation.
+
+Retry policy uses `min(300, 2 ** attempt_count)` seconds. Only pre-dispatch or
+otherwise side-effect-free technical errors retry automatically. Exhausted jobs
+become `dead`; definitive provider rejection becomes `failed`; timeout after
+dispatch becomes provider `unknown`. Manual retry rejects succeeded, cancelled or
+unknown generation calls, except that an unknown reconciliation lookup itself may
+be safely retried.
+
+`FakeVideoProvider` is deterministic, offline and implements the same
+`submit/poll/cancel/reconcile` contract required of future real adapters. It can
+simulate immediate success, asynchronous completion, not-ready polls, definitive
+failure, pre-dispatch transient errors, timeout/unknown, supported/unsupported
+cancellation and reconciliation success/failure. Successful metadata creates one
+idempotent `candidate` VideoGenerationResult from the immutable request snapshot;
+it is never auto-selected.
+
+Run the independent worker:
+
+```powershell
+python -m app.worker
+python -m app.worker --once --worker-id local-smoke
+python -m app.worker --recover-only
+```
+
+Minimal operations API:
+
+- `POST /api/execution/generation-requests/{id}/enqueue`
+- `GET /api/execution/generation-requests/{id}/execution-state`
+- `GET /api/execution/jobs`
+- `POST /api/execution/jobs/{id}/retry`
+- `POST /api/execution/generation-requests/{id}/cancel`
+- `POST /api/execution/generation-requests/{id}/reconcile`
+
+Jobs and payloads reject credential-shaped fields and contain no provider secrets.
+Worker credentials remain backend-only. ActivityLog records enqueue, claim,
+retry, success/failure/dead, recovery, dispatch, polling schedule and unknown
+outcomes; heartbeat writes only to the Job row.
+
+Known 8C boundaries: no real provider credential loader or adapter, provider rate
+limit policy, webhook ingestion, provider-specific reconciliation semantics,
+distributed metrics/alerts or operator dashboard. This is a database queue, not
+a distributed scheduler or autoscaler. Attempt immutability is service-enforced,
+not protected against privileged direct SQL changes. Existing single-Creator
+Workspace ownership and no-auth development API remain unchanged.
 
 ## Security requirements
 

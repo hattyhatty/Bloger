@@ -154,7 +154,7 @@ from .video_planner import (
 
 
 settings = get_settings()
-app = FastAPI(title="AI Content OS Backend", version="0.8.1")
+app = FastAPI(title="AI Content OS Backend", version="0.8.5")
 app.include_router(execution_router)
 app.add_middleware(
     CORSMiddleware,
@@ -174,7 +174,7 @@ async def workflow_conflict_handler(_: Request, error: WorkflowConflict):
 
 @app.get("/api/health")
 def api_health() -> dict[str, str]:
-    return {"status": "ok", "service": "ai-content-os-backend", "phase": "8B", "sourceOfTruth": "postgresql"}
+    return {"status": "ok", "service": "ai-content-os-backend", "phase": "8B.5B", "sourceOfTruth": "postgresql"}
 
 
 @app.get("/health")
