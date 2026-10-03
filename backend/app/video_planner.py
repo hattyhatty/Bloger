@@ -15,6 +15,7 @@ from .models import (
     ContentOpportunity,
     CreatorLearning,
     KnowledgeEntry,
+    GenerationRequest,
     VideoGenerationPrompt,
     VideoGenerationResult,
     VideoProductionPlan,
@@ -350,6 +351,8 @@ def update_shot(db: Session, shot_id: str, values: dict[str, Any]) -> VideoShot:
 def remove_shot(db: Session, shot_id: str, workspace_id: str) -> None:
     item = db.scalar(select(VideoShot).where(VideoShot.id == shot_id).with_for_update())
     ensure_owned(item, workspace_id, "VideoShot")
+    if db.scalar(select(GenerationRequest.id).where(GenerationRequest.shot_id == item.id).limit(1)):
+        raise WorkflowConflict("Shot has execution requests and is protected as production history")
     if db.scalar(select(VideoGenerationResult.id).where(VideoGenerationResult.shot_id == item.id).limit(1)):
         raise WorkflowConflict("Shot has generation results and is protected as production history")
     storyboard_id = item.storyboard_id
@@ -585,17 +588,30 @@ def add_generation_result(db: Session, shot_id: str, values: dict[str, Any]) -> 
     ensure_owned(prompt, workspace_id, "VideoGenerationPrompt")
     if prompt.shot_id != shot.id:
         raise WorkflowConflict("Generation Result Prompt must belong to the same Shot")
+    request = None
+    if values.get("generation_request_id"):
+        request = db.get(GenerationRequest, values["generation_request_id"])
+        ensure_owned(request, workspace_id, "GenerationRequest")
+        if request.shot_id != shot.id or request.prompt_id != prompt.id or request.plan_id != plan.id:
+            raise WorkflowConflict("Generation Result execution references do not match")
+        if request.status != "succeeded":
+            raise WorkflowConflict("Generation Result requires a succeeded request")
+        existing_request_result = db.scalar(select(VideoGenerationResult).where(VideoGenerationResult.generation_request_id == request.id))
+        if existing_request_result:
+            return existing_request_result
     if not (values.get("result_url") or values.get("file_reference")):
         raise WorkflowConflict("Generation Result needs a URL or file reference")
     status = values.get("status") or "candidate"
     if status not in RESULT_STATUSES:
         raise WorkflowConflict("Unsupported Generation Result status")
-    result_id = values.get("id") or f"video_result_{stable_hash({'shot': shot.id, 'prompt': prompt.id, 'url': values.get('result_url'), 'file': values.get('file_reference'), 'provider': values.get('provider')})[:28]}"
+    result_id = values.get("id") or (f"video_result_{stable_hash(request.id)[:28]}" if request else f"video_result_{stable_hash({'shot': shot.id, 'prompt': prompt.id, 'url': values.get('result_url'), 'file': values.get('file_reference'), 'provider': values.get('provider')})[:28]}")
     existing = db.get(VideoGenerationResult, result_id)
     if existing:
         ensure_owned(existing, workspace_id, "VideoGenerationResult")
         if existing.shot_id != shot.id:
             raise WorkflowConflict("Generation Result id belongs to another Shot")
+        if existing.generation_request_id != (request.id if request else None):
+            raise WorkflowConflict("Generation Result id belongs to another execution")
         return existing
     if status == "selected":
         for item in db.scalars(select(VideoGenerationResult).where(
@@ -610,13 +626,14 @@ def add_generation_result(db: Session, shot_id: str, values: dict[str, Any]) -> 
         plan_id=plan.id,
         shot_id=shot.id,
         prompt_id=prompt.id,
-        plan_content_revision=plan.content_revision,
-        storyboard_revision=storyboard.revision,
-        prompt_revision=prompt.revision,
-        shot_snapshot=shot_snapshot(shot),
-        prompt_snapshot=prompt_snapshot(prompt),
-        provider=values.get("provider") or "External",
-        model=values.get("model") or "",
+        generation_request_id=request.id if request else None,
+        plan_content_revision=request.input_snapshot["content_revision"] if request else plan.content_revision,
+        storyboard_revision=request.input_snapshot["storyboard_revision"] if request else storyboard.revision,
+        prompt_revision=request.prompt_revision if request else prompt.revision,
+        shot_snapshot=request.input_snapshot["shot"] if request else shot_snapshot(shot),
+        prompt_snapshot=request.input_snapshot["prompt"] if request else prompt_snapshot(prompt),
+        provider=request.provider if request else values.get("provider") or "External",
+        model=request.model if request else values.get("model") or "",
         result_url=values.get("result_url") or "",
         file_reference=values.get("file_reference") or "",
         note=values.get("note") or "",
@@ -642,6 +659,8 @@ def update_generation_result(db: Session, result_id: str, values: dict[str, Any]
     workspace_id = values.get("workspace_id") or DEFAULT_WORKSPACE_ID
     item = db.scalar(select(VideoGenerationResult).where(VideoGenerationResult.id == result_id).with_for_update())
     ensure_owned(item, workspace_id, "VideoGenerationResult")
+    if item.generation_request_id and any(values.get(field) is not None and values[field] != getattr(item, field) for field in ("provider", "model")):
+        raise WorkflowConflict("Execution-linked result provider/model are immutable")
     for field in ("provider", "model", "result_url", "file_reference", "note"):
         if values.get(field) is not None:
             setattr(item, field, values[field])

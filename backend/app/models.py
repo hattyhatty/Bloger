@@ -630,6 +630,7 @@ class VideoGenerationResult(Base, TimestampMixin):
     plan_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_production_plans.id"), index=True)
     shot_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_shots.id"), index=True)
     prompt_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_generation_prompts.id"), index=True)
+    generation_request_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("generation_requests.id"), unique=True, nullable=True)
     plan_content_revision: Mapped[int] = mapped_column(Integer)
     storyboard_revision: Mapped[int] = mapped_column(Integer)
     prompt_revision: Mapped[int] = mapped_column(Integer)
@@ -644,6 +645,80 @@ class VideoGenerationResult(Base, TimestampMixin):
     raw: Mapped[dict] = mapped_column(JsonType, default=dict)
 
     shot: Mapped[VideoShot] = relationship(back_populates="generation_results")
+
+
+class ExternalCallReceipt(Base, TimestampMixin):
+    __tablename__ = "external_call_receipts"
+    __table_args__ = (CheckConstraint("status IN ('pending','received','completed','failed','unknown')", name="ck_external_receipt_status"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True)
+    service: Mapped[str] = mapped_column(String(64))
+    provider: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(128))
+    purpose: Mapped[str] = mapped_column(String(128))
+    subject_type: Mapped[str] = mapped_column(String(64))
+    subject_id: Mapped[str] = mapped_column(String(128))
+    logical_key: Mapped[str] = mapped_column(String(64), unique=True)
+    input_revision: Mapped[str] = mapped_column(String(128))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    prompt_key: Mapped[str] = mapped_column(String(128))
+    prompt_version: Mapped[str] = mapped_column(String(64))
+    prompt_hash: Mapped[str] = mapped_column(String(64))
+    config_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    request_summary: Mapped[dict] = mapped_column(JsonType, default=dict)
+    response_payload: Mapped[dict] = mapped_column(JsonType, default=dict)
+    provider_request_id: Mapped[str] = mapped_column(String(255), default="")
+    usage: Mapped[dict] = mapped_column(JsonType, default=dict)
+    cost: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    currency: Mapped[str] = mapped_column(String(16), default="")
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ExternalCallAttempt(Base):
+    __tablename__ = "external_call_attempts"
+    __table_args__ = (
+        UniqueConstraint("receipt_id", "attempt_number", name="uq_external_attempt_number"),
+        CheckConstraint("status IN ('running','received','completed','failed','unknown')", name="ck_external_attempt_status"),
+        Index("uq_external_attempt_running", "receipt_id", unique=True, postgresql_where=text("status = 'running'"), sqlite_where=text("status = 'running'")),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    receipt_id: Mapped[str] = mapped_column(String(128), ForeignKey("external_call_receipts.id"), index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    provider_request_id: Mapped[str] = mapped_column(String(255), default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    usage: Mapped[dict] = mapped_column(JsonType, default=dict)
+    cost: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class GenerationRequest(Base, TimestampMixin):
+    __tablename__ = "generation_requests"
+    __table_args__ = (CheckConstraint("status IN ('created','queued','submitting','submitted','polling','succeeded','failed','unknown','cancelled')", name="ck_generation_request_status"),)
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), ForeignKey("workspaces.id"), index=True)
+    plan_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_production_plans.id"), index=True)
+    shot_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_shots.id"), index=True)
+    prompt_id: Mapped[str] = mapped_column(String(128), ForeignKey("video_generation_prompts.id"), index=True)
+    prompt_revision: Mapped[int] = mapped_column(Integer)
+    provider: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(128))
+    generation_config: Mapped[dict] = mapped_column(JsonType, default=dict)
+    input_snapshot: Mapped[dict] = mapped_column(JsonType)
+    logical_key: Mapped[str] = mapped_column(String(64), unique=True)
+    receipt_id: Mapped[str] = mapped_column(String(128), ForeignKey("external_call_receipts.id"), unique=True)
+    provider_job_id: Mapped[str] = mapped_column(String(255), default="")
+    status: Mapped[str] = mapped_column(String(32), default="created")
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str] = mapped_column(Text, default="")
 
 
 class ActivityLog(Base):

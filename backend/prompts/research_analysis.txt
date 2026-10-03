@@ -1,0 +1,3 @@
+Analyze only the supplied research evidence and creator context.
+Distinguish verified facts from inferences. Preserve source references.
+Do not invent source data, performance metrics or creator preferences.

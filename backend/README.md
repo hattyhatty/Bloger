@@ -161,7 +161,100 @@ The service layer in `app/workflow.py` enforces the business chain independently
 - Shots with Generation Results cannot be deleted, preserving production history
 - no video/image generation provider is called in Phase 8B
 
-## Security
+## Execution core (Phase 8B.5A)
+
+The execution layer does not call a provider. No worker, queue consumer, scheduler,
+background polling, UI redesign or video generation is included.
+
+- `ExternalCallReceipt`: one logical call, globally unique deterministic key,
+  generic workspace-owned subject, template snapshot, input/config hashes,
+  provider response, usage and optional cost/currency.
+- `ExternalCallAttempt`: one dispatch attempt; numbered per Receipt. A partial
+  unique index allows only one `running` attempt. Finished rows are never edited
+  through the service/API. A received attempt records dispatch acceptance; later
+  asynchronous completion changes the Receipt, not that finished Attempt.
+- `GenerationRequest`: video business execution, linked to Plan/Shot/Prompt and
+  Receipt, with immutable Content/Storyboard/Shot/Prompt/consistency input snapshot.
+- `VideoGenerationResult.generation_request_id`: nullable unique relationship.
+  Manual results remain supported. Execution-linked results require a succeeded
+  request and use its original snapshots rather than today's edited Prompt.
+
+`backend/prompts/` contains code-owned templates. Registry template versions are
+SHA256 of UTF-8 template content (line endings normalized); they are independent
+of `VideoGenerationPrompt.revision`. Receipt snapshots retain template content.
+
+The logical key is SHA256 of canonical sorted JSON containing schema version,
+Workspace, service/purpose/subject, input revision/hash, provider/model, template
+key/version/hash, Prompt artifact revision and configuration hash. Changing any
+generation input produces a distinct request; retrying the same logical call
+keeps its Receipt and appends another Attempt. Subject/Shot locks and unique
+constraints protect concurrent create; row locks serialize state mutations.
+
+Receipt lifecycle:
+
+- `pending` → `received` / `completed` / `failed` / `unknown`
+- `received` → `completed` / `failed` / `unknown`
+- confirmed `failed` → new Attempt (`pending`)
+- `unknown` → explicit reconciliation only, requiring provider ID and evidence
+- `completed` is terminal; duplicate outcomes do not overwrite stored data
+- active Attempt ID is required for outcomes; stale callbacks are rejected
+- a crash leaves a running Attempt that blocks retry until explicitly resolved
+
+GenerationRequest transitions:
+
+- `created` → `queued` / `submitting` / `cancelled`
+- `queued` → `submitting` / `cancelled`
+- `submitting` → `submitted` / `succeeded` / `failed` / `unknown`
+- `submitted` → `polling` / `succeeded` / `failed` / `unknown`
+- `polling` → `succeeded` / `failed` / `unknown`
+- `failed` → `queued` / `cancelled`
+- `unknown` → `submitted` / `succeeded` / `failed`, only after Receipt reconciliation
+- `succeeded` / `cancelled` are terminal
+
+Submission requires a running Attempt. Accepted/polling states require a provider
+job ID and matching Receipt outcome; success requires a completed Receipt.
+Provider job IDs cannot change within an attempt. A confirmed failed request
+requeued for retry resets its current job metadata; the previous ID remains in
+ActivityLog and the finished Attempt's provider request record.
+Start Attempt is disallowed for cancelled or already submitted requests.
+The `queued` state is bookkeeping only, not an implemented durable queue.
+
+API routes (all mutations delegate to `app/execution.py`):
+
+- `POST/GET /api/execution/receipts`
+- `GET /api/execution/receipts/{id}` (Receipt + ordered Attempt history)
+- `POST /api/execution/receipts/{id}/attempts`
+- `PATCH /api/execution/receipts/{id}/outcome`
+- `POST/GET /api/execution/generation-requests`
+- `GET /api/execution/generation-requests/{id}`
+- `PATCH /api/execution/generation-requests/{id}/status`
+
+ActivityLog covers Receipt creation/reuse/outcomes, Attempt starts and Request
+creation/state changes. Reads are not logged. Execution input config/summary
+reject credential fields; API keys belong in backend provider configuration.
+
+Validation:
+
+```powershell
+python -m pytest tests -q
+python tests/validate_execution_postgres.py
+python -m alembic upgrade head
+python -m alembic check
+```
+
+The PostgreSQL validator creates a disposable database, runs all migrations,
+checks downgrade/upgrade, verifies API persistence through fresh connections,
+runs the regression suite with isolated schemas, and removes only its own test
+database. It does not clear the application's database. Set `TEST_DATABASE_URL`
+to opt into PostgreSQL pytest fixtures; default tests use SQLite.
+
+Known boundaries for 8B.5B: no transport timeout classification, lease/heartbeat,
+worker crash recovery automation, outbox/queue delivery, polling history or
+provider-side reconciliation adapter yet. Attempt completion is service-enforced,
+not protected against a privileged direct SQL update. Existing single-Creator
+Workspace ownership is retained; authentication remains out of scope.
+
+## Security requirements
 
 Do not commit `.env`.
 

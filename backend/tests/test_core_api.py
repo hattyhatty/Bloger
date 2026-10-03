@@ -1,10 +1,11 @@
 import os
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
 
@@ -19,7 +20,15 @@ from app.main import app  # noqa: E402
 
 @pytest.fixture()
 def client():
-    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    test_url = os.getenv("TEST_DATABASE_URL")
+    schema = "test_" + uuid.uuid4().hex if test_url else None
+    root_engine = create_engine(test_url) if test_url else None
+    if root_engine:
+        with root_engine.begin() as connection:
+            connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        engine = root_engine.execution_options(schema_translate_map={None: schema})
+    else:
+        engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
     Base.metadata.create_all(bind=engine)
 
@@ -34,6 +43,12 @@ def client():
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+    if root_engine:
+        with root_engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        root_engine.dispose()
+    else:
+        engine.dispose()
 
 
 def test_health(client):

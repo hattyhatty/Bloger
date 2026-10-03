@@ -1,0 +1,4 @@
+Execute only the supplied structured shot specification and approved visual continuity.
+Preserve character, clothing, environment, style and reference instructions.
+Use the shot's video prompt, negative instructions and continuity notes.
+Do not invent new scenes or modify upstream content. Return a provider result reference.

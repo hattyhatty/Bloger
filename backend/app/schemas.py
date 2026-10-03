@@ -483,6 +483,7 @@ class VideoGenerationResultIn(BaseModel):
     id: str | None = None
     workspace_id: str = "default"
     prompt_id: str
+    generation_request_id: str | None = None
     provider: str = "External"
     model: str = ""
     result_url: str = ""
@@ -512,6 +513,7 @@ class VideoGenerationResultOut(BaseModel):
     plan_id: str
     shot_id: str
     prompt_id: str
+    generation_request_id: str | None = None
     plan_content_revision: int
     storyboard_revision: int
     prompt_revision: int
