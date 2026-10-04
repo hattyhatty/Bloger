@@ -139,10 +139,12 @@ def test_poll_status_mapping(status, expected):
 
 def test_poll_success_retry_and_reconcile():
     success = provider(lambda _: httpx.Response(200, json={"status": "SUCCEEDED",
-        "output": ["https://cdn.example.com/result.mp4"]}))
+        "output": ["https://cdn.example.com/result.mp4"], "cost": {"credits": 24}}))
     outcome = success.poll(request(), poll_sequence=3)
     assert outcome.status == "succeeded"
     assert outcome.result_url.endswith("result.mp4")
+    assert outcome.usage == {"credits": 24}
+    assert outcome.cost == "24" and outcome.currency == "credits"
     assert success.reconcile(request()).status == "succeeded"
 
     retry = provider(lambda _: httpx.Response(503, headers={"Retry-After": "9"}))

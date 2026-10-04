@@ -196,7 +196,8 @@ Error handling preserves the execution certainty boundary: validation and missin
 credentials fail before dispatch without inventing an Attempt; a definitive HTTP rejection fails the call; a
 submit timeout or ambiguous 5xx becomes `unknown`; polling transport errors retry
 only the Poll Job; and 429 honors `Retry-After` via `ExecutionJob.available_at`.
-No cost is estimated when Runway does not return billing data.
+Runway credit cost is stored as structured usage/cost when the task response
+provides it. No cost is estimated when Runway does not return billing data.
 
 ## Execution core (Phase 8B.5A)
 

@@ -100,7 +100,8 @@ def test_runway_adapter_full_worker_path_creates_candidate(client, monkeypatch):
             return httpx.Response(200, json={"id": "runway-contract-job"})
         calls["get"] += 1
         return httpx.Response(200, json={"status": "SUCCEEDED",
-            "output": ["https://cdn.example.com/runway-contract.mp4"]})
+            "output": ["https://cdn.example.com/runway-contract.mp4"],
+            "cost": {"credits": 24}})
 
     adapter = RunwayVideoProvider(
         Settings(database_url="sqlite://", runwayml_api_secret="contract-secret"),
@@ -116,7 +117,9 @@ def test_runway_adapter_full_worker_path_creates_candidate(client, monkeypatch):
     completed = state(client, request)
     assert completed["request"]["status"] == "succeeded"
     assert completed["receipt"]["status"] == "completed"
-    assert completed["receipt"]["cost"] is None
+    assert completed["receipt"]["usage"] == {"credits": 24}
+    assert completed["receipt"]["cost"] == "24"
+    assert completed["receipt"]["currency"] == "credits"
     results = client.get(f"/api/video-shots/{shot['id']}/results").json()
     assert len(results) == 1 and results[0]["status"] == "candidate"
     assert results[0]["provider"] == "Runway"

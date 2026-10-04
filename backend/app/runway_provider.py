@@ -98,6 +98,14 @@ class RunwayVideoProvider(VideoProviderAdapter):
         return f"Runway HTTP {response.status_code}{suffix}"
 
     @staticmethod
+    def _billing(body: dict) -> tuple[dict, str | None, str]:
+        cost = body.get("cost")
+        credits = cost.get("credits") if isinstance(cost, dict) else None
+        if credits is None:
+            return {}, None, ""
+        return {"credits": credits}, str(credits), "credits"
+
+    @staticmethod
     def _reference(request) -> str:
         config = request.generation_config or {}
         reference_id = str(config.get("reference_asset_id") or "")
@@ -191,8 +199,9 @@ class RunwayVideoProvider(VideoProviderAdapter):
             if not result_url:
                 return ProviderOutcome("unknown", provider_job_id=request.provider_job_id,
                     response=body, error="Runway task succeeded without an output URL")
+            usage, cost, currency = self._billing(body)
             return ProviderOutcome("succeeded", provider_job_id=request.provider_job_id,
-                result_url=result_url, response=body)
+                result_url=result_url, response=body, usage=usage, cost=cost, currency=currency)
         if status == "FAILED":
             failure = body.get("failure") or body.get("failureCode") or "Runway generation failed"
             return ProviderOutcome("failed", provider_job_id=request.provider_job_id,
