@@ -177,8 +177,9 @@ Set `RUNWAYML_API_SECRET` in `backend/.env` or the backend process environment.
 The key is never returned by an API, persisted in a GenerationRequest/Job/Receipt,
 or sent to the browser. `GET /api/video-providers` returns only `configured`.
 
-The adapter currently supports Runway Gen-4.5 text-to-video and first-frame
-image-to-video through `/v1/image_to_video`, 2–10 second output, the documented
+The adapter currently supports Runway Gen-4.5 text-to-video through
+`/v1/text_to_video` and first-frame image-to-video through `/v1/image_to_video`,
+2–10 second output, the documented
 720p aspect ratios, asynchronous task polling, cancellation and task-ID
 reconciliation. A reference must already be a public HTTPS URL; local files are
 rejected because this phase intentionally has no upload/object-storage pipeline.

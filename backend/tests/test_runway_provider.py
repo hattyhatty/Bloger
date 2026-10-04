@@ -50,7 +50,7 @@ def test_submit_maps_immutable_snapshot_and_omits_unsupported_negative_prompt():
     outcome = provider(handler).submit(request(), on_dispatch=lambda: dispatched.append(True))
     assert dispatched == [True]
     assert outcome.status == "submitted" and outcome.provider_job_id == "task-abc"
-    assert captured["request"].url.path == "/v1/image_to_video"
+    assert captured["request"].url.path == "/v1/text_to_video"
     assert captured["request"].headers["x-runway-version"] == "2024-11-06"
     assert captured["body"] == {
         "model": "gen4.5",
@@ -75,6 +75,12 @@ def test_reference_mapping_and_local_reference_rejection():
     outcome = provider(handler).submit(request(input_snapshot=snapshot), on_dispatch=lambda: None)
     assert outcome.provider_job_id == "task-image"
     assert seen["promptImage"] == "https://cdn.example.com/character.png"
+
+    def image_handler(http_request):
+        assert http_request.url.path == "/v1/image_to_video"
+        return httpx.Response(200, json={"id": "task-image"})
+
+    provider(image_handler).submit(request(input_snapshot=snapshot), on_dispatch=lambda: None)
 
     snapshot["reference_assets"][0] = {"id": "asset-1", "status": "active",
         "reference_url": "", "file_reference": "C:/private/character.png"}
@@ -148,7 +154,11 @@ def test_poll_success_retry_and_reconcile():
 def test_cancel_and_side_effect_free_connection_probe():
     cancelled = provider(lambda _: httpx.Response(204))
     assert cancelled.cancel(request()).status == "cancelled"
-    authenticated = provider(lambda _: httpx.Response(404, json={"error": "not found"}))
+    def not_found(http_request):
+        assert http_request.url.path == "/v1/tasks/00000000-0000-4000-8000-000000000000"
+        return httpx.Response(404, json={"error": "not found"})
+
+    authenticated = provider(not_found)
     assert authenticated.test_connection()["ok"] is True
     rejected = provider(lambda _: httpx.Response(401, json={"error": "invalid key"}))
     assert rejected.test_connection()["ok"] is False

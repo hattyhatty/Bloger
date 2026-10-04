@@ -148,8 +148,9 @@ class RunwayVideoProvider(VideoProviderAdapter):
         self._require_config()
         payload = self.build_payload(request)
         on_dispatch()
+        endpoint = "/image_to_video" if "promptImage" in payload else "/text_to_video"
         try:
-            response = self.client.post(self._url("/image_to_video"), headers=self._headers(), json=payload)
+            response = self.client.post(self._url(endpoint), headers=self._headers(), json=payload)
         except httpx.RequestError as exc:
             raise ProviderUnavailable(f"Runway submit transport error: {exc.__class__.__name__}", dispatched=True) from exc
         if response.status_code == 429:
@@ -232,7 +233,9 @@ class RunwayVideoProvider(VideoProviderAdapter):
         self._require_config()
         # A known-absent task lookup validates URL, TLS and authorization without
         # creating a billable generation. 404 means authentication was accepted.
-        probe = "00000000-0000-0000-0000-000000000000"
+        # Use a syntactically valid UUIDv4-shaped task ID. Runway rejects the
+        # all-zero UUID as bad input (400) before reaching the not-found path.
+        probe = "00000000-0000-4000-8000-000000000000"
         try:
             response = self.client.get(self._url(f"/tasks/{probe}"), headers=self._headers())
         except httpx.RequestError as exc:
