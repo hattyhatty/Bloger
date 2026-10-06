@@ -14,13 +14,16 @@ from sqlalchemy import select
 
 from .database import SessionLocal
 from . import execution
-from .models import ExecutionJob, ExternalCallReceipt, GenerationRequest
+from .models import ExecutionJob, ExternalCallReceipt, GeneratedAsset, GenerationRequest, VideoGenerationResult
 from .providers import ProviderError, get_video_provider
-from .queue import (CANCEL, POLL, RECONCILE, SUBMIT, claim_next_job, enqueue_poll, fail_job,
-                    heartbeat, recover_expired_leases, retry_job, succeed_job)
+from .queue import (ASSET_PERSIST, CANCEL, POLL, RECONCILE, SUBMIT, claim_next_job,
+                    enqueue_asset_persistence, enqueue_poll, fail_job, heartbeat,
+                    recover_expired_leases, retry_job, succeed_job)
 from .video_planner import add_generation_result
 from .workflow import WorkflowConflict, ensure_owned, utcnow
 from .activity import log_activity
+from .generated_assets import mark_asset_failed, persist_asset
+from .storage import get_storage_adapter
 
 
 class LeaseHeartbeat:
@@ -56,7 +59,7 @@ class LeaseHeartbeat:
             self.thread.join(timeout=1)
 
 
-def _load(db, job_id, worker_id):
+def _load_job(db, job_id, worker_id):
     # Do not hold queue-row locks during provider I/O; the lease is the execution
     # right, and a separate connection must remain free to heartbeat it.
     job = db.scalar(select(ExecutionJob).where(ExecutionJob.id == job_id).execution_options(populate_existing=True))
@@ -67,6 +70,11 @@ def _load(db, job_id, worker_id):
         expires = expires.replace(tzinfo=timezone.utc)
     if not expires or expires <= utcnow():
         raise WorkflowConflict("Job lease expired")
+    return job
+
+
+def _load(db, job_id, worker_id):
+    job = _load_job(db, job_id, worker_id)
     request = db.scalar(select(GenerationRequest).where(GenerationRequest.id == job.generation_request_id).execution_options(populate_existing=True))
     ensure_owned(request, job.workspace_id, "GenerationRequest")
     receipt = db.scalar(select(ExternalCallReceipt).where(ExternalCallReceipt.id == request.receipt_id).execution_options(populate_existing=True))
@@ -77,7 +85,7 @@ def _load(db, job_id, worker_id):
 def _result(db, request, outcome):
     if not (outcome.result_url or outcome.file_reference):
         return None
-    return add_generation_result(db, request.shot_id, {
+    result = add_generation_result(db, request.shot_id, {
         "workspace_id": request.workspace_id,
         "prompt_id": request.prompt_id,
         "generation_request_id": request.id,
@@ -87,6 +95,24 @@ def _result(db, request, outcome):
         "status": "candidate",
         "raw": {"providerResponse": outcome.response},
     }, commit=False)
+    enqueue_asset_persistence(db, result.id, request.workspace_id, commit=False)
+    return result
+
+
+def _persist_asset(db, job, adapter):
+    asset_id = str((job.payload or {}).get("asset_id") or "")
+    asset = db.get(GeneratedAsset, asset_id)
+    ensure_owned(asset, job.workspace_id, "GeneratedAsset")
+    result = db.get(VideoGenerationResult, asset.generation_result_id)
+    ensure_owned(result, job.workspace_id, "VideoGenerationResult")
+    if result.id != job.subject_id:
+        raise WorkflowConflict("Asset persistence Job references the wrong Generation Result")
+    if asset.status == "stored" and adapter.exists(asset.storage_key):
+        succeed_job(db, job.id, job.lease_owner)
+        return
+    persist_asset(db, asset.id, job.workspace_id, adapter)
+    job = _load_job(db, job.id, job.lease_owner)
+    succeed_job(db, job.id, job.lease_owner)
 
 
 def _provider_unknown(db, job, request, receipt, error, attempt_id=None):
@@ -258,6 +284,18 @@ def _reconcile(db, job, request, receipt, provider):
 
 
 def process_job(db, job_id: str, worker_id: str):
+    job = _load_job(db, job_id, worker_id)
+    if job.job_type == ASSET_PERSIST:
+        try:
+            _persist_asset(db, job, get_storage_adapter())
+        except Exception as exc:
+            db.rollback()
+            job = _load_job(db, job_id, worker_id)
+            asset_id = str((job.payload or {}).get("asset_id") or "")
+            mark_asset_failed(db, asset_id, job.workspace_id, exc)
+            job = _load_job(db, job_id, worker_id)
+            fail_job(db, job.id, worker_id, exc)
+        return
     job, request, receipt = _load(db, job_id, worker_id)
     if request.status in {"succeeded", "cancelled"}:
         succeed_job(db, job.id, worker_id)

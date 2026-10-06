@@ -2,3 +2,4 @@ __pycache__/
 *.py[cod]
 backend/.env
 backend/.venv/
+backend/runtime/assets/

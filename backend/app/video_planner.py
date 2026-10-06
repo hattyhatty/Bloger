@@ -573,7 +573,9 @@ def prompt_snapshot(prompt: VideoGenerationPrompt) -> dict[str, Any]:
 
 
 def list_generation_results(db: Session, workspace_id: str, shot_id: str | None = None) -> list[VideoGenerationResult]:
-    query = select(VideoGenerationResult).where(VideoGenerationResult.workspace_id == workspace_id)
+    query = select(VideoGenerationResult).where(
+        VideoGenerationResult.workspace_id == workspace_id
+    ).options(selectinload(VideoGenerationResult.generated_asset))
     if shot_id:
         query = query.where(VideoGenerationResult.shot_id == shot_id)
     return list(db.scalars(query.order_by(VideoGenerationResult.created_at.desc())).all())
@@ -718,8 +720,9 @@ def get_plan_workspace(db: Session, plan_id: str, workspace_id: str) -> dict[str
     assets = list(db.scalars(select(VideoReferenceAsset).where(VideoReferenceAsset.id.in_(asset_ids)).options(
         selectinload(VideoReferenceAsset.shot_links)
     )).unique().all()) if asset_ids else []
-    results = list(db.scalars(select(VideoGenerationResult).where(VideoGenerationResult.shot_id.in_(shot_ids)).order_by(
-        VideoGenerationResult.created_at.desc()
+    results = list(db.scalars(select(VideoGenerationResult).where(VideoGenerationResult.shot_id.in_(shot_ids)).options(
+        selectinload(VideoGenerationResult.generated_asset)
+    ).order_by(VideoGenerationResult.created_at.desc()
     )).all()) if shot_ids else []
     return {
         "plan": plan,

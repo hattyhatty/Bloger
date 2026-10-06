@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, CheckConstraint, Column, JSON, DateTime, ForeignKey, Index, Integer, String, Table, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Column, JSON, DateTime, ForeignKey, Index, Integer, String, Table, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -645,6 +645,43 @@ class VideoGenerationResult(Base, TimestampMixin):
     raw: Mapped[dict] = mapped_column(JsonType, default=dict)
 
     shot: Mapped[VideoShot] = relationship(back_populates="generation_results")
+    generated_asset: Mapped["GeneratedAsset | None"] = relationship(
+        back_populates="generation_result", uselist=False
+    )
+
+
+class GeneratedAsset(Base, TimestampMixin):
+    __tablename__ = "generated_assets"
+    __table_args__ = (
+        UniqueConstraint("generation_result_id", name="uq_generated_asset_result"),
+        UniqueConstraint("storage_provider", "storage_key", name="uq_generated_asset_storage_key"),
+        CheckConstraint(
+            "status IN ('pending','stored','failed','archived')",
+            name="ck_generated_asset_status",
+        ),
+        CheckConstraint("file_size >= 0", name="ck_generated_asset_file_size"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("workspaces.id"), index=True, default="default"
+    )
+    generation_result_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("video_generation_results.id"), index=True
+    )
+    source_provider: Mapped[str] = mapped_column(String(64), default="External")
+    source_url: Mapped[str] = mapped_column(Text, default="")
+    storage_provider: Mapped[str] = mapped_column(String(64), default="local")
+    storage_key: Mapped[str] = mapped_column(String(255), default="")
+    durable_url: Mapped[str] = mapped_column(Text, default="")
+    mime_type: Mapped[str] = mapped_column(String(128), default="")
+    file_size: Mapped[int] = mapped_column(BigInteger, default=0)
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(32), index=True, default="pending")
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    stored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    generation_result: Mapped[VideoGenerationResult] = relationship(back_populates="generated_asset")
 
 
 class ExternalCallReceipt(Base, TimestampMixin):

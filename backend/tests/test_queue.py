@@ -180,7 +180,9 @@ def test_fake_immediate_success_creates_candidate(client):
     current = state(client, request)
     assert current["request"]["status"] == "succeeded"
     assert current["receipt"]["status"] == "completed"
-    assert current["jobs"][0]["status"] == "succeeded"
+    jobs = {job["job_type"]: job for job in current["jobs"]}
+    assert jobs["generation.submit"]["status"] == "succeeded"
+    assert jobs["asset.persist"]["status"] == "queued"
     results = client.get(f"/api/video-shots/{shot['id']}/results").json()
     assert len(results) == 1
     assert results[0]["status"] == "candidate"
@@ -202,7 +204,9 @@ def test_fake_async_poll_jobs_are_short_and_idempotent(client):
     claim_process("poll-2")
     current = state(client, request)
     assert current["request"]["status"] == "succeeded"
-    assert all(job["status"] == "succeeded" for job in current["jobs"])
+    generation_jobs = [job for job in current["jobs"] if job["job_type"].startswith("generation.")]
+    assert all(job["status"] == "succeeded" for job in generation_jobs)
+    assert [job for job in current["jobs"] if job["job_type"] == "asset.persist"][0]["status"] == "queued"
     assert client.get(f"/api/video-shots/{shot['id']}/results").json()[0]["status"] == "candidate"
     actions = {row["action"] for row in client.get("/api/activity-logs").json()}
     assert {"job_enqueued", "job_claimed", "generation_dispatched", "polling_scheduled", "job_succeeded"} <= actions

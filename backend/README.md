@@ -1,4 +1,4 @@
-# AI Content OS Backend — Phase 8C
+# AI Content OS Backend — Phase 8C.1
 
 FastAPI + PostgreSQL backend for the AI Content OS core workflow and Knowledge Brain, with server-side workflow validation, immutable published-version history, and idempotent business operations.
 
@@ -15,7 +15,7 @@ The database persists:
 - ContentOpportunity and its relevant Knowledge / Creator Learning links
 - CreatorLearning / CreatorLearningEvidence / StrategySuggestion
 - VideoProductionPlan / VideoScript / VideoStoryboard / VideoShot / VideoGenerationPrompt
-- VideoReferenceAsset / VideoShotReferenceLink / VideoGenerationResult
+- VideoReferenceAsset / VideoShotReferenceLink / VideoGenerationResult / GeneratedAsset
 
 Runway Dev is the first real video generation adapter. Real publishing APIs,
 multi-user SaaS, schedulers, vector databases, and cloud deployment remain out of scope.
@@ -352,14 +352,27 @@ Minimal operations API:
 - `POST /api/execution/jobs/{id}/retry`
 - `POST /api/execution/generation-requests/{id}/cancel`
 - `POST /api/execution/generation-requests/{id}/reconcile`
+- `GET /api/video-results/{result_id}/asset`
+- `POST /api/video-results/{result_id}/asset/retry`
+- `GET /api/generated-assets/{asset_id}`
+- `GET /api/generated-assets/{asset_id}/content`
 
 Jobs and payloads reject credential-shaped fields and contain no provider secrets.
 Worker credentials remain backend-only. ActivityLog records enqueue, claim,
 retry, success/failure/dead, recovery, dispatch, polling schedule and unknown
 outcomes; heartbeat writes only to the Job row.
 
-Known 8C boundaries: Runway output URLs are temporary and no S3/R2 ingest exists;
-there is no webhook ingestion, distributed metrics/alerts or operator dashboard.
+Successful provider Results enqueue an independent `asset.persist` job. The local
+StorageAdapter streams HTTPS MP4 output into `backend/runtime/assets`, validates
+type and size, computes SHA-256, and atomically renames the completed file. The
+runtime directory is Git-ignored. A deterministic one-to-one GeneratedAsset row
+makes retries and crash recovery idempotent; the original provider URL remains
+unchanged as provenance. Asset failure never changes the candidate Result status.
+
+Known 8C.1 boundaries: local filesystem storage is for development and is not
+shared across multiple backend hosts; no S3/R2, CDN, transcoding, thumbnail or
+full media-library layer exists. There is no webhook ingestion, distributed
+metrics/alerts or operator dashboard.
 Reconciliation requires a known Runway task ID, otherwise the request correctly
 remains `unknown` for manual handling. This is a database queue, not a distributed
 scheduler or autoscaler. Attempt immutability is service-enforced, not protected

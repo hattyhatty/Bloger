@@ -6,14 +6,16 @@ from sqlalchemy.orm import Session
 
 from .activity import log_activity
 from . import execution
-from .models import ExecutionJob, ExternalCallAttempt, ExternalCallReceipt, GenerationRequest
+from .models import (ExecutionJob, ExternalCallAttempt, ExternalCallReceipt, GeneratedAsset,
+                     GenerationRequest, VideoGenerationResult)
 from .workflow import WorkflowConflict, ensure_owned, stable_hash, utcnow
 
 SUBMIT = "generation.submit"
 POLL = "generation.poll"
 CANCEL = "generation.cancel"
 RECONCILE = "generation.reconcile"
-JOB_TYPES = {SUBMIT, POLL, CANCEL, RECONCILE}
+ASSET_PERSIST = "asset.persist"
+JOB_TYPES = {SUBMIT, POLL, CANCEL, RECONCILE, ASSET_PERSIST}
 
 
 def _now(value=None):
@@ -121,6 +123,50 @@ def enqueue_reconcile(db: Session, request_id: str, workspace_id: str = "default
     return job
 
 
+def enqueue_asset_persistence(db: Session, result_id: str, workspace_id: str = "default",
+                              *, commit: bool = True) -> ExecutionJob:
+    from .generated_assets import create_or_get_asset
+
+    result = _owned(db, VideoGenerationResult, result_id, workspace_id, lock=True)
+    asset = create_or_get_asset(db, result)
+    key = f"asset.persist:{result.id}"
+    existing = db.scalar(select(ExecutionJob).where(ExecutionJob.idempotency_key == key).with_for_update())
+    if existing:
+        ensure_owned(existing, workspace_id, "ExecutionJob")
+        if asset.status == "stored" or existing.status in {"queued", "running"}:
+            if commit:
+                db.commit()
+            return existing
+        existing.status = "queued"
+        existing.available_at = utcnow()
+        existing.max_attempts += 3
+        existing.lease_owner = ""
+        existing.lease_expires_at = None
+        existing.heartbeat_at = None
+        existing.completed_at = None
+        existing.last_error = ""
+        asset.status = "pending"
+        asset.last_error = ""
+        _log(db, "job_retried", existing, {"manual": True, "assetId": asset.id})
+        job = existing
+    else:
+        job = ExecutionJob(
+            id="job_" + stable_hash(key), workspace_id=workspace_id,
+            job_type=ASSET_PERSIST, subject_type="VideoGenerationResult", subject_id=result.id,
+            generation_request_id=result.generation_request_id, idempotency_key=key,
+            payload={"asset_id": asset.id, "generation_result_id": result.id}, status="queued",
+            priority=-10, available_at=utcnow(), attempt_count=0, max_attempts=3,
+            lease_owner="", last_error="",
+        )
+        db.add(job)
+        db.flush()
+        _log(db, "job_enqueued", job, {"jobType": ASSET_PERSIST, "assetId": asset.id,
+            "generationResultId": result.id})
+    if commit:
+        db.commit()
+    return job
+
+
 def claim_next_job(db: Session, worker_id: str, *, lease_seconds: int = 30, now=None) -> ExecutionJob | None:
     if not worker_id.strip():
         raise WorkflowConflict("Worker ID is required")
@@ -216,6 +262,20 @@ def manual_retry(db: Session, job_id: str, workspace_id: str) -> ExecutionJob:
     job = _owned(db, ExecutionJob, job_id, workspace_id, lock=True)
     if job.status not in {"failed", "dead"}:
         raise WorkflowConflict("Only failed or dead jobs can be retried")
+    if job.job_type == ASSET_PERSIST:
+        asset = _owned(db, GeneratedAsset, (job.payload or {}).get("asset_id"), workspace_id, lock=True)
+        asset.status = "pending"
+        asset.last_error = ""
+        job.status = "queued"
+        job.max_attempts += max(1, job.max_attempts)
+        job.available_at = utcnow()
+        job.completed_at = None
+        job.last_error = ""
+        job.lease_owner = ""
+        job.lease_expires_at = None
+        _log(db, "job_retried", job, {"manual": True, "assetId": asset.id})
+        db.commit()
+        return job
     request = _owned(db, GenerationRequest, job.generation_request_id, workspace_id, lock=True)
     receipt = _owned(db, ExternalCallReceipt, request.receipt_id, workspace_id, lock=True)
     reconciliation_retry = job.job_type == RECONCILE and request.status == "unknown" and receipt.status == "unknown"
@@ -262,6 +322,32 @@ def recover_expired_leases(db: Session, *, now=None) -> dict:
     summary = {"requeued": 0, "unknown": 0, "completed": 0, "dead": 0}
     for job in jobs:
         outcome = "recovered"
+        if job.job_type == ASSET_PERSIST:
+            asset = _owned(db, GeneratedAsset, (job.payload or {}).get("asset_id"), job.workspace_id, lock=True)
+            if asset.status == "stored":
+                job.status = "succeeded"
+                job.completed_at = stamp
+                summary["completed"] += 1
+                outcome = "completed"
+            elif job.attempt_count >= job.max_attempts:
+                job.status = "dead"
+                job.last_error = "Asset persistence lease expired"
+                job.completed_at = stamp
+                asset.status = "failed"
+                asset.last_error = job.last_error
+                summary["dead"] += 1
+                outcome = "dead"
+            else:
+                job.status = "queued"
+                job.available_at = stamp + timedelta(seconds=min(300, 2 ** job.attempt_count))
+                asset.status = "pending"
+                summary["requeued"] += 1
+                outcome = "requeued"
+            job.lease_owner = ""
+            job.lease_expires_at = None
+            job.heartbeat_at = None
+            _log(db, "lease_recovered", job, {"outcome": outcome, "assetId": asset.id})
+            continue
         request = _owned(db, GenerationRequest, job.generation_request_id, job.workspace_id, lock=True)
         receipt = _owned(db, ExternalCallReceipt, request.receipt_id, job.workspace_id, lock=True)
         active_attempt = db.scalar(select(ExternalCallAttempt).where(

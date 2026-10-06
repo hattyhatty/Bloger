@@ -1339,12 +1339,14 @@ function normalizeVideoReferenceAsset(item = {}) {
 
 function normalizeVideoGenerationResult(item = {}) {
   const status = item.status || VIDEO_RESULT_STATUS.CANDIDATE;
+  const asset = item.generatedAsset || item.generated_asset || null;
   return {
     id: item.id || uid("video_result"),
     workspaceId: item.workspaceId || item.workspace_id || "default",
     planId: item.planId || item.plan_id || "",
     shotId: item.shotId || item.shot_id || "",
     promptId: item.promptId || item.prompt_id || "",
+    generationRequestId: item.generationRequestId || item.generation_request_id || "",
     planContentRevision: Math.max(1, Number(item.planContentRevision ?? item.plan_content_revision) || 1),
     storyboardRevision: Math.max(1, Number(item.storyboardRevision ?? item.storyboard_revision) || 1),
     promptRevision: Math.max(1, Number(item.promptRevision ?? item.prompt_revision) || 1),
@@ -1356,9 +1358,31 @@ function normalizeVideoGenerationResult(item = {}) {
     fileReference: item.fileReference || item.file_reference || "",
     note: item.note || "",
     status: Object.values(VIDEO_RESULT_STATUS).includes(status) ? status : VIDEO_RESULT_STATUS.CANDIDATE,
+    generatedAsset: asset ? normalizeGeneratedAsset(asset) : null,
     raw: item.raw || {},
     createdAt: item.createdAt || item.created_at || now(),
     updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || now()
+  };
+}
+
+function normalizeGeneratedAsset(item = {}) {
+  return {
+    id: item.id || "",
+    workspaceId: item.workspaceId || item.workspace_id || "default",
+    generationResultId: item.generationResultId || item.generation_result_id || "",
+    sourceProvider: item.sourceProvider || item.source_provider || "External",
+    sourceUrl: item.sourceUrl || item.source_url || "",
+    storageProvider: item.storageProvider || item.storage_provider || "local",
+    storageKey: item.storageKey || item.storage_key || "",
+    durableUrl: item.durableUrl || item.durable_url || "",
+    mimeType: item.mimeType || item.mime_type || "",
+    fileSize: Number(item.fileSize ?? item.file_size) || 0,
+    sha256: item.sha256 || "",
+    status: item.status || "pending",
+    lastError: item.lastError || item.last_error || "",
+    storedAt: item.storedAt || item.stored_at || "",
+    createdAt: item.createdAt || item.created_at || "",
+    updatedAt: item.updatedAt || item.updated_at || ""
   };
 }
 
@@ -1526,6 +1550,12 @@ class ApiClient {
   updateVideoGenerationResult(resultId, payload) { return this.request(`/api/video-results/${encodeURIComponent(resultId)}`, { method: "PUT", body: JSON.stringify(payload) }); }
   setVideoGenerationResultStatus(resultId, status, workspaceId = "default") {
     return this.request(`/api/video-results/${encodeURIComponent(resultId)}/status`, { method: "PATCH", body: JSON.stringify({ workspace_id: workspaceId, status }) });
+  }
+  getGeneratedAssetForResult(resultId, workspaceId = "default") {
+    return this.request(`/api/video-results/${encodeURIComponent(resultId)}/asset?workspace_id=${encodeURIComponent(workspaceId)}`);
+  }
+  retryGeneratedAsset(resultId, workspaceId = "default") {
+    return this.request(`/api/video-results/${encodeURIComponent(resultId)}/asset/retry?workspace_id=${encodeURIComponent(workspaceId)}`, { method: "POST" });
   }
   getVideoProviders() { return this.request("/api/video-providers"); }
   testRunwayConnection() { return this.request("/api/video-providers/runway/test", { method: "POST" }); }
@@ -8166,6 +8196,19 @@ function videoProviderById(id) {
   return (appState.videoProviderCatalog || []).find(item => String(item.id).toLowerCase() === String(id).toLowerCase());
 }
 
+function durableAssetUrl(asset) {
+  if (!asset?.durableUrl) return "";
+  if (/^https?:\/\//i.test(asset.durableUrl)) return asset.durableUrl;
+  return `${apiClient.config().baseUrl}${asset.durableUrl.startsWith("/") ? "" : "/"}${asset.durableUrl}`;
+}
+
+function formatFileSize(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
 function latestExecutionJob(state, statuses = []) {
   return [...(state?.jobs || [])].reverse().find(item => !statuses.length || statuses.includes(item.status));
 }
@@ -8177,12 +8220,13 @@ function renderShotProviderExecution(shot, prompt) {
   const runway = videoProviderById("Runway");
   const references = VideoReferenceAssetStore.getByShotId(shot.id).filter(item => item.status === "active" && /^https:\/\//i.test(item.referenceUrl || ""));
   const result = request ? VideoGenerationResultStore.getByShotId(shot.id).find(item => item.generationRequestId === request.id) : null;
+  const previewUrl = result?.generatedAsset?.status === "stored" ? durableAssetUrl(result.generatedAsset) : result?.resultUrl || "";
   const failedJob = latestExecutionJob(state, ["failed", "dead"]);
   const status = request?.status || "not started";
   const statusLabel = { submitted: "generating", polling: "generating" }[status] || status;
   return `<div class="shot-execution-panel">
     <div class="item-head"><div><div class="stage-kicker">STEP 6 · REAL PROVIDER EXECUTION</div><strong>Generation Request</strong></div><span class="pill ${status === "succeeded" ? "success" : status === "failed" || status === "unknown" ? "danger" : ""}">${escapeHtml(statusLabel)}</span></div>
-    <div class="meta">真实调用只由独立后端 Worker 执行。Runway 输出 URL 是临时交付地址；本阶段不提供永久对象存储。</div>
+    <div class="meta">真实调用只由独立后端 Worker 执行。Provider 临时结果由独立 asset.persist Job 保存到后端受控存储。</div>
     <div class="form-grid video-execution-form">
       <div><label>Provider</label><select id="execProvider_${shot.id}"><option value="Fake" ${provider === "Fake" ? "selected" : ""}>Fake · offline</option><option value="Runway" ${provider === "Runway" ? "selected" : ""}>Runway · ${runway?.configured ? "configured" : "not configured"}</option></select></div>
       <div><label>Model</label><input id="execModel_${shot.id}" value="${escapeHtml(request?.model || (provider === "Runway" ? runway?.default_model || "gen4.5" : "fake-v1"))}" /></div>
@@ -8198,7 +8242,7 @@ function renderShotProviderExecution(shot, prompt) {
       ${request && ["created", "queued", "submitted", "polling"].includes(status) ? `<button class="btn small ghost" data-cancel-generation="${request.id}:${shot.id}">Cancel</button>` : ""}
       ${status === "unknown" ? `<button class="btn small ghost" data-reconcile-generation="${request.id}:${shot.id}">Reconcile</button>` : ""}
       ${failedJob ? `<button class="btn small ghost" data-retry-generation-job="${failedJob.id}:${shot.id}">Retry</button>` : ""}
-      ${result?.resultUrl ? `<a class="btn small ghost" href="${escapeHtml(result.resultUrl)}" target="_blank" rel="noreferrer">Preview Result</a>` : ""}
+      ${previewUrl ? `<a class="btn small ghost" href="${escapeHtml(previewUrl)}" target="_blank" rel="noreferrer">Preview ${result?.generatedAsset?.status === "stored" ? "Durable Asset" : "Provider Result"}</a>` : ""}
     </div>
   </div>`;
 }
@@ -8242,11 +8286,17 @@ function renderShotAssetTracking(shot) {
 }
 
 function renderVideoGenerationResult(item) {
+  const asset = item.generatedAsset;
+  const assetLabel = { pending: "Saving…", stored: "Stored", failed: "Storage failed", archived: "Archived" }[asset?.status] || "Provider only";
+  const durableUrl = asset?.status === "stored" ? durableAssetUrl(asset) : "";
   return `<div class="asset-result-card ${item.status === VIDEO_RESULT_STATUS.SELECTED ? "selected-result" : ""}">
     <div class="item-head"><b>${escapeHtml(item.provider)}${item.model ? ` · ${escapeHtml(item.model)}` : ""}</b><span class="pill ${item.status === VIDEO_RESULT_STATUS.SELECTED ? "success" : item.status === VIDEO_RESULT_STATUS.REJECTED ? "danger" : ""}">${VIDEO_RESULT_STATUS_LABELS[item.status]}</span></div>
-    <div class="meta">${item.resultUrl ? `<a href="${escapeHtml(item.resultUrl)}" target="_blank" rel="noreferrer">打开 Result</a>` : escapeHtml(item.fileReference)}${item.note ? `<br>${escapeHtml(item.note)}` : ""}</div>
+    <div class="meta"><b>Durable asset:</b> ${escapeHtml(assetLabel)}${asset?.status === "stored" ? ` · ${escapeHtml(formatFileSize(asset.fileSize))} · ${escapeHtml(asset.mimeType)}` : ""}</div>
+    ${asset?.lastError ? `<div class="meta danger-text">${escapeHtml(asset.lastError)}</div>` : ""}
+    <div class="meta">${durableUrl ? `<a href="${escapeHtml(durableUrl)}" target="_blank" rel="noreferrer">播放 Durable Asset</a>` : ""}${durableUrl && item.resultUrl ? " · " : ""}${item.resultUrl ? `<a href="${escapeHtml(item.resultUrl)}" target="_blank" rel="noreferrer">Provider Result</a>` : escapeHtml(item.fileReference)}${item.note ? `<br>${escapeHtml(item.note)}` : ""}</div>
     <div class="meta">Plan rev ${item.planContentRevision} · Storyboard rev ${item.storyboardRevision} · Prompt rev ${item.promptRevision}</div>
     <div class="toolbar compact">
+      ${asset?.status === "failed" ? `<button class="btn small ghost" data-retry-generated-asset="${item.id}">Retry Storage</button>` : ""}
       <button class="btn small ghost" data-set-video-result-status="${item.id}:selected" ${item.status === VIDEO_RESULT_STATUS.SELECTED ? "disabled" : ""}>Select</button>
       <button class="btn small ghost" data-set-video-result-status="${item.id}:rejected" ${item.status === VIDEO_RESULT_STATUS.REJECTED ? "disabled" : ""}>Reject</button>
       <button class="btn small ghost" data-set-video-result-status="${item.id}:archived" ${item.status === VIDEO_RESULT_STATUS.ARCHIVED ? "disabled" : ""}>Archive</button>
@@ -9382,6 +9432,16 @@ document.addEventListener("click", async event => {
   if (target.dataset.addVideoResult) {
     const shotId = target.dataset.addVideoResult;
     return runVideoPlannerAction("添加 Generation Result", () => VideoPlannerService.addResult(shotId, collectVideoResultForm(shotId)));
+  }
+  if (target.dataset.retryGeneratedAsset) {
+    const resultId = target.dataset.retryGeneratedAsset;
+    return runVideoPlannerAction("重试 Durable Storage", async () => {
+      const result = VideoGenerationResultStore.getById(resultId);
+      if (!result) throw new Error("Generation Result 不存在");
+      await backendApiProvider.retryGeneratedAsset(resultId, result.workspaceId);
+      const workspace = await backendApiProvider.getVideoPlanWorkspace(result.planId, result.workspaceId);
+      VideoPlannerService.mergeWorkspace(workspace);
+    });
   }
   if (target.dataset.setVideoResultStatus) {
     const [resultId, status] = target.dataset.setVideoResultStatus.split(":");

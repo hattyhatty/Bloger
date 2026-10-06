@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     runway_api_version: str = "2024-11-06"
     runway_default_model: str = "gen4.5"
     runway_timeout_seconds: float = 30.0
+    generated_asset_storage_dir: str = "runtime/assets"
+    generated_asset_download_timeout_seconds: float = 60.0
+    generated_asset_max_bytes: int = 250_000_000
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

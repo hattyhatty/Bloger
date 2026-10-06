@@ -85,7 +85,10 @@ def persistence():
         assert client.get(f"/api/video-shots/{shot['id']}/results").json()[0]["generation_request_id"] == request["id"]
         queue_state = client.get(f"/api/execution/generation-requests/{queue_request['id']}/execution-state").json()
         assert queue_state["request"]["status"] == "succeeded"
-        assert len(queue_state["jobs"]) == 2
+        generation_jobs = [job for job in queue_state["jobs"] if job["job_type"].startswith("generation.")]
+        asset_jobs = [job for job in queue_state["jobs"] if job["job_type"] == "asset.persist"]
+        assert len(generation_jobs) == 2 and all(job["status"] == "succeeded" for job in generation_jobs)
+        assert len(asset_jobs) == 1 and asset_jobs[0]["status"] == "queued"
         queue_results = client.get(f"/api/video-shots/{queue_shot['id']}/results").json()
         assert queue_results[0]["status"] == "candidate"
     engine.dispose()

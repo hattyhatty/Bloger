@@ -13,6 +13,7 @@ from .config import get_settings
 from .database import get_db
 from .execution_routes import router as execution_router
 from .provider_routes import router as provider_router
+from .asset_routes import router as asset_router
 from .models import (
     ActivityLog,
     AnalyticsRecord,
@@ -155,9 +156,10 @@ from .video_planner import (
 
 
 settings = get_settings()
-app = FastAPI(title="AI Content OS Backend", version="0.8.5")
+app = FastAPI(title="AI Content OS Backend", version="0.8.6")
 app.include_router(execution_router)
 app.include_router(provider_router)
+app.include_router(asset_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins or ["*"],

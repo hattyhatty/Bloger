@@ -507,6 +507,27 @@ class VideoGenerationResultStatusIn(BaseModel):
     status: VideoResultStatus
 
 
+class GeneratedAssetOut(BaseModel):
+    id: str
+    workspace_id: str = "default"
+    generation_result_id: str
+    source_provider: str = "External"
+    source_url: str = ""
+    storage_provider: str = "local"
+    storage_key: str = ""
+    durable_url: str = ""
+    mime_type: str = ""
+    file_size: int = 0
+    sha256: str = ""
+    status: Literal["pending", "stored", "failed", "archived"] = "pending"
+    last_error: str = ""
+    stored_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class VideoGenerationResultOut(BaseModel):
     id: str
     workspace_id: str = "default"
@@ -526,6 +547,7 @@ class VideoGenerationResultOut(BaseModel):
     note: str = ""
     status: VideoResultStatus = "candidate"
     raw: JsonDict = Field(default_factory=dict)
+    generated_asset: GeneratedAssetOut | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
